@@ -91,7 +91,7 @@ case "${1:-status}" in
       printf '%-32s RUNNING   fixture\n' prowlarr qbittorrent worker
       exit 3
     elif [[ "${MIGRATION_TEST_STATUS_ERROR:-false}" == true ]]; then
-      printf 'Stack native chưa chạy\n'
+      printf 'fixture status transport error\n'
       exit 6
     else
       printf '%-32s RUNNING   fixture\n' api prowlarr qbittorrent worker

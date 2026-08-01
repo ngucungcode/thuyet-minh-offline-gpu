@@ -39,6 +39,18 @@ if [[ "${EUID}" -eq 0 ]] && id nobody >/dev/null 2>&1; then
     || fail "Service user không đọc được thư mục con của mình"
 fi
 
+preserved_root="${TEST_ROOT}/preserved"
+mkdir -m 0750 "${preserved_root}"
+if [[ "${EUID}" -eq 0 ]] && id nobody >/dev/null 2>&1; then
+  chown nobody:"$(id -gn nobody)" "${preserved_root}"
+fi
+preserved_identity="$(stat -c '%d:%i:%u:%g:%a' -- "${preserved_root}")"
+[[ "$("${PREPARER}" "${preserved_root}")" == existing ]] \
+  || fail "Helper không nhận diện data root hiện hữu mode 0750"
+[[ "$(stat -c '%d:%i:%u:%g:%a' -- "${preserved_root}")" \
+  == "${preserved_identity}" ]] \
+  || fail "Helper đổi owner hoặc mode data root hiện hữu"
+
 created_root="${TEST_ROOT}/created"
 [[ "$("${PREPARER}" "${created_root}")" == created ]] \
   || fail "Helper không báo data root mới"

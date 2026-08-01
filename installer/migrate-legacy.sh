@@ -681,6 +681,9 @@ migrate_legacy_install() {
     migration_error "Không tạo được fingerprint source mới"
     return 1
   }
+  # The installer intentionally refuses to rebuild a persistent runtime after
+  # the source switch because rollback cannot undo mutations inside that venv.
+  # Reject an incompatible runtime here, before the journal or stack changes.
   if [[ "${legacy_fingerprint}" == "${staged_fingerprint}" \
     && -x "${legacy_root}/.venv-native/bin/python" ]]; then
     MIGRATED_RUNTIME_REUSABLE=true
@@ -709,7 +712,7 @@ migrate_legacy_install() {
         migration_error "Supervisor cũ đang chạy nhưng stack không đủ bốn service khỏe"
         return 1
       }
-    elif [[ "${native_status_output}" == *"Stack native chưa chạy"* ]]; then
+    elif [[ "${native_status}" -eq 1 ]]; then
       if migration_native_supervisor_present "${legacy_root}" "${effective_data_dir}"; then
         migration_error "Supervisor còn tồn tại dù status báo stack chưa chạy"
         return 1
@@ -719,7 +722,7 @@ migrate_legacy_install() {
         stack_mode="systemd-stopped"
       fi
     else
-      migration_error "Supervisor cũ đang chạy nhưng stack không đủ bốn service khỏe"
+      migration_error "Không đọc được trạng thái native stack cũ (exit ${native_status})"
       return 1
     fi
   fi
