@@ -14,16 +14,16 @@ khi sửa hệ thống, tự chọn model theo VRAM, khóa WebUI vào loopback, 
 chạy test/acceptance và cài lệnh `dub` toàn cục.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/main/install.sh \
-  | sudo bash -s -- --profile auto --start --yes
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.0/install.sh \
+  | sudo bash -s -- --ref v0.1.0 --profile auto --start --yes
 ```
 
 RTX 3090 24 GiB tự chọn profile `maximum` gồm Faster-Whisper Large-v3-Turbo,
 Gemma 4 31B Q4, TIGER-DnR và VieNeu v2. Có thể xem trước hoàn toàn không ghi:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/main/install.sh \
-  | sudo bash -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.0/install.sh \
+  | sudo bash -s -- --ref v0.1.0 --dry-run
 ```
 
 Sau khi cài:
