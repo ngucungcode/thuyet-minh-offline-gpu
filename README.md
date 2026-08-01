@@ -14,16 +14,16 @@ khi sửa hệ thống, tự chọn model theo VRAM, khóa WebUI vào loopback, 
 chạy test/acceptance và cài lệnh `dub` toàn cục.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.0/install.sh \
-  | sudo bash -s -- --ref v0.1.0 --profile auto --start --yes
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.1/install.sh \
+  | sudo bash -s -- --ref v0.1.1 --profile auto --start --yes
 ```
 
 RTX 3090 24 GiB tự chọn profile `maximum` gồm Faster-Whisper Large-v3-Turbo,
 Gemma 4 31B Q4, TIGER-DnR và VieNeu v2. Có thể xem trước hoàn toàn không ghi:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.0/install.sh \
-  | sudo bash -s -- --ref v0.1.0 --dry-run
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.1/install.sh \
+  | sudo bash -s -- --ref v0.1.1 --dry-run
 ```
 
 Sau khi cài:
@@ -41,6 +41,25 @@ dub submit --release-id RELEASE_ID --i-have-rights --subtitle-mode asr \
 data volume, Git ref, autostart và cổng nghiệm thu. Trình cài idempotent: không
 reset worktree có thay đổi, không ghi đè `.env.native`, không xoay secret sai
 ngữ cảnh và bỏ qua bootstrap nặng khi fingerprint runtime không đổi.
+
+Deployment cũ được chép lên máy mà không có `.git` cần nâng cấp một lần bằng
+`--migrate-existing`. Trình cài clone source mới vào staging trước, dừng stack
+sạch, giữ nguyên `.env.native`, `var` và `.venv-native`, rồi lưu source cũ ở một
+đường dẫn backup được in ra; không tự xóa backup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.1/install.sh \
+  | sudo bash -s -- --ref v0.1.1 --migrate-existing \
+      --profile auto --start --yes
+```
+
+Chạy riêng `sudo bash -s -- ...` không tải installer và vì vậy không thực hiện
+gì; luôn giữ phần `curl ... |` ở đầu lệnh.
+
+Trong lúc đổi source, installer ghi journal atomic cạnh thư mục cài và rollback
+khi nhận `INT`/`TERM` hoặc khi bước sau lỗi. Nếu máy mất điện đúng lúc rename,
+lần chạy sau sẽ dừng fail-closed khi thấy journal, thay vì coi source thiếu dữ
+liệu là một bản cài hợp lệ.
 
 ## Trạng thái
 

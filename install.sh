@@ -2,18 +2,23 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.1.0"
+INSTALLER_VERSION="0.1.1"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
 SOURCE_REF="main"
 INSTALL_DIR=""
 DATA_DIR=""
+DATA_DIR_EXPLICIT=false
 MODEL_PROFILE="auto"
 START_STACK=true
 AUTOSTART_MODE="auto"
 ACCEPTANCE_MODE="basic"
 ASSUME_YES=false
 DRY_RUN=false
+MIGRATE_EXISTING=false
+MIGRATED_RUNTIME_REUSABLE=false
+MIGRATION_BACKUP_PATH=""
+MIGRATION_ACTIVE=false
 
 # BASH_SOURCE is absent when the installer is streamed through `bash -s`.
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
@@ -48,6 +53,7 @@ Tùy chọn:
   --start | --no-start       Khởi động stack sau cài; mặc định --start
   --autostart MODE           auto, systemd, provider hoặc none
   --acceptance MODE          basic, full hoặc none; mặc định basic
+  --migrate-existing         Nâng cấp deployment cũ không có Git; giữ dữ liệu và tạo backup
   --yes                      Xác nhận tải model và chạy không tương tác
   --dry-run                  Chỉ kiểm tra và in kế hoạch
   --help                     Hiển thị trợ giúp
@@ -74,6 +80,7 @@ while (($#)); do
     --data-dir)
       [[ $# -ge 2 ]] || die "--data-dir cần một đường dẫn"
       DATA_DIR="$2"
+      DATA_DIR_EXPLICIT=true
       shift 2
       ;;
     --profile)
@@ -98,6 +105,10 @@ while (($#)); do
       [[ $# -ge 2 ]] || die "--acceptance cần một giá trị"
       ACCEPTANCE_MODE="$2"
       shift 2
+      ;;
+    --migrate-existing)
+      MIGRATE_EXISTING=true
+      shift
       ;;
     --yes)
       ASSUME_YES=true
@@ -150,16 +161,28 @@ fi
 if [[ -n "${SCRIPT_ROOT}" ]]; then
   INSTALL_DIR="${SCRIPT_ROOT}"
 fi
+if [[ "${MIGRATE_EXISTING}" == true && -n "${SCRIPT_ROOT}" ]]; then
+  die "--migrate-existing chỉ dùng với installer chạy qua curl; không chạy từ source đang hoạt động"
+fi
 if [[ -z "${DATA_DIR}" ]]; then
   DATA_DIR="${INSTALL_DIR}/var"
 fi
 
 for selected_path in "${INSTALL_DIR}" "${DATA_DIR}"; do
   [[ "${selected_path}" == /* ]] || die "Đường dẫn phải là tuyệt đối: ${selected_path}"
-  [[ "${selected_path}" != "/" ]] || die "Không được dùng thư mục gốc /"
   [[ "${selected_path}" != *$'\n'* && "${selected_path}" != *$'\r'* ]] \
     || die "Đường dẫn chứa ký tự xuống dòng"
 done
+INSTALL_DIR="$(readlink -m -- "${INSTALL_DIR}")"
+DATA_DIR="$(readlink -m -- "${DATA_DIR}")"
+for selected_path in "${INSTALL_DIR}" "${DATA_DIR}"; do
+  [[ "${selected_path}" != "/" ]] || die "Không được dùng thư mục gốc /"
+done
+
+pending_migration_journal="${INSTALL_DIR}.migration-state.json"
+if [[ -e "${pending_migration_journal}" || -L "${pending_migration_journal}" ]]; then
+  die "Phát hiện migration dang dở tại ${pending_migration_journal}. Installer dừng fail-closed; không xóa journal hoặc source/backup trước khi phục hồi"
+fi
 
 if [[ ! -r /etc/os-release ]]; then
   die "Không đọc được /etc/os-release"
@@ -262,9 +285,21 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
     apt-get update
     apt-get install -y ca-certificates curl git
   fi
+  is_git_worktree() {
+    git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+  }
+  fetch_ref_into() {
+    local destination="$1"
+    git init -q -- "${destination}" || return
+    git -C "${destination}" remote add origin "${REPOSITORY_URL}" || return
+    git -C "${destination}" fetch --depth 1 origin "${SOURCE_REF}" || return
+    git -C "${destination}" checkout -q --detach FETCH_HEAD || return
+  }
+
   if [[ ! -e "${INSTALL_DIR}" ]]; then
-    git clone --depth 1 --branch "${SOURCE_REF}" -- "${REPOSITORY_URL}" "${INSTALL_DIR}"
-  elif [[ -d "${INSTALL_DIR}/.git" ]]; then
+    fetch_ref_into "${INSTALL_DIR}" \
+      || die "Không thể lấy source ${REPOSITORY_URL}@${SOURCE_REF}"
+  elif is_git_worktree "${INSTALL_DIR}"; then
     current_origin="$(git -C "${INSTALL_DIR}" remote get-url origin)"
     normalize_url() { printf '%s' "$1" | sed -E 's#\.git$##'; }
     [[ "$(normalize_url "${current_origin}")" == "$(normalize_url "${REPOSITORY_URL}")" ]] \
@@ -274,9 +309,67 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
     git -C "${INSTALL_DIR}" fetch --depth 1 origin "${SOURCE_REF}"
     git -C "${INSTALL_DIR}" checkout --detach FETCH_HEAD
   elif [[ -n "$(find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-    die "Thư mục cài không rỗng và không phải Git repository"
+    if [[ "${MIGRATE_EXISTING}" != true ]]; then
+      die "Thư mục cài là deployment cũ không có Git. Chạy lại với --migrate-existing để giữ .env.native, model và dữ liệu trong một bản nâng cấp có backup"
+    fi
+
+    install_parent="$(dirname -- "${INSTALL_DIR}")"
+    install_name="$(basename -- "${INSTALL_DIR}")"
+    staging_dir="$(mktemp -d "${install_parent}/.${install_name}.incoming.XXXXXXXX")"
+    chmod 0700 "${staging_dir}"
+    if ! fetch_ref_into "${staging_dir}"; then
+      rm -rf -- "${staging_dir}"
+      die "Không thể lấy source mới; deployment cũ chưa bị thay đổi"
+    fi
+    migration_helper="${staging_dir}/installer/migrate-legacy.sh"
+    if [[ ! -f "${migration_helper}" || -L "${migration_helper}" ]] \
+      || ! git -C "${staging_dir}" diff --quiet \
+      || [[ -n "$(git -C "${staging_dir}" status --porcelain)" ]] \
+      || ! git -C "${staging_dir}" fsck --no-dangling >/dev/null \
+      || ! git -C "${staging_dir}" ls-files --error-unmatch \
+        installer/migrate-legacy.sh >/dev/null; then
+      rm -rf -- "${staging_dir}"
+      die "Source mới không có bộ nâng cấp legacy hợp lệ; deployment cũ chưa bị thay đổi"
+    fi
+    # shellcheck disable=SC1090
+    source "${migration_helper}"
+    if ! migrate_legacy_install \
+      "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" "${DATA_DIR_EXPLICIT}"; then
+      if [[ -d "${staging_dir}" ]]; then
+        rm -rf -- "${staging_dir}"
+      fi
+      die "Nâng cấp deployment cũ thất bại; xem thông báo rollback ở trên"
+    fi
+    DATA_DIR="${MIGRATION_EFFECTIVE_DATA_DIR}"
+    MIGRATION_ACTIVE=true
+    installer_exit_handler() {
+      local installer_status=$?
+      trap - EXIT INT TERM HUP
+      if [[ "${MIGRATION_ACTIVE}" == true ]]; then
+        MIGRATION_ACTIVE=false
+        MIGRATION_SIGNAL_ARMED=false
+        log "Installer lỗi sau khi đổi source; đang rollback source, dữ liệu và stack cũ"
+        if ! migration_rollback_switch \
+          "${INSTALL_DIR}" "${MIGRATION_BACKUP_PATH}" \
+          "${MIGRATION_FAILED_SOURCE_PATH}" "${MIGRATION_OLD_STACK_MODE}" \
+          true "${MIGRATION_MOVED_ITEMS[@]}"; then
+          installer_status=1
+        else
+          migration_clear_journal || installer_status=1
+        fi
+      fi
+      exit "${installer_status}"
+    }
+    trap installer_exit_handler EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    if [[ "${MIGRATED_RUNTIME_REUSABLE}" != true ]]; then
+      die "Runtime legacy khác source mới; đã từ chối bootstrap trong transaction migration"
+    fi
+    log "Đã giữ nguyên dữ liệu; backup source cũ: ${MIGRATION_BACKUP_PATH}"
   else
-    git clone --depth 1 --branch "${SOURCE_REF}" -- "${REPOSITORY_URL}" "${INSTALL_DIR}"
+    fetch_ref_into "${INSTALL_DIR}" \
+      || die "Không thể lấy source ${REPOSITORY_URL}@${SOURCE_REF}"
   fi
 fi
 
@@ -293,6 +386,12 @@ if [[ ! -e "${ENV_FILE}" ]]; then
   rm -f -- "${temporary_env}"
 else
   configured_data="$(sed -n 's/^DUB_NATIVE_ROOT=//p' "${ENV_FILE}" | tail -n 1)"
+  if [[ -n "${configured_data}" && "${DATA_DIR_EXPLICIT}" != true \
+    && -n "${MIGRATION_BACKUP_PATH}" ]]; then
+    [[ "${configured_data}" == /* ]] \
+      || die "DUB_NATIVE_ROOT trong .env.native phải là đường dẫn tuyệt đối"
+    DATA_DIR="${configured_data}"
+  fi
   if [[ -n "${configured_data}" && "${configured_data}" != "${DATA_DIR}" ]]; then
     die ".env.native đã dùng DUB_NATIVE_ROOT=${configured_data}; không tự ghi đè"
   fi
@@ -303,19 +402,32 @@ fi
 source "${PROJECT_ROOT}/scripts/native-common.sh"
 install -d -m 0750 "${DUB_NATIVE_ROOT}"
 state_file="${DUB_NATIVE_ROOT}/install-state.json"
-fingerprint="$({
-  sha256sum \
-    "${PROJECT_ROOT}/pyproject.toml" \
-    "${PROJECT_ROOT}/config/models.lock.json" \
-    "${PROJECT_ROOT}/native/components.lock.json" \
-    "${PROJECT_ROOT}/native/supervisord.conf"
-  find "${PROJECT_ROOT}/scripts" "${PROJECT_ROOT}/native" -maxdepth 1 -type f -print0 \
-    | sort -z \
-    | xargs -0 sha256sum
-} | sha256sum | awk '{print $1}')"
+fingerprint="$(
+  cd -- "${PROJECT_ROOT}"
+  {
+    sha256sum \
+      pyproject.toml \
+      .env.native.example \
+      config/models.lock.json \
+      scripts/native-bootstrap.sh \
+      scripts/native-common.sh \
+      scripts/install-llama-cpp.sh \
+      scripts/vieneu-offline.py
+    find native -maxdepth 1 -type f -print0 \
+      | sort -z \
+      | xargs -0 sha256sum
+  } | sha256sum | awk '{print $1}'
+)"
 
 bootstrap_required=true
-if [[ -x "${DUB_VENV_DIR}/bin/python" && -r "${state_file}" ]] \
+if [[ "${MIGRATED_RUNTIME_REUSABLE}" == true && -x "${DUB_VENV_DIR}/bin/python" ]]; then
+  if "${DUB_VENV_DIR}/bin/python" -c 'import dub_server.cli' >/dev/null 2>&1; then
+    bootstrap_required=false
+    log "Runtime legacy khớp source mới; bỏ qua bootstrap nặng"
+  elif [[ "${MIGRATION_ACTIVE}" == true ]]; then
+    die "Runtime legacy không import được CLI mới; không bootstrap trong transaction migration"
+  fi
+elif [[ -x "${DUB_VENV_DIR}/bin/python" && -r "${state_file}" ]] \
   && command -v jq >/dev/null \
   && [[ "$(jq -r '.bootstrap_fingerprint // ""' "${state_file}")" == "${fingerprint}" ]]; then
   if "${PROJECT_ROOT}/scripts/native-preflight.sh" >/dev/null 2>&1; then
@@ -451,13 +563,23 @@ jq -n \
   --arg profile "${MODEL_PROFILE}" \
   --arg fingerprint "${fingerprint}" \
   --arg installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg migration_backup "${MIGRATION_BACKUP_PATH}" \
   --argjson models "${models_json}" \
   '{schema_version:1, installer_version:$installer_version, commit:$commit,
     profile:$profile, models:$models, bootstrap_fingerprint:$fingerprint,
-    installed_at:$installed_at}' >"${temporary_state}"
+    installed_at:$installed_at,
+    migration_backup:(if $migration_backup == "" then null else $migration_backup end)}' >"${temporary_state}"
 install -m 0640 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \
   "${temporary_state}" "${state_file}"
 rm -f -- "${temporary_state}"
+
+if [[ "${MIGRATION_ACTIVE}" == true ]]; then
+  migration_write_journal committed "${MIGRATION_MOVED_ITEMS[@]}"
+  migration_clear_journal
+  MIGRATION_ACTIVE=false
+  MIGRATION_SIGNAL_ARMED=false
+  trap - EXIT INT TERM HUP
+fi
 
 log "Cài đặt hoàn tất"
 log "Kiểm tra: dub doctor && dub stack status"
