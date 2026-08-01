@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.46.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thuyet-minh-offline-gpu"
+version = "0.1.0"
+description = "Local NVIDIA GPU pipeline for legally acquired Vietnamese video dubbing"
+readme = "README.md"
+requires-python = ">=3.11.0rc1,<3.13"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+dependencies = [
+  "fastapi==0.139.2",
+  "httpx==0.28.1",
+  "pydantic-settings==2.14.2",
+  "typer==0.27.0",
+  "uvicorn[standard]==0.51.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ngucungcode/thuyet-minh-offline-gpu"
+Repository = "https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
+Issues = "https://github.com/ngucungcode/thuyet-minh-offline-gpu/issues"
+
+[project.optional-dependencies]
+gpu = [
+  "ctranslate2==4.8.1",
+  "faster-whisper==1.2.1",
+  "huggingface-hub==0.36.0",
+  "numpy==2.3.4",
+  "onnxruntime==1.24.4",
+  "piper-tts==1.5.0",
+  "safetensors==0.7.0",
+  "sea-g2p==0.7.20",
+  "soundfile==0.13.1",
+  "soxr==1.0.0",
+  "torch==2.8.0",
+  "transformers==4.57.6",
+]
+managed-gpu = [
+  "ctranslate2==4.8.1",
+  "faster-whisper==1.2.1",
+  "huggingface-hub==0.36.0",
+  "numpy==2.3.4",
+  "onnxruntime==1.24.4",
+  "piper-tts==1.5.0",
+  "safetensors==0.7.0",
+  "sea-g2p==0.7.20",
+  "soundfile==0.13.1",
+  "soxr==1.0.0",
+  "transformers==4.57.6",
+]
+native = [
+  "supervisor==4.3.0",
+]
+test = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+]
+
+[project.scripts]
+dub = "dub_server.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,649 @@
+"""Offline, loudness-aware dubbing mix and atomic MP4 export.
+
+The exporter deliberately maps only the first video stream from the source
+file.  Original source audio is never mapped.  The replacement audio is made
+from a dialogue-reduced accompaniment stem and the Vietnamese narration.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from enum import StrEnum
+from pathlib import Path
+from typing import Protocol
+
+
+class MediaExportErrorCode(StrEnum):
+    SOURCE_VIDEO_MISSING = "source_video_missing"
+    ACCOMPANIMENT_MISSING = "accompaniment_missing"
+    NARRATION_MISSING = "narration_missing"
+    EXPORT_CANCELLED = "media_export_cancelled"
+    FFMPEG_UNAVAILABLE = "ffmpeg_unavailable"
+    EXPORT_FAILED = "media_export_failed"
+    FFPROBE_UNAVAILABLE = "ffprobe_unavailable"
+    INVALID_OUTPUT = "invalid_media_output"
+    TRACK_LAYOUT_INVALID = "output_track_layout_invalid"
+    AUDIO_CODEC_INVALID = "output_audio_codec_invalid"
+    DURATION_MISMATCH = "output_duration_mismatch"
+    SYNC_MISMATCH = "output_sync_mismatch"
+    PUBLISH_FAILED = "media_publish_failed"
+
+
+class MediaExportError(RuntimeError):
+    """Safe, serializable export failure suitable for a job checkpoint."""
+
+    def __init__(
+        self,
+        code: MediaExportErrorCode,
+        message_vi: str,
+        *,
+        retryable: bool,
+    ) -> None:
+        super().__init__(message_vi)
+        self.code = code
+        self.message_vi = message_vi
+        self.retryable = retryable
+
+
+@dataclass(frozen=True, slots=True)
+class MixSettings:
+    """Loudness and moderate-ducking policy for the final stereo mix."""
+
+    narration_lufs: float = -16.0
+    accompaniment_lufs: float = -24.0
+    true_peak_db: float = -1.5
+    ducking_threshold: float = 0.04
+    ducking_ratio: float = 3.0
+    ducking_attack_ms: int = 20
+    ducking_release_ms: int = 300
+    audio_bitrate: str = "192k"
+
+    def __post_init__(self) -> None:
+        if not -70.0 <= self.narration_lufs <= -5.0:
+            raise ValueError("Mức âm lượng lời thuyết minh không hợp lệ")
+        if not -70.0 <= self.accompaniment_lufs <= -5.0:
+            raise ValueError("Mức âm lượng nhạc nền không hợp lệ")
+        if not -9.0 <= self.true_peak_db <= 0.0:
+            raise ValueError("Giới hạn đỉnh âm thanh không hợp lệ")
+        if not 0.000001 <= self.ducking_threshold <= 1.0:
+            raise ValueError("Ngưỡng ducking không hợp lệ")
+        if not 1.0 <= self.ducking_ratio <= 20.0:
+            raise ValueError("Tỷ lệ ducking không hợp lệ")
+        if not 0 <= self.ducking_attack_ms <= 2_000:
+            raise ValueError("Thời gian attack của ducking không hợp lệ")
+        if not 1 <= self.ducking_release_ms <= 9_000:
+            raise ValueError("Thời gian release của ducking không hợp lệ")
+        if not self.audio_bitrate or any(char.isspace() for char in self.audio_bitrate):
+            raise ValueError("Bitrate AAC không hợp lệ")
+
+
+@dataclass(frozen=True, slots=True)
+class ExportProgress:
+    processed_us: int
+    duration_us: int
+    fraction: float
+
+
+@dataclass(frozen=True, slots=True)
+class ExportedMedia:
+    path: Path
+    duration_us: int
+    video_start_us: int
+    audio_start_us: int
+    audio_codec: str
+    size_bytes: int
+
+
+class CancellationToken(Protocol):
+    def is_cancelled(self) -> bool: ...
+
+
+Cancellation = CancellationToken | Callable[[], bool]
+ProgressCallback = Callable[[ExportProgress], None]
+CommandRunner = Callable[..., Awaitable[subprocess.CompletedProcess[str]]]
+
+
+async def _default_command_runner(
+    command: Sequence[str],
+    *,
+    cancellation: Cancellation | None = None,
+    on_progress: ProgressCallback | None = None,
+    expected_duration_us: int | None = None,
+    timeout_seconds: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one shell-free command and terminate it promptly on cancellation."""
+
+    process: asyncio.subprocess.Process | None = None
+    stderr_task: asyncio.Task[bytes] | None = None
+    stdout_chunks: list[bytes] = []
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        assert process.stderr is not None
+        stderr_task = asyncio.create_task(process.stderr.read())
+
+        async def consume_stdout() -> None:
+            while True:
+                if _is_cancelled(cancellation):
+                    raise MediaExportError(
+                        MediaExportErrorCode.EXPORT_CANCELLED,
+                        "Đã hủy xuất video thuyết minh",
+                        retryable=True,
+                    )
+                try:
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=0.1)
+                except TimeoutError:
+                    continue
+                if not line:
+                    break
+                stdout_chunks.append(line)
+                _report_ffmpeg_progress(line, expected_duration_us, on_progress)
+
+        if timeout_seconds is None:
+            await consume_stdout()
+            returncode = await process.wait()
+        else:
+            async with asyncio.timeout(timeout_seconds):
+                await consume_stdout()
+                returncode = await process.wait()
+        stderr = await stderr_task
+        return subprocess.CompletedProcess(
+            list(command),
+            returncode,
+            b"".join(stdout_chunks).decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            await _stop_process(process)
+        if stderr_task is not None:
+            stderr_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stderr_task
+        raise
+    except MediaExportError:
+        if process is not None and process.returncode is None:
+            await _stop_process(process)
+        if stderr_task is not None:
+            stderr_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stderr_task
+        raise
+    except TimeoutError as error:
+        if process is not None and process.returncode is None:
+            await _stop_process(process)
+        if stderr_task is not None:
+            stderr_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stderr_task
+        raise MediaExportError(
+            MediaExportErrorCode.EXPORT_FAILED,
+            "Xuất video vượt quá thời gian cho phép",
+            retryable=True,
+        ) from error
+    except OSError as error:
+        raise MediaExportError(
+            MediaExportErrorCode.FFMPEG_UNAVAILABLE,
+            "Không thể khởi động FFmpeg/ffprobe",
+            retryable=False,
+        ) from error
+
+
+async def _stop_process(process: asyncio.subprocess.Process) -> None:
+    with suppress(ProcessLookupError):
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1.0)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            process.kill()
+        with suppress(Exception):
+            await process.wait()
+
+
+def _report_ffmpeg_progress(
+    raw_line: bytes,
+    expected_duration_us: int | None,
+    callback: ProgressCallback | None,
+) -> None:
+    if callback is None or expected_duration_us is None or expected_duration_us <= 0:
+        return
+    try:
+        key, value = raw_line.decode("ascii", errors="ignore").strip().split("=", 1)
+    except ValueError:
+        return
+    if key not in {"out_time_us", "out_time_ms"}:
+        return
+    try:
+        processed_us = max(0, min(int(value), expected_duration_us))
+    except ValueError:
+        return
+    _emit_progress(callback, processed_us, expected_duration_us)
+
+
+class FfmpegAudioMixExporter:
+    """Mix an accompaniment stem with narration and replace all source audio."""
+
+    def __init__(
+        self,
+        *,
+        ffmpeg_binary: str = "ffmpeg",
+        ffprobe_binary: str = "ffprobe",
+        runner: CommandRunner | None = None,
+        settings: MixSettings | None = None,
+        duration_tolerance_us: int = 100_000,
+        sync_tolerance_us: int = 100_000,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        if duration_tolerance_us < 0 or sync_tolerance_us < 0:
+            raise ValueError("Dung sai thời lượng/đồng bộ không được âm")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError("Thời gian giới hạn phải lớn hơn 0")
+        self._ffmpeg = ffmpeg_binary
+        self._ffprobe = ffprobe_binary
+        self._runner = runner or _default_command_runner
+        self._settings = settings or MixSettings()
+        self._duration_tolerance_us = duration_tolerance_us
+        self._sync_tolerance_us = sync_tolerance_us
+        self._timeout_seconds = timeout_seconds
+
+    async def export(
+        self,
+        source_video: Path,
+        accompaniment_audio: Path,
+        narration_audio: Path,
+        output_path: Path,
+        *,
+        expected_duration_us: int,
+        cancellation: Cancellation | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> ExportedMedia:
+        if expected_duration_us <= 0:
+            raise ValueError("Thời lượng video phải lớn hơn 0")
+        if output_path.suffix.lower() != ".mp4":
+            raise ValueError("File đầu ra phải có phần mở rộng .mp4")
+
+        source = _require_file(
+            source_video,
+            MediaExportErrorCode.SOURCE_VIDEO_MISSING,
+            "Không tìm thấy video nguồn để xuất",
+        )
+        accompaniment = _require_file(
+            accompaniment_audio,
+            MediaExportErrorCode.ACCOMPANIMENT_MISSING,
+            "Không tìm thấy phần âm thanh nền đã tách lời diễn viên",
+        )
+        narration = _require_file(
+            narration_audio,
+            MediaExportErrorCode.NARRATION_MISSING,
+            "Không tìm thấy âm thanh thuyết minh",
+        )
+        destination = output_path.resolve(strict=False)
+        if destination in {source, accompaniment, narration}:
+            raise ValueError("File đầu ra không được trùng với file đầu vào")
+        temporary = destination.with_name(f".{destination.stem}.part{destination.suffix}")
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary.unlink(missing_ok=True)
+        except OSError as error:
+            raise MediaExportError(
+                MediaExportErrorCode.PUBLISH_FAILED,
+                "Không thể chuẩn bị nơi lưu video thuyết minh",
+                retryable=True,
+            ) from error
+
+        try:
+            self._check_cancelled(cancellation)
+            command = self._ffmpeg_command(
+                source,
+                accompaniment,
+                narration,
+                temporary,
+                expected_duration_us,
+            )
+            result = await self._runner(
+                command,
+                cancellation=cancellation,
+                on_progress=on_progress,
+                expected_duration_us=expected_duration_us,
+                timeout_seconds=self._timeout_seconds,
+            )
+            self._check_cancelled(cancellation)
+            if result.returncode != 0:
+                raise MediaExportError(
+                    MediaExportErrorCode.EXPORT_FAILED,
+                    _ffmpeg_failure_message(result.stderr),
+                    retryable=True,
+                )
+            if not temporary.is_file() or temporary.stat().st_size <= 0:
+                raise MediaExportError(
+                    MediaExportErrorCode.INVALID_OUTPUT,
+                    "FFmpeg không tạo được file video đầu ra hợp lệ",
+                    retryable=True,
+                )
+
+            verified = await self._verify(temporary, expected_duration_us, cancellation)
+            self._check_cancelled(cancellation)
+            try:
+                os.replace(temporary, destination)
+            except OSError as error:
+                raise MediaExportError(
+                    MediaExportErrorCode.PUBLISH_FAILED,
+                    "Không thể công bố file video thuyết minh",
+                    retryable=True,
+                ) from error
+            _emit_progress(on_progress, expected_duration_us, expected_duration_us)
+            return ExportedMedia(
+                path=destination,
+                duration_us=verified.duration_us,
+                video_start_us=verified.video_start_us,
+                audio_start_us=verified.audio_start_us,
+                audio_codec=verified.audio_codec,
+                size_bytes=destination.stat().st_size,
+            )
+        except asyncio.CancelledError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except MediaExportError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            raise MediaExportError(
+                MediaExportErrorCode.EXPORT_FAILED,
+                "Không thể đọc hoặc ghi file trong khi xuất video",
+                retryable=True,
+            ) from error
+
+    def _ffmpeg_command(
+        self,
+        source: Path,
+        accompaniment: Path,
+        narration: Path,
+        temporary: Path,
+        expected_duration_us: int,
+    ) -> tuple[str, ...]:
+        duration = _seconds_text(expected_duration_us)
+        settings = self._settings
+        limiter = 10.0 ** (settings.true_peak_db / 20.0)
+        graph = (
+            "[1:a:0]aresample=48000:async=1:first_pts=0,"
+            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            f"loudnorm=I={settings.accompaniment_lufs:.1f}:LRA=11.0:TP=-2.0,"
+            "aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:"
+            "channel_layouts=stereo[bed];"
+            "[2:a:0]aresample=48000:async=1:first_pts=0,"
+            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            f"loudnorm=I={settings.narration_lufs:.1f}:LRA=7.0:TP={settings.true_peak_db:.1f},"
+            "aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:"
+            "channel_layouts=stereo,"
+            "asplit=2[narr_side][narr_mix];"
+            f"[bed][narr_side]sidechaincompress=threshold={settings.ducking_threshold:.6f}:"
+            f"ratio={settings.ducking_ratio:.2f}:attack={settings.ducking_attack_ms}:"
+            f"release={settings.ducking_release_ms}:makeup=1[ducked];"
+            "[ducked][narr_mix]amix=inputs=2:duration=longest:"
+            f"dropout_transition=0:normalize=0,apad,atrim=duration={duration},"
+            f"alimiter=limit={limiter:.6f}:attack=5:release=50[mixed]"
+        )
+        return (
+            self._ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+            os.fspath(source),
+            "-i",
+            os.fspath(accompaniment),
+            "-i",
+            os.fspath(narration),
+            "-filter_complex",
+            graph,
+            "-map",
+            "0:v:0",
+            "-map",
+            "[mixed]",
+            "-map_metadata",
+            "0",
+            "-map_chapters",
+            "0",
+            "-sn",
+            "-dn",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            settings.audio_bitrate,
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            os.fspath(temporary),
+        )
+
+    async def _verify(
+        self,
+        temporary: Path,
+        expected_duration_us: int,
+        cancellation: Cancellation | None,
+    ) -> ExportedMedia:
+        command = (
+            self._ffprobe,
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-show_entries",
+            "format=duration:stream=index,codec_type,codec_name,start_time,duration",
+            "-of",
+            "json",
+            os.fspath(temporary),
+        )
+        try:
+            result = await self._runner(
+                command,
+                cancellation=cancellation,
+                on_progress=None,
+                expected_duration_us=None,
+                timeout_seconds=30.0,
+            )
+        except MediaExportError as error:
+            if error.code == MediaExportErrorCode.FFMPEG_UNAVAILABLE:
+                raise MediaExportError(
+                    MediaExportErrorCode.FFPROBE_UNAVAILABLE,
+                    "Không thể khởi động ffprobe để kiểm tra video đầu ra",
+                    retryable=False,
+                ) from error
+            raise
+        if result.returncode != 0:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "ffprobe không đọc được video thuyết minh vừa xuất",
+                retryable=True,
+            )
+        try:
+            payload = json.loads(_as_text(result.stdout))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "ffprobe trả về thông tin video đầu ra không hợp lệ",
+                retryable=True,
+            ) from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("streams"), list):
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "Video đầu ra không có thông tin luồng hợp lệ",
+                retryable=True,
+            )
+        streams = [stream for stream in payload["streams"] if isinstance(stream, dict)]
+        videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+        audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
+            raise MediaExportError(
+                MediaExportErrorCode.TRACK_LAYOUT_INVALID,
+                "Video đầu ra phải có đúng một luồng hình và một luồng tiếng thuyết minh",
+                retryable=False,
+            )
+        audio_codec = str(audios[0].get("codec_name", "")).lower()
+        if audio_codec != "aac":
+            raise MediaExportError(
+                MediaExportErrorCode.AUDIO_CODEC_INVALID,
+                "Luồng thuyết minh đầu ra không phải AAC",
+                retryable=False,
+            )
+        format_data = payload.get("format")
+        if not isinstance(format_data, dict):
+            format_data = {}
+        duration_us = _time_us(format_data.get("duration"), positive=True)
+        video_duration_us = _time_us(videos[0].get("duration"), positive=True)
+        audio_duration_us = _time_us(audios[0].get("duration"), positive=True)
+        if duration_us is None:
+            duration_us = max(video_duration_us or 0, audio_duration_us or 0) or None
+        if duration_us is None:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "Không xác định được thời lượng video đầu ra",
+                retryable=True,
+            )
+        if abs(duration_us - expected_duration_us) > self._duration_tolerance_us:
+            raise MediaExportError(
+                MediaExportErrorCode.DURATION_MISMATCH,
+                "Thời lượng video đầu ra không khớp với timeline thuyết minh",
+                retryable=False,
+            )
+        if (
+            video_duration_us is not None
+            and audio_duration_us is not None
+            and abs(video_duration_us - audio_duration_us) > self._duration_tolerance_us
+        ):
+            raise MediaExportError(
+                MediaExportErrorCode.DURATION_MISMATCH,
+                "Thời lượng luồng hình và tiếng thuyết minh không khớp",
+                retryable=False,
+            )
+        video_start_us = _time_us(videos[0].get("start_time"), positive=False) or 0
+        audio_start_us = _time_us(audios[0].get("start_time"), positive=False) or 0
+        if abs(video_start_us - audio_start_us) > self._sync_tolerance_us:
+            raise MediaExportError(
+                MediaExportErrorCode.SYNC_MISMATCH,
+                "Luồng hình và lời thuyết minh bị lệch thời điểm bắt đầu",
+                retryable=False,
+            )
+        return ExportedMedia(
+            path=temporary,
+            duration_us=duration_us,
+            video_start_us=video_start_us,
+            audio_start_us=audio_start_us,
+            audio_codec=audio_codec,
+            size_bytes=temporary.stat().st_size,
+        )
+
+    @staticmethod
+    def _check_cancelled(cancellation: Cancellation | None) -> None:
+        if _is_cancelled(cancellation):
+            raise MediaExportError(
+                MediaExportErrorCode.EXPORT_CANCELLED,
+                "Đã hủy xuất video thuyết minh",
+                retryable=True,
+            )
+
+
+def _require_file(path: Path, code: MediaExportErrorCode, message: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise MediaExportError(code, message, retryable=True) from error
+    if not resolved.is_file():
+        raise MediaExportError(code, message, retryable=True)
+    return resolved
+
+
+def _is_cancelled(cancellation: Cancellation | None) -> bool:
+    if cancellation is None:
+        return False
+    try:
+        return bool(
+            cancellation.is_cancelled()
+            if hasattr(cancellation, "is_cancelled")
+            else cancellation()
+        )
+    except Exception:
+        return True
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    processed_us: int,
+    duration_us: int,
+) -> None:
+    if callback is None:
+        return
+    progress = ExportProgress(
+        processed_us=max(0, min(processed_us, duration_us)),
+        duration_us=duration_us,
+        fraction=max(0.0, min(processed_us / duration_us, 1.0)),
+    )
+    with suppress(Exception):
+        callback(progress)
+
+
+def _seconds_text(duration_us: int) -> str:
+    whole, fraction = divmod(duration_us, 1_000_000)
+    return f"{whole}.{fraction:06d}"
+
+
+def _time_us(value: object, *, positive: bool) -> int | None:
+    try:
+        seconds = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not seconds.is_finite() or (positive and seconds <= 0):
+        return None
+    return int((seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _as_text(value: str | bytes | None) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _ffmpeg_failure_message(stderr: str | bytes | None) -> str:
+    diagnostic = _as_text(stderr).lower()
+    if "no space left on device" in diagnostic:
+        return "Không đủ dung lượng để xuất video thuyết minh"
+    if "matches no streams" in diagnostic or "stream specifier" in diagnostic:
+        return "Video hoặc file âm thanh đầu vào thiếu luồng cần thiết"
+    return "FFmpeg không thể trộn và xuất video thuyết minh"
+
+
+__all__ = [
+    "Cancellation",
+    "ExportProgress",
+    "ExportedMedia",
+    "FfmpegAudioMixExporter",
+    "MediaExportError",
+    "MediaExportErrorCode",
+    "MixSettings",
+]

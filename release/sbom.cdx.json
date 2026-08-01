@@ -1,0 +1,3846 @@
+{
+  "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "bom-ref": "model:asr-faster-whisper-large-v3-turbo@0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/tree/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "be36aea51ef822e221e44f708874ee6951df19b82d669577c167104632a499ab"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "asr-faster-whisper-large-v3-turbo",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "asr"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "faster-whisper"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "dropbox-dash/faster-whisper-large-v3-turbo"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "asr/faster-whisper-large-v3-turbo"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "float16"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "6144"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "5"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "1621665983"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+    },
+    {
+      "bom-ref": "model:asr-faster-whisper-large-v3@edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/Systran/faster-whisper-large-v3/tree/edaa852ec7e145841d8ffdb056a99866b5f0a478"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f7aae5248606925aecbc60bb504bf275475e631893cf156ffb8acd1dcf478736"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "asr-faster-whisper-large-v3",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "asr"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "faster-whisper"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "Systran/faster-whisper-large-v3"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "asr/faster-whisper-large-v3"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "float16"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "10240"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "5"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "3090835702"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "edaa852ec7e145841d8ffdb056a99866b5f0a478"
+    },
+    {
+      "bom-ref": "model:asr-faster-whisper-small@536b0662742c02347bc0e980a01041f333bce120",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/Systran/faster-whisper-small/tree/536b0662742c02347bc0e980a01041f333bce120"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "101416fafddb7e7d39f44ef221e4ad313836b7a1d740fe2509a9d9ab0042959f"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "asr-faster-whisper-small",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "asr"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "faster-whisper"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "Systran/faster-whisper-small"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "asr/faster-whisper-small"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "float16"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "2048"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "4"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "486212372"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "536b0662742c02347bc0e980a01041f333bce120"
+    },
+    {
+      "bom-ref": "model:mt-gemma4-31b-q4@59dde24573e7e61570dba08b18a2e1fe246955ed",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/google/gemma-4-31B-it-qat-q4_0-gguf/tree/59dde24573e7e61570dba08b18a2e1fe246955ed"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "3c225a6602607e730121efba31931812a58ca3fad4787229e73e93f8041ce610"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "mt-gemma4-31b-q4",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "mt"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "llama-cpp-server"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "google/gemma-4-31B-it-qat-q4_0-gguf"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "mt/gemma4-31b-q4"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "Q4_0"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "20480"
+        },
+        {
+          "name": "thuyetminh:model:quality-tier",
+          "value": "maximum"
+        },
+        {
+          "name": "thuyetminh:model:selectable",
+          "value": "true"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "1"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "17651001568"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "59dde24573e7e61570dba08b18a2e1fe246955ed"
+    },
+    {
+      "bom-ref": "model:mt-gemma4-e2b-q4@675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/tree/675cff42a74c774d6cb76f76d8eacb49b48c9b93"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "fc8aa4b40a3aa26ea031cf5a553ed993cbef952afeefad7f935ddd2aa69bc182"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "mt-gemma4-e2b-q4",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "mt"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "llama-cpp-server"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "google/gemma-4-E2B-it-qat-q4_0-gguf"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "mt/gemma4-e2b-q4"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "Q4_0"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "6144"
+        },
+        {
+          "name": "thuyetminh:model:quality-tier",
+          "value": "fast"
+        },
+        {
+          "name": "thuyetminh:model:selectable",
+          "value": "true"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "1"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "3349516256"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "675cff42a74c774d6cb76f76d8eacb49b48c9b93"
+    },
+    {
+      "bom-ref": "model:separation-tiger-dnr@b7a59560bbca10febbcd46fb01600f868e587f57",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/JusperLee/TIGER-DnR/tree/b7a59560bbca10febbcd46fb01600f868e587f57"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c6995ec4b397c21d149c55cd8cd4e5fc0d567e5846d2309a5b78a6fa48d54333"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "separation-tiger-dnr",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "separation"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "tiger-dnr"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "JusperLee/TIGER-DnR"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "separation/tiger-dnr"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "float32"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "6144"
+        },
+        {
+          "name": "thuyetminh:model:quality-tier",
+          "value": "cinematic-dialogue-music-effects"
+        },
+        {
+          "name": "thuyetminh:model:selectable",
+          "value": "true"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "2"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "17130818"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "b7a59560bbca10febbcd46fb01600f868e587f57"
+    },
+    {
+      "bom-ref": "model:tts-neucodec-onnx-int8@706f4bd5fcc39b039c333d5407f58b0075dcee07",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/neuphonic/neucodec-onnx-decoder-int8/tree/706f4bd5fcc39b039c333d5407f58b0075dcee07"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "be786eaca4e9d070d99e845f6b62fdec7ab91c1531225659a72a2764ae9e6911"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "tts-neucodec-onnx-int8",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "tts-support"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "onnxruntime"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "neuphonic/neucodec-onnx-decoder-int8"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "tts/support/neucodec-onnx-int8"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "int8-cpu"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "0"
+        },
+        {
+          "name": "thuyetminh:model:selectable",
+          "value": "false"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "2"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "312292139"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "706f4bd5fcc39b039c333d5407f58b0075dcee07"
+    },
+    {
+      "bom-ref": "model:tts-piper-vi-vais1000-medium@320d5f7f7751a17ef6512d5c23863056c6a11c0f",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/rhasspy/piper-voices/tree/320d5f7f7751a17ef6512d5c23863056c6a11c0f"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a4ea48bcaf4c9ff6da8abdeee79da812be9a785ef6c9210ec9bcda51f4855333"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "CC-BY-4.0"
+          }
+        }
+      ],
+      "name": "tts-piper-vi-vais1000-medium",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "tts"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "piper"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "rhasspy/piper-voices"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "tts/piper-vi-vais1000-medium"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "float32-cpu"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "0"
+        },
+        {
+          "name": "thuyetminh:model:quality-tier",
+          "value": "fallback"
+        },
+        {
+          "name": "thuyetminh:model:selectable",
+          "value": "true"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "2"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "63206154"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "320d5f7f7751a17ef6512d5c23863056c6a11c0f"
+    },
+    {
+      "bom-ref": "model:tts-vieneu-v2@b62b1cbddec67cb1d26ac602965d39f0a7faddf2",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2/tree/b62b1cbddec67cb1d26ac602965d39f0a7faddf2"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "fa8be1d47bc19d06231736ad673dddb38e04855f7c7160e71f74cc5064b9eb9c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "tts-vieneu-v2",
+      "properties": [
+        {
+          "name": "thuyetminh:model:stage",
+          "value": "tts"
+        },
+        {
+          "name": "thuyetminh:model:backend",
+          "value": "vieneu"
+        },
+        {
+          "name": "thuyetminh:model:repository",
+          "value": "pnnbao-ump/VieNeu-TTS-v2"
+        },
+        {
+          "name": "thuyetminh:model:path",
+          "value": "tts/vieneu-v2"
+        },
+        {
+          "name": "thuyetminh:model:compute-type",
+          "value": "float16"
+        },
+        {
+          "name": "thuyetminh:model:minimum-vram-mib",
+          "value": "4096"
+        },
+        {
+          "name": "thuyetminh:model:quality-tier",
+          "value": "high"
+        },
+        {
+          "name": "thuyetminh:model:selectable",
+          "value": "true"
+        },
+        {
+          "name": "thuyetminh:model:file-count",
+          "value": "10"
+        },
+        {
+          "name": "thuyetminh:model:locked-size-bytes",
+          "value": "614158933"
+        }
+      ],
+      "type": "machine-learning-model",
+      "version": "b62b1cbddec67cb1d26ac602965d39f0a7faddf2"
+    },
+    {
+      "bom-ref": "native:ffmpeg@system-managed",
+      "name": "ffmpeg",
+      "properties": [
+        {
+          "name": "thuyetminh:native:package",
+          "value": "ffmpeg"
+        },
+        {
+          "name": "thuyetminh:native:source",
+          "value": "Ubuntu 22.04 jammy"
+        }
+      ],
+      "type": "library",
+      "version": "system-managed"
+    },
+    {
+      "bom-ref": "native:llama_cpp@b10208",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/ggml-org/llama.cpp.git"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "llama_cpp",
+      "properties": [
+        {
+          "name": "thuyetminh:native:commit",
+          "value": "9d9a6d29f6b981cc7f41983d26e56485c6af1811"
+        },
+        {
+          "name": "thuyetminh:native:cuda-version",
+          "value": "12.8"
+        },
+        {
+          "name": "thuyetminh:native:cuda-architectures",
+          "value": "86"
+        }
+      ],
+      "type": "library",
+      "version": "b10208"
+    },
+    {
+      "bom-ref": "native:piper_tts@1.5.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/OHF-Voice/piper1-gpl.git"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        }
+      ],
+      "name": "piper_tts",
+      "properties": [
+        {
+          "name": "thuyetminh:native:package",
+          "value": "piper-tts"
+        }
+      ],
+      "type": "library",
+      "version": "1.5.0"
+    },
+    {
+      "bom-ref": "native:prowlarr@2.5.2.5491",
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/Prowlarr/Prowlarr/releases/download/v2.5.2.5491/Prowlarr.master.2.5.2.5491.linux-core-x64.tar.gz"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "22fe95742869d7af5e16d420c7889185579152ea8324be6c6e4e3cd011f4c37b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-only"
+          }
+        }
+      ],
+      "name": "prowlarr",
+      "properties": [],
+      "type": "library",
+      "version": "2.5.2.5491"
+    },
+    {
+      "bom-ref": "native:qbittorrent_nox@4.4.1-2",
+      "name": "qbittorrent_nox",
+      "properties": [
+        {
+          "name": "thuyetminh:native:package",
+          "value": "qbittorrent-nox"
+        },
+        {
+          "name": "thuyetminh:native:source",
+          "value": "Ubuntu 22.04 jammy"
+        }
+      ],
+      "type": "library",
+      "version": "4.4.1-2"
+    },
+    {
+      "bom-ref": "native:tiger@9f18d4a10a7137e1ce8052cfb62215179f1287b6",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/JusperLee/TIGER.git"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tiger",
+      "properties": [
+        {
+          "name": "thuyetminh:native:commit",
+          "value": "9f18d4a10a7137e1ce8052cfb62215179f1287b6"
+        },
+        {
+          "name": "thuyetminh:native:runtime-path",
+          "value": "/opt/tiger"
+        }
+      ],
+      "type": "library",
+      "version": "9f18d4a10a7137e1ce8052cfb62215179f1287b6"
+    },
+    {
+      "bom-ref": "native:vieneu@3.2.3",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pnnbao97/VieNeu-TTS.git"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "vieneu",
+      "properties": [
+        {
+          "name": "thuyetminh:native:commit",
+          "value": "4002d8d6749d516b446c012f5e6729b7661529d2"
+        }
+      ],
+      "type": "library",
+      "version": "3.2.3"
+    },
+    {
+      "bom-ref": "python:accelerate@1.7.0",
+      "description": "Accelerate",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/huggingface/accelerate"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache"
+          }
+        }
+      ],
+      "name": "accelerate",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/accelerate@1.7.0",
+      "type": "library",
+      "version": "1.7.0"
+    },
+    {
+      "bom-ref": "python:annotated-doc@0.0.5",
+      "description": "Document parameters, class attributes, return types, and variables inline, with Annotated.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "annotated-doc",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/annotated-doc@0.0.5",
+      "type": "library",
+      "version": "0.0.5"
+    },
+    {
+      "bom-ref": "python:annotated-types@0.8.0",
+      "description": "Reusable constraint types to use with typing.Annotated",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "annotated-types",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/annotated-types@0.8.0",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "bom-ref": "python:anyio@4.14.2",
+      "description": "High-level concurrency and networking framework on top of asyncio or Trio",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "anyio",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/anyio@4.14.2",
+      "type": "library",
+      "version": "4.14.2"
+    },
+    {
+      "bom-ref": "python:av@18.0.0",
+      "description": "Pythonic bindings for FFmpeg's libraries.",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "av",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/av@18.0.0",
+      "type": "library",
+      "version": "18.0.0"
+    },
+    {
+      "bom-ref": "python:certifi@2025.4.26",
+      "description": "Python package for providing Mozilla's CA Bundle.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/certifi/python-certifi"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MPL-2.0"
+          }
+        }
+      ],
+      "name": "certifi",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/certifi@2025.4.26",
+      "type": "library",
+      "version": "2025.4.26"
+    },
+    {
+      "bom-ref": "python:cffi@2.1.0",
+      "description": "Foreign Function Interface for Python calling C code.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT-0"
+          }
+        }
+      ],
+      "name": "cffi",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/cffi@2.1.0",
+      "type": "library",
+      "version": "2.1.0"
+    },
+    {
+      "bom-ref": "python:charset-normalizer@3.4.2",
+      "description": "The Real First Universal Charset Detector. Open, modern and actively maintained alternative to Chardet.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "charset-normalizer",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/charset-normalizer@3.4.2",
+      "type": "library",
+      "version": "3.4.2"
+    },
+    {
+      "bom-ref": "python:click@8.4.2",
+      "description": "Composable command line interface toolkit",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "click",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/click@8.4.2",
+      "type": "library",
+      "version": "8.4.2"
+    },
+    {
+      "bom-ref": "python:ctranslate2@4.8.1",
+      "description": "Fast inference engine for Transformer models",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://opennmt.net"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "ctranslate2",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/ctranslate2@4.8.1",
+      "type": "library",
+      "version": "4.8.1"
+    },
+    {
+      "bom-ref": "python:diffusers@0.33.1",
+      "description": "State-of-the-art diffusion in PyTorch and JAX.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/huggingface/diffusers"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0 License"
+          }
+        }
+      ],
+      "name": "diffusers",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/diffusers@0.33.1",
+      "type": "library",
+      "version": "0.33.1"
+    },
+    {
+      "bom-ref": "python:fastapi@0.139.2",
+      "description": "FastAPI framework, high performance, easy to learn, fast to code, ready for production",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "fastapi",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/fastapi@0.139.2",
+      "type": "library",
+      "version": "0.139.2"
+    },
+    {
+      "bom-ref": "python:faster-whisper@1.2.1",
+      "description": "Faster Whisper transcription with CTranslate2",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/SYSTRAN/faster-whisper"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "faster-whisper",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/faster-whisper@1.2.1",
+      "type": "library",
+      "version": "1.2.1"
+    },
+    {
+      "bom-ref": "python:filelock@3.13.1",
+      "description": "A platform independent file lock.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Unlicense"
+          }
+        }
+      ],
+      "name": "filelock",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/filelock@3.13.1",
+      "type": "library",
+      "version": "3.13.1"
+    },
+    {
+      "bom-ref": "python:flatbuffers@25.12.19",
+      "description": "The FlatBuffers serialization format for Python",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://google.github.io/flatbuffers/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "flatbuffers",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/flatbuffers@25.12.19",
+      "type": "library",
+      "version": "25.12.19"
+    },
+    {
+      "bom-ref": "python:fsspec@2024.6.1",
+      "description": "File-system specification",
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD 3-Clause License\n\nCopyright (c) 2018, Martin Durant\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without\nmodification, are permitted provided that the following conditions are met:\n\n* Redistributions of source code must retain the above copyright notice, this\n  list of conditions and the following disclaimer.\n\n* Redistributions in binary form must reproduce the above copyright notice,\n  this list of conditions and the following disclaimer in the documentation\n  and/or"
+          }
+        }
+      ],
+      "name": "fsspec",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/fsspec@2024.6.1",
+      "type": "library",
+      "version": "2024.6.1"
+    },
+    {
+      "bom-ref": "python:greenlet@1.1.2",
+      "description": "Lightweight in-process concurrent programming",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://greenlet.readthedocs.io/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT License"
+          }
+        }
+      ],
+      "name": "greenlet",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/greenlet@1.1.2",
+      "type": "library",
+      "version": "1.1.2"
+    },
+    {
+      "bom-ref": "python:h11@0.16.0",
+      "description": "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/python-hyper/h11"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "h11",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/h11@0.16.0",
+      "type": "library",
+      "version": "0.16.0"
+    },
+    {
+      "bom-ref": "python:hf-xet@1.1.2",
+      "description": "Fast transfer of large files with the Hugging Face Hub.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "hf-xet",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/hf-xet@1.1.2",
+      "type": "library",
+      "version": "1.1.2"
+    },
+    {
+      "bom-ref": "python:hf-xet@1.5.2",
+      "description": "Fast transfer of large files with the Hugging Face Hub.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "hf-xet",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/hf-xet@1.5.2",
+      "type": "library",
+      "version": "1.5.2"
+    },
+    {
+      "bom-ref": "python:httpcore@1.0.9",
+      "description": "A minimal low-level HTTP client.",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "httpcore",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/httpcore@1.0.9",
+      "type": "library",
+      "version": "1.0.9"
+    },
+    {
+      "bom-ref": "python:httptools@0.8.0",
+      "description": "A collection of framework independent HTTP protocol utils.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "httptools",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/httptools@0.8.0",
+      "type": "library",
+      "version": "0.8.0"
+    },
+    {
+      "bom-ref": "python:httpx@0.28.1",
+      "description": "The next generation HTTP client.",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "httpx",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/httpx@0.28.1",
+      "type": "library",
+      "version": "0.28.1"
+    },
+    {
+      "bom-ref": "python:huggingface-hub@0.32.2",
+      "description": "Client library to download and publish models, datasets and other repos on the huggingface.co hub",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/huggingface/huggingface_hub"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache"
+          }
+        }
+      ],
+      "name": "huggingface-hub",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/huggingface-hub@0.32.2",
+      "type": "library",
+      "version": "0.32.2"
+    },
+    {
+      "bom-ref": "python:huggingface-hub@0.36.0",
+      "description": "Client library to download and publish models, datasets and other repos on the huggingface.co hub",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/huggingface/huggingface_hub"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache"
+          }
+        }
+      ],
+      "name": "huggingface-hub",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/huggingface-hub@0.36.0",
+      "type": "library",
+      "version": "0.36.0"
+    },
+    {
+      "bom-ref": "python:idna@3.10",
+      "description": "Internationalized Domain Names in Applications (IDNA)",
+      "name": "idna",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/idna@3.10",
+      "type": "library",
+      "version": "3.10"
+    },
+    {
+      "bom-ref": "python:importlib-metadata@8.7.0",
+      "description": "Read metadata from Python packages",
+      "name": "importlib_metadata",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/importlib-metadata@8.7.0",
+      "type": "library",
+      "version": "8.7.0"
+    },
+    {
+      "bom-ref": "python:iniconfig@2.3.0",
+      "description": "brain-dead simple config-ini parsing",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "iniconfig",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/iniconfig@2.3.0",
+      "type": "library",
+      "version": "2.3.0"
+    },
+    {
+      "bom-ref": "python:jinja2@3.1.4",
+      "description": "A very fast and expressive template engine.",
+      "name": "Jinja2",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/jinja2@3.1.4",
+      "type": "library",
+      "version": "3.1.4"
+    },
+    {
+      "bom-ref": "python:markdown-it-py@4.2.0",
+      "description": "Python port of markdown-it. Markdown parsing, done right!",
+      "name": "markdown-it-py",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/markdown-it-py@4.2.0",
+      "type": "library",
+      "version": "4.2.0"
+    },
+    {
+      "bom-ref": "python:markupsafe@2.1.5",
+      "description": "Safely add untrusted strings to HTML/XML markup.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://palletsprojects.com/p/markupsafe/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "MarkupSafe",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/markupsafe@2.1.5",
+      "type": "library",
+      "version": "2.1.5"
+    },
+    {
+      "bom-ref": "python:mdurl@0.1.2",
+      "description": "Markdown URL utilities",
+      "name": "mdurl",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/mdurl@0.1.2",
+      "type": "library",
+      "version": "0.1.2"
+    },
+    {
+      "bom-ref": "python:mpmath@1.3.0",
+      "description": "Python library for arbitrary-precision floating-point arithmetic",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://mpmath.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD"
+          }
+        }
+      ],
+      "name": "mpmath",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/mpmath@1.3.0",
+      "type": "library",
+      "version": "1.3.0"
+    },
+    {
+      "bom-ref": "python:msgpack@1.0.3",
+      "description": "MessagePack (de)serializer.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://msgpack.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "msgpack",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/msgpack@1.0.3",
+      "type": "library",
+      "version": "1.0.3"
+    },
+    {
+      "bom-ref": "python:networkx@3.3",
+      "description": "Python package for creating and manipulating graphs and networks",
+      "name": "networkx",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/networkx@3.3",
+      "type": "library",
+      "version": "3.3"
+    },
+    {
+      "bom-ref": "python:numpy@2.1.2",
+      "description": "Fundamental package for array computing in Python",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://numpy.org"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Copyright (c) 2005-2024, NumPy Developers.\nAll rights reserved.\n\nRedistribution and use in source and binary forms, with or without\nmodification, are permitted provided that the following conditions are\nmet:\n\n    * Redistributions of source code must retain the above copyright\n       notice, this list of conditions and the following disclaimer.\n\n    * Redistributions in binary form must reproduce the above\n       copyright notice, this list of conditions and the following\n       disclaimer in the documentat"
+          }
+        }
+      ],
+      "name": "numpy",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/numpy@2.1.2",
+      "type": "library",
+      "version": "2.1.2"
+    },
+    {
+      "bom-ref": "python:numpy@2.3.4",
+      "description": "Fundamental package for array computing in Python",
+      "licenses": [
+        {
+          "license": {
+            "name": "Copyright (c) 2005-2025, NumPy Developers.\n All rights reserved.\n\n Redistribution and use in source and binary forms, with or without\n modification, are permitted provided that the following conditions are\n met:\n\n     * Redistributions of source code must retain the above copyright\n        notice, this list of conditions and the following disclaimer.\n\n     * Redistributions in binary form must reproduce the above\n        copyright notice, this list of conditions and the following\n        disclaimer in the d"
+          }
+        }
+      ],
+      "name": "numpy",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/numpy@2.3.4",
+      "type": "library",
+      "version": "2.3.4"
+    },
+    {
+      "bom-ref": "python:nvidia-cublas-cu12@12.6.4.1",
+      "description": "CUBLAS native runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cublas-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cublas-cu12@12.6.4.1",
+      "type": "library",
+      "version": "12.6.4.1"
+    },
+    {
+      "bom-ref": "python:nvidia-cuda-cupti-cu12@12.6.80",
+      "description": "CUDA profiling tools runtime libs.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cuda-cupti-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cuda-cupti-cu12@12.6.80",
+      "type": "library",
+      "version": "12.6.80"
+    },
+    {
+      "bom-ref": "python:nvidia-cuda-nvrtc-cu12@12.6.77",
+      "description": "NVRTC native runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cuda-nvrtc-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cuda-nvrtc-cu12@12.6.77",
+      "type": "library",
+      "version": "12.6.77"
+    },
+    {
+      "bom-ref": "python:nvidia-cuda-runtime-cu12@12.6.77",
+      "description": "CUDA Runtime native Libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cuda-runtime-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cuda-runtime-cu12@12.6.77",
+      "type": "library",
+      "version": "12.6.77"
+    },
+    {
+      "bom-ref": "python:nvidia-cudnn-cu12@9.5.1.17",
+      "description": "cuDNN runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cudnn-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cudnn-cu12@9.5.1.17",
+      "type": "library",
+      "version": "9.5.1.17"
+    },
+    {
+      "bom-ref": "python:nvidia-cufft-cu12@11.3.0.4",
+      "description": "CUFFT native runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cufft-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cufft-cu12@11.3.0.4",
+      "type": "library",
+      "version": "11.3.0.4"
+    },
+    {
+      "bom-ref": "python:nvidia-cufile-cu12@1.11.1.6",
+      "description": "cuFile GPUDirect libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cufile-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cufile-cu12@1.11.1.6",
+      "type": "library",
+      "version": "1.11.1.6"
+    },
+    {
+      "bom-ref": "python:nvidia-curand-cu12@10.3.7.77",
+      "description": "CURAND native runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-curand-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-curand-cu12@10.3.7.77",
+      "type": "library",
+      "version": "10.3.7.77"
+    },
+    {
+      "bom-ref": "python:nvidia-cusolver-cu12@11.7.1.2",
+      "description": "CUDA solver native runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cusolver-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cusolver-cu12@11.7.1.2",
+      "type": "library",
+      "version": "11.7.1.2"
+    },
+    {
+      "bom-ref": "python:nvidia-cusparse-cu12@12.5.4.2",
+      "description": "CUSPARSE native runtime libraries",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cusparse-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cusparse-cu12@12.5.4.2",
+      "type": "library",
+      "version": "12.5.4.2"
+    },
+    {
+      "bom-ref": "python:nvidia-cusparselt-cu12@0.6.3",
+      "description": "NVIDIA cuSPARSELt",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cusparselt"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-cusparselt-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-cusparselt-cu12@0.6.3",
+      "type": "library",
+      "version": "0.6.3"
+    },
+    {
+      "bom-ref": "python:nvidia-nccl-cu12@2.26.2",
+      "description": "NVIDIA Collective Communication Library (NCCL) Runtime",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "nvidia-nccl-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nccl-cu12@2.26.2",
+      "type": "library",
+      "version": "2.26.2"
+    },
+    {
+      "bom-ref": "python:nvidia-nvjitlink-cu12@12.6.85",
+      "description": "Nvidia JIT LTO Library",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "NVIDIA Proprietary Software"
+          }
+        }
+      ],
+      "name": "nvidia-nvjitlink-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nvjitlink-cu12@12.6.85",
+      "type": "library",
+      "version": "12.6.85"
+    },
+    {
+      "bom-ref": "python:nvidia-nvtx-cu12@12.6.77",
+      "description": "NVIDIA Tools Extension",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developer.nvidia.com/cuda-zone"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0"
+          }
+        }
+      ],
+      "name": "nvidia-nvtx-cu12",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/nvidia-nvtx-cu12@12.6.77",
+      "type": "library",
+      "version": "12.6.77"
+    },
+    {
+      "bom-ref": "python:onnxruntime@1.24.4",
+      "description": "ONNX Runtime is a runtime accelerator for Machine Learning models",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://onnxruntime.ai"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT License"
+          }
+        }
+      ],
+      "name": "onnxruntime",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/onnxruntime@1.24.4",
+      "type": "library",
+      "version": "1.24.4"
+    },
+    {
+      "bom-ref": "python:packaging@25.0",
+      "description": "Core utilities for Python packages",
+      "name": "packaging",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/packaging@25.0",
+      "type": "library",
+      "version": "25.0"
+    },
+    {
+      "bom-ref": "python:pathvalidate@3.3.1",
+      "description": "pathvalidate is a Python library to sanitize/validate a string such as filenames/file-paths/etc.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/thombashi/pathvalidate"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT License"
+          }
+        }
+      ],
+      "name": "pathvalidate",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pathvalidate@3.3.1",
+      "type": "library",
+      "version": "3.3.1"
+    },
+    {
+      "bom-ref": "python:pillow@11.0.0",
+      "description": "Python Imaging Library (Fork)",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT-CMU"
+          }
+        }
+      ],
+      "name": "pillow",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pillow@11.0.0",
+      "type": "library",
+      "version": "11.0.0"
+    },
+    {
+      "bom-ref": "python:pip@22.0.2",
+      "description": "The PyPA recommended tool for installing Python packages.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://pip.pypa.io/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pip",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pip@22.0.2",
+      "type": "library",
+      "version": "22.0.2"
+    },
+    {
+      "bom-ref": "python:pip@25.1.1",
+      "description": "The PyPA recommended tool for installing Python packages.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pip",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pip@25.1.1",
+      "type": "library",
+      "version": "25.1.1"
+    },
+    {
+      "bom-ref": "python:piper-tts@1.5.0",
+      "description": "Fast and local neural text-to-speech engine",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://github.com/OHF-voice/piper1-gpl"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        }
+      ],
+      "name": "piper-tts",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/piper-tts@1.5.0",
+      "type": "library",
+      "version": "1.5.0"
+    },
+    {
+      "bom-ref": "python:pluggy@1.6.0",
+      "description": "plugin and hook calling mechanisms for python",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pluggy",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pluggy@1.6.0",
+      "type": "library",
+      "version": "1.6.0"
+    },
+    {
+      "bom-ref": "python:protobuf@7.35.1",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://developers.google.com/protocol-buffers/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "3-Clause BSD License"
+          }
+        }
+      ],
+      "name": "protobuf",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/protobuf@7.35.1",
+      "type": "library",
+      "version": "7.35.1"
+    },
+    {
+      "bom-ref": "python:psutil@7.0.0",
+      "description": "Cross-platform lib for process and system monitoring in Python.  NOTE: the syntax of this script MUST be kept compatible with Python 2.7.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/giampaolo/psutil"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "psutil",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/psutil@7.0.0",
+      "type": "library",
+      "version": "7.0.0"
+    },
+    {
+      "bom-ref": "python:pycparser@3.0",
+      "description": "C parser in Python",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "pycparser",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pycparser@3.0",
+      "type": "library",
+      "version": "3.0"
+    },
+    {
+      "bom-ref": "python:pydantic-core@2.46.4",
+      "description": "Core functionality for Pydantic validation and serialization",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/pydantic/pydantic"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pydantic_core",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pydantic-core@2.46.4",
+      "type": "library",
+      "version": "2.46.4"
+    },
+    {
+      "bom-ref": "python:pydantic-settings@2.14.2",
+      "description": "Settings management using Pydantic",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pydantic-settings",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pydantic-settings@2.14.2",
+      "type": "library",
+      "version": "2.14.2"
+    },
+    {
+      "bom-ref": "python:pydantic@2.13.4",
+      "description": "Data validation using Python type hints",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pydantic",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pydantic@2.13.4",
+      "type": "library",
+      "version": "2.13.4"
+    },
+    {
+      "bom-ref": "python:pygments@2.20.0",
+      "description": "Pygments is a syntax highlighting package written in Python.",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "name": "Pygments",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pygments@2.20.0",
+      "type": "library",
+      "version": "2.20.0"
+    },
+    {
+      "bom-ref": "python:pynvim@0.4.2",
+      "description": "Python client to neovim",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://github.com/neovim/pynvim"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache"
+          }
+        }
+      ],
+      "name": "pynvim",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pynvim@0.4.2",
+      "type": "library",
+      "version": "0.4.2"
+    },
+    {
+      "bom-ref": "python:pytest-asyncio@1.4.0",
+      "description": "Pytest support for asyncio",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "pytest-asyncio",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pytest-asyncio@1.4.0",
+      "type": "library",
+      "version": "1.4.0"
+    },
+    {
+      "bom-ref": "python:pytest@9.1.1",
+      "description": "pytest: simple powerful testing with Python",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pytest",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pytest@9.1.1",
+      "type": "library",
+      "version": "9.1.1"
+    },
+    {
+      "bom-ref": "python:python-dotenv@1.2.2",
+      "description": "Read key-value pairs from a .env file and set them as environment variables",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "python-dotenv",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/python-dotenv@1.2.2",
+      "type": "library",
+      "version": "1.2.2"
+    },
+    {
+      "bom-ref": "python:pyyaml@6.0.2",
+      "description": "YAML parser and emitter for Python",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://pyyaml.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "PyYAML",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/pyyaml@6.0.2",
+      "type": "library",
+      "version": "6.0.2"
+    },
+    {
+      "bom-ref": "python:regex@2024.11.6",
+      "description": "Alternative regular expression module, to replace re.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/mrabarnett/mrab-regex"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache Software License"
+          }
+        }
+      ],
+      "name": "regex",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/regex@2024.11.6",
+      "type": "library",
+      "version": "2024.11.6"
+    },
+    {
+      "bom-ref": "python:requests@2.32.3",
+      "description": "Python HTTP for Humans.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://requests.readthedocs.io"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "requests",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/requests@2.32.3",
+      "type": "library",
+      "version": "2.32.3"
+    },
+    {
+      "bom-ref": "python:rich@15.0.0",
+      "description": "Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "rich",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/rich@15.0.0",
+      "type": "library",
+      "version": "15.0.0"
+    },
+    {
+      "bom-ref": "python:safetensors@0.5.3",
+      "name": "safetensors",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/safetensors@0.5.3",
+      "type": "library",
+      "version": "0.5.3"
+    },
+    {
+      "bom-ref": "python:safetensors@0.7.0",
+      "name": "safetensors",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/safetensors@0.7.0",
+      "type": "library",
+      "version": "0.7.0"
+    },
+    {
+      "bom-ref": "python:sea-g2p@0.7.20",
+      "description": "Fast multilingual text-to-phoneme converter for South East Asian languages.",
+      "name": "sea-g2p",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/sea-g2p@0.7.20",
+      "type": "library",
+      "version": "0.7.20"
+    },
+    {
+      "bom-ref": "python:setuptools@59.6.0",
+      "description": "Easily download, build, install, upgrade, and uninstall Python packages",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/pypa/setuptools"
+        }
+      ],
+      "name": "setuptools",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/setuptools@59.6.0",
+      "type": "library",
+      "version": "59.6.0"
+    },
+    {
+      "bom-ref": "python:setuptools@80.9.0",
+      "description": "Easily download, build, install, upgrade, and uninstall Python packages",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "setuptools",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/setuptools@80.9.0",
+      "type": "library",
+      "version": "80.9.0"
+    },
+    {
+      "bom-ref": "python:shellingham@1.5.4",
+      "description": "Tool to Detect Surrounding Shell",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/sarugaku/shellingham"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "ISC License"
+          }
+        }
+      ],
+      "name": "shellingham",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/shellingham@1.5.4",
+      "type": "library",
+      "version": "1.5.4"
+    },
+    {
+      "bom-ref": "python:soundfile@0.13.1",
+      "description": "An audio library based on libsndfile, CFFI and NumPy",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/bastibe/python-soundfile"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD 3-Clause License"
+          }
+        }
+      ],
+      "name": "soundfile",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/soundfile@0.13.1",
+      "type": "library",
+      "version": "0.13.1"
+    },
+    {
+      "bom-ref": "python:soxr@1.0.0",
+      "description": "High quality, one-dimensional sample-rate conversion library",
+      "licenses": [
+        {
+          "license": {
+            "id": "LGPL-2.1-or-later"
+          }
+        }
+      ],
+      "name": "soxr",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/soxr@1.0.0",
+      "type": "library",
+      "version": "1.0.0"
+    },
+    {
+      "bom-ref": "python:starlette@1.3.1",
+      "description": "The little ASGI library that shines.",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "starlette",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/starlette@1.3.1",
+      "type": "library",
+      "version": "1.3.1"
+    },
+    {
+      "bom-ref": "python:supervisor@4.3.0",
+      "description": "A system for controlling process state under UNIX",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "http://supervisord.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "BSD-derived (http://www.repoze.org/LICENSE.txt)"
+          }
+        }
+      ],
+      "name": "supervisor",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/supervisor@4.3.0",
+      "type": "library",
+      "version": "4.3.0"
+    },
+    {
+      "bom-ref": "python:sympy@1.13.3",
+      "description": "Computer algebra system (CAS) in Python",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://sympy.org"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD"
+          }
+        }
+      ],
+      "name": "sympy",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/sympy@1.13.3",
+      "type": "library",
+      "version": "1.13.3"
+    },
+    {
+      "bom-ref": "python:thuyet-minh-offline-gpu@0.1.0",
+      "description": "Local NVIDIA GPU pipeline for legally acquired Vietnamese video dubbing",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        }
+      ],
+      "name": "thuyet-minh-offline-gpu",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/thuyet-minh-offline-gpu@0.1.0",
+      "type": "library",
+      "version": "0.1.0"
+    },
+    {
+      "bom-ref": "python:tokenizers@0.21.1",
+      "name": "tokenizers",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/tokenizers@0.21.1",
+      "type": "library",
+      "version": "0.21.1"
+    },
+    {
+      "bom-ref": "python:tokenizers@0.22.2",
+      "name": "tokenizers",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/tokenizers@0.22.2",
+      "type": "library",
+      "version": "0.22.2"
+    },
+    {
+      "bom-ref": "python:torch@2.7.0+cu126",
+      "description": "Tensors and Dynamic neural networks in Python with strong GPU acceleration",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://pytorch.org/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "torch",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/torch@2.7.0+cu126",
+      "type": "library",
+      "version": "2.7.0+cu126"
+    },
+    {
+      "bom-ref": "python:torchaudio@2.7.0+cu126",
+      "description": "An audio package for PyTorch",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/pytorch/audio"
+        }
+      ],
+      "name": "torchaudio",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/torchaudio@2.7.0+cu126",
+      "type": "library",
+      "version": "2.7.0+cu126"
+    },
+    {
+      "bom-ref": "python:torchvision@0.22.0+cu126",
+      "description": "image and video datasets and models for torch deep learning",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/pytorch/vision"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD"
+          }
+        }
+      ],
+      "name": "torchvision",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/torchvision@0.22.0+cu126",
+      "type": "library",
+      "version": "0.22.0+cu126"
+    },
+    {
+      "bom-ref": "python:tqdm@4.67.1",
+      "description": "Fast, Extensible Progress Meter",
+      "licenses": [
+        {
+          "license": {
+            "name": "MPL-2.0 AND MIT"
+          }
+        }
+      ],
+      "name": "tqdm",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/tqdm@4.67.1",
+      "type": "library",
+      "version": "4.67.1"
+    },
+    {
+      "bom-ref": "python:transformers@4.52.3",
+      "description": "State-of-the-art Machine Learning for JAX, PyTorch and TensorFlow",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/huggingface/transformers"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0 License"
+          }
+        }
+      ],
+      "name": "transformers",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/transformers@4.52.3",
+      "type": "library",
+      "version": "4.52.3"
+    },
+    {
+      "bom-ref": "python:transformers@4.57.6",
+      "description": "State-of-the-art Machine Learning for JAX, PyTorch and TensorFlow",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/huggingface/transformers"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache 2.0 License"
+          }
+        }
+      ],
+      "name": "transformers",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/transformers@4.57.6",
+      "type": "library",
+      "version": "4.57.6"
+    },
+    {
+      "bom-ref": "python:triton@3.3.0",
+      "description": "A language and compiler for custom Deep Learning operations",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/triton-lang/triton/"
+        }
+      ],
+      "name": "triton",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/triton@3.3.0",
+      "type": "library",
+      "version": "3.3.0"
+    },
+    {
+      "bom-ref": "python:typer@0.27.0",
+      "description": "Typer, build great CLIs. Easy to code. Based on Python type hints.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "typer",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/typer@0.27.0",
+      "type": "library",
+      "version": "0.27.0"
+    },
+    {
+      "bom-ref": "python:typing-extensions@4.12.2",
+      "description": "Backported and Experimental Type Hints for Python 3.8+",
+      "name": "typing_extensions",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/typing-extensions@4.12.2",
+      "type": "library",
+      "version": "4.12.2"
+    },
+    {
+      "bom-ref": "python:typing-extensions@4.16.0",
+      "description": "Backported and Experimental Type Hints for Python 3.9+",
+      "licenses": [
+        {
+          "license": {
+            "id": "PSF-2.0"
+          }
+        }
+      ],
+      "name": "typing_extensions",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/typing-extensions@4.16.0",
+      "type": "library",
+      "version": "4.16.0"
+    },
+    {
+      "bom-ref": "python:typing-inspection@0.4.2",
+      "description": "Runtime typing introspection tools",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "typing-inspection",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/typing-inspection@0.4.2",
+      "type": "library",
+      "version": "0.4.2"
+    },
+    {
+      "bom-ref": "python:urllib3@2.4.0",
+      "description": "HTTP library with thread-safe connection pooling, file post, and more.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "urllib3",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/urllib3@2.4.0",
+      "type": "library",
+      "version": "2.4.0"
+    },
+    {
+      "bom-ref": "python:uvicorn@0.51.0",
+      "description": "The lightning-fast ASGI server.",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "uvicorn",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/uvicorn@0.51.0",
+      "type": "library",
+      "version": "0.51.0"
+    },
+    {
+      "bom-ref": "python:uvloop@0.22.1",
+      "description": "Fast implementation of asyncio event loop on top of libuv",
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT License"
+          }
+        }
+      ],
+      "name": "uvloop",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/uvloop@0.22.1",
+      "type": "library",
+      "version": "0.22.1"
+    },
+    {
+      "bom-ref": "python:watchfiles@1.2.0",
+      "description": "Simple, modern and high performance file watching and code reload in python.",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/samuelcolvin/watchfiles"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "watchfiles",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/watchfiles@1.2.0",
+      "type": "library",
+      "version": "1.2.0"
+    },
+    {
+      "bom-ref": "python:websockets@17.0.1",
+      "description": "An implementation of the WebSocket Protocol (RFC 6455 & 7692)",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "name": "websockets",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/websockets@17.0.1",
+      "type": "library",
+      "version": "17.0.1"
+    },
+    {
+      "bom-ref": "python:wheel@0.37.1",
+      "description": "A built-package format for Python",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/pypa/wheel"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "wheel",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/wheel@0.37.1",
+      "type": "library",
+      "version": "0.37.1"
+    },
+    {
+      "bom-ref": "python:wheel@0.45.1",
+      "description": "A built-package format for Python",
+      "name": "wheel",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/wheel@0.45.1",
+      "type": "library",
+      "version": "0.45.1"
+    },
+    {
+      "bom-ref": "python:zipp@3.22.0",
+      "description": "Backport of pathlib-compatible object wrapper for zip files",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "zipp",
+      "properties": [
+        {
+          "name": "thuyetminh:source",
+          "value": "python-distribution"
+        }
+      ],
+      "purl": "pkg:pypi/zipp@3.22.0",
+      "type": "library",
+      "version": "3.22.0"
+    }
+  ],
+  "dependencies": [
+    {
+      "dependsOn": [
+        "model:asr-faster-whisper-large-v3-turbo@0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+        "model:asr-faster-whisper-large-v3@edaa852ec7e145841d8ffdb056a99866b5f0a478",
+        "model:asr-faster-whisper-small@536b0662742c02347bc0e980a01041f333bce120",
+        "model:mt-gemma4-31b-q4@59dde24573e7e61570dba08b18a2e1fe246955ed",
+        "model:mt-gemma4-e2b-q4@675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+        "model:separation-tiger-dnr@b7a59560bbca10febbcd46fb01600f868e587f57",
+        "model:tts-neucodec-onnx-int8@706f4bd5fcc39b039c333d5407f58b0075dcee07",
+        "model:tts-piper-vi-vais1000-medium@320d5f7f7751a17ef6512d5c23863056c6a11c0f",
+        "model:tts-vieneu-v2@b62b1cbddec67cb1d26ac602965d39f0a7faddf2",
+        "native:ffmpeg@system-managed",
+        "native:llama_cpp@b10208",
+        "native:piper_tts@1.5.0",
+        "native:prowlarr@2.5.2.5491",
+        "native:qbittorrent_nox@4.4.1-2",
+        "native:tiger@9f18d4a10a7137e1ce8052cfb62215179f1287b6",
+        "native:vieneu@3.2.3",
+        "python:accelerate@1.7.0",
+        "python:annotated-doc@0.0.5",
+        "python:annotated-types@0.8.0",
+        "python:anyio@4.14.2",
+        "python:av@18.0.0",
+        "python:certifi@2025.4.26",
+        "python:cffi@2.1.0",
+        "python:charset-normalizer@3.4.2",
+        "python:click@8.4.2",
+        "python:ctranslate2@4.8.1",
+        "python:diffusers@0.33.1",
+        "python:fastapi@0.139.2",
+        "python:faster-whisper@1.2.1",
+        "python:filelock@3.13.1",
+        "python:flatbuffers@25.12.19",
+        "python:fsspec@2024.6.1",
+        "python:greenlet@1.1.2",
+        "python:h11@0.16.0",
+        "python:hf-xet@1.1.2",
+        "python:hf-xet@1.5.2",
+        "python:httpcore@1.0.9",
+        "python:httptools@0.8.0",
+        "python:httpx@0.28.1",
+        "python:huggingface-hub@0.32.2",
+        "python:huggingface-hub@0.36.0",
+        "python:idna@3.10",
+        "python:importlib-metadata@8.7.0",
+        "python:iniconfig@2.3.0",
+        "python:jinja2@3.1.4",
+        "python:markdown-it-py@4.2.0",
+        "python:markupsafe@2.1.5",
+        "python:mdurl@0.1.2",
+        "python:mpmath@1.3.0",
+        "python:msgpack@1.0.3",
+        "python:networkx@3.3",
+        "python:numpy@2.1.2",
+        "python:numpy@2.3.4",
+        "python:nvidia-cublas-cu12@12.6.4.1",
+        "python:nvidia-cuda-cupti-cu12@12.6.80",
+        "python:nvidia-cuda-nvrtc-cu12@12.6.77",
+        "python:nvidia-cuda-runtime-cu12@12.6.77",
+        "python:nvidia-cudnn-cu12@9.5.1.17",
+        "python:nvidia-cufft-cu12@11.3.0.4",
+        "python:nvidia-cufile-cu12@1.11.1.6",
+        "python:nvidia-curand-cu12@10.3.7.77",
+        "python:nvidia-cusolver-cu12@11.7.1.2",
+        "python:nvidia-cusparse-cu12@12.5.4.2",
+        "python:nvidia-cusparselt-cu12@0.6.3",
+        "python:nvidia-nccl-cu12@2.26.2",
+        "python:nvidia-nvjitlink-cu12@12.6.85",
+        "python:nvidia-nvtx-cu12@12.6.77",
+        "python:onnxruntime@1.24.4",
+        "python:packaging@25.0",
+        "python:pathvalidate@3.3.1",
+        "python:pillow@11.0.0",
+        "python:pip@22.0.2",
+        "python:pip@25.1.1",
+        "python:piper-tts@1.5.0",
+        "python:pluggy@1.6.0",
+        "python:protobuf@7.35.1",
+        "python:psutil@7.0.0",
+        "python:pycparser@3.0",
+        "python:pydantic-core@2.46.4",
+        "python:pydantic-settings@2.14.2",
+        "python:pydantic@2.13.4",
+        "python:pygments@2.20.0",
+        "python:pynvim@0.4.2",
+        "python:pytest-asyncio@1.4.0",
+        "python:pytest@9.1.1",
+        "python:python-dotenv@1.2.2",
+        "python:pyyaml@6.0.2",
+        "python:regex@2024.11.6",
+        "python:requests@2.32.3",
+        "python:rich@15.0.0",
+        "python:safetensors@0.5.3",
+        "python:safetensors@0.7.0",
+        "python:sea-g2p@0.7.20",
+        "python:setuptools@59.6.0",
+        "python:setuptools@80.9.0",
+        "python:shellingham@1.5.4",
+        "python:soundfile@0.13.1",
+        "python:soxr@1.0.0",
+        "python:starlette@1.3.1",
+        "python:supervisor@4.3.0",
+        "python:sympy@1.13.3",
+        "python:thuyet-minh-offline-gpu@0.1.0",
+        "python:tokenizers@0.21.1",
+        "python:tokenizers@0.22.2",
+        "python:torch@2.7.0+cu126",
+        "python:torchaudio@2.7.0+cu126",
+        "python:torchvision@0.22.0+cu126",
+        "python:tqdm@4.67.1",
+        "python:transformers@4.52.3",
+        "python:transformers@4.57.6",
+        "python:triton@3.3.0",
+        "python:typer@0.27.0",
+        "python:typing-extensions@4.12.2",
+        "python:typing-extensions@4.16.0",
+        "python:typing-inspection@0.4.2",
+        "python:urllib3@2.4.0",
+        "python:uvicorn@0.51.0",
+        "python:uvloop@0.22.1",
+        "python:watchfiles@1.2.0",
+        "python:websockets@17.0.1",
+        "python:wheel@0.37.1",
+        "python:wheel@0.45.1",
+        "python:zipp@3.22.0"
+      ],
+      "ref": "application:thuyet-minh-offline-gpu"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:asr-faster-whisper-large-v3-turbo@0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:asr-faster-whisper-large-v3@edaa852ec7e145841d8ffdb056a99866b5f0a478"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:asr-faster-whisper-small@536b0662742c02347bc0e980a01041f333bce120"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:mt-gemma4-31b-q4@59dde24573e7e61570dba08b18a2e1fe246955ed"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:mt-gemma4-e2b-q4@675cff42a74c774d6cb76f76d8eacb49b48c9b93"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:separation-tiger-dnr@b7a59560bbca10febbcd46fb01600f868e587f57"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:tts-neucodec-onnx-int8@706f4bd5fcc39b039c333d5407f58b0075dcee07"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:tts-piper-vi-vais1000-medium@320d5f7f7751a17ef6512d5c23863056c6a11c0f"
+    },
+    {
+      "dependsOn": [],
+      "ref": "model:tts-vieneu-v2@b62b1cbddec67cb1d26ac602965d39f0a7faddf2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:ffmpeg@system-managed"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:llama_cpp@b10208"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:piper_tts@1.5.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:prowlarr@2.5.2.5491"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:qbittorrent_nox@4.4.1-2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:tiger@9f18d4a10a7137e1ce8052cfb62215179f1287b6"
+    },
+    {
+      "dependsOn": [],
+      "ref": "native:vieneu@3.2.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:accelerate@1.7.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:annotated-doc@0.0.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:annotated-types@0.8.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:anyio@4.14.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:av@18.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:certifi@2025.4.26"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:cffi@2.1.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:charset-normalizer@3.4.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:click@8.4.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:ctranslate2@4.8.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:diffusers@0.33.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:fastapi@0.139.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:faster-whisper@1.2.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:filelock@3.13.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:flatbuffers@25.12.19"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:fsspec@2024.6.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:greenlet@1.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:h11@0.16.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:hf-xet@1.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:hf-xet@1.5.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:httpcore@1.0.9"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:httptools@0.8.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:httpx@0.28.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:huggingface-hub@0.32.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:huggingface-hub@0.36.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:idna@3.10"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:importlib-metadata@8.7.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:iniconfig@2.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:jinja2@3.1.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:markdown-it-py@4.2.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:markupsafe@2.1.5"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:mdurl@0.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:mpmath@1.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:msgpack@1.0.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:networkx@3.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:numpy@2.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:numpy@2.3.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cublas-cu12@12.6.4.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cuda-cupti-cu12@12.6.80"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cuda-nvrtc-cu12@12.6.77"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cuda-runtime-cu12@12.6.77"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cudnn-cu12@9.5.1.17"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cufft-cu12@11.3.0.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cufile-cu12@1.11.1.6"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-curand-cu12@10.3.7.77"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cusolver-cu12@11.7.1.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cusparse-cu12@12.5.4.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-cusparselt-cu12@0.6.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-nccl-cu12@2.26.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-nvjitlink-cu12@12.6.85"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:nvidia-nvtx-cu12@12.6.77"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:onnxruntime@1.24.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:packaging@25.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pathvalidate@3.3.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pillow@11.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pip@22.0.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pip@25.1.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:piper-tts@1.5.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pluggy@1.6.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:protobuf@7.35.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:psutil@7.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pycparser@3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pydantic-core@2.46.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pydantic-settings@2.14.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pydantic@2.13.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pygments@2.20.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pynvim@0.4.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pytest-asyncio@1.4.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pytest@9.1.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:python-dotenv@1.2.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:pyyaml@6.0.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:regex@2024.11.6"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:requests@2.32.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:rich@15.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:safetensors@0.5.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:safetensors@0.7.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:sea-g2p@0.7.20"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:setuptools@59.6.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:setuptools@80.9.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:shellingham@1.5.4"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:soundfile@0.13.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:soxr@1.0.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:starlette@1.3.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:supervisor@4.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:sympy@1.13.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:thuyet-minh-offline-gpu@0.1.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:tokenizers@0.21.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:tokenizers@0.22.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:torch@2.7.0+cu126"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:torchaudio@2.7.0+cu126"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:torchvision@0.22.0+cu126"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:tqdm@4.67.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:transformers@4.52.3"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:transformers@4.57.6"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:triton@3.3.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:typer@0.27.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:typing-extensions@4.12.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:typing-extensions@4.16.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:typing-inspection@0.4.2"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:urllib3@2.4.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:uvicorn@0.51.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:uvloop@0.22.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:watchfiles@1.2.0"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:websockets@17.0.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:wheel@0.37.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:wheel@0.45.1"
+    },
+    {
+      "dependsOn": [],
+      "ref": "python:zipp@3.22.0"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "bom-ref": "application:thuyet-minh-offline-gpu",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-3.0-or-later"
+          }
+        }
+      ],
+      "name": "thuyet-minh-offline-gpu",
+      "type": "application",
+      "version": "0.1.0"
+    },
+    "properties": [
+      {
+        "name": "thuyetminh:models-lock-sha256",
+        "value": "544616ab836d453431e8a8cba1ba4adad1058ffdf0bbd24a15e00aa58580ce4f"
+      },
+      {
+        "name": "thuyetminh:native-lock-sha256",
+        "value": "34c021fbd81b4a7c8c556933d1bc6766690bdae396e7575bfe187d22db503d39"
+      }
+    ],
+    "timestamp": "2026-08-01T17:58:15Z",
+    "tools": {
+      "components": [
+        {
+          "name": "stdlib-sbom-generator",
+          "type": "application",
+          "version": "1"
+        }
+      ]
+    }
+  },
+  "serialNumber": "urn:uuid:84e77c19-f28b-42dd-9b19-787b4916d69a",
+  "specVersion": "1.6",
+  "version": 1
+}
