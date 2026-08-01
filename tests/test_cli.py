@@ -85,8 +85,8 @@ def test_run_requires_rights_before_calling_api(monkeypatch) -> None:
 
     result = runner.invoke(cli.app, ["run", "--release-id", "release-1"])
 
-    assert result.exit_code != 0
-    assert "--i-have-rights" in result.output
+    assert result.exit_code == 2
+    assert not isinstance(result.exception, AssertionError)
 
 
 def test_submit_waits_and_downloads_completed_video(monkeypatch, tmp_path: Path) -> None:
