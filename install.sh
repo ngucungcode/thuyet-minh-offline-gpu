@@ -170,9 +170,13 @@ fi
 
 for selected_path in "${INSTALL_DIR}" "${DATA_DIR}"; do
   [[ "${selected_path}" == /* ]] || die "Đường dẫn phải là tuyệt đối: ${selected_path}"
-  [[ "${selected_path}" != "/" ]] || die "Không được dùng thư mục gốc /"
   [[ "${selected_path}" != *$'\n'* && "${selected_path}" != *$'\r'* ]] \
     || die "Đường dẫn chứa ký tự xuống dòng"
+done
+INSTALL_DIR="$(readlink -m -- "${INSTALL_DIR}")"
+DATA_DIR="$(readlink -m -- "${DATA_DIR}")"
+for selected_path in "${INSTALL_DIR}" "${DATA_DIR}"; do
+  [[ "${selected_path}" != "/" ]] || die "Không được dùng thư mục gốc /"
 done
 
 pending_migration_journal="${INSTALL_DIR}.migration-state.json"
