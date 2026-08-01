@@ -19,6 +19,7 @@ MIGRATE_EXISTING=false
 MIGRATED_RUNTIME_REUSABLE=false
 MIGRATION_BACKUP_PATH=""
 MIGRATION_ACTIVE=false
+SYSTEMD_ENABLE_PENDING=false
 
 # BASH_SOURCE is absent when the installer is streamed through `bash -s`.
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
@@ -594,7 +595,7 @@ EOF
     chmod 0644 "${temporary_unit}"
     mv -f -- "${temporary_unit}" "${unit_path}"
     systemctl daemon-reload
-    systemctl enable thuyet-minh-offline.service
+    SYSTEMD_ENABLE_PENDING=true
   fi
 elif [[ "${AUTOSTART_MODE}" == "provider" ]]; then
   log "Startup command cho nhà cung cấp: ${PROJECT_ROOT}/scripts/native-stack.sh foreground"
@@ -602,10 +603,14 @@ fi
 
 if [[ "${START_STACK}" == true ]]; then
   if [[ "${AUTOSTART_MODE}" == "systemd" ]]; then
-    systemctl start thuyet-minh-offline.service \
-      || die "Không thể khởi động systemd service"
-    wait_for_installer_stack \
-      || die "Systemd service đã start nhưng stack chưa khỏe"
+    if ! systemctl start thuyet-minh-offline.service; then
+      systemctl stop thuyet-minh-offline.service >/dev/null 2>&1 || true
+      die "Không thể khởi động systemd service"
+    fi
+    if ! wait_for_installer_stack; then
+      systemctl stop thuyet-minh-offline.service >/dev/null 2>&1 || true
+      die "Systemd service đã start nhưng stack chưa khỏe"
+    fi
   else
     "${PROJECT_ROOT}/scripts/native-stack.sh" start
   fi
@@ -627,6 +632,13 @@ if [[ "${START_STACK}" == true ]]; then
       ;;
     none) ;;
   esac
+fi
+
+if [[ "${SYSTEMD_ENABLE_PENDING}" == true ]]; then
+  if ! systemctl enable thuyet-minh-offline.service; then
+    systemctl stop thuyet-minh-offline.service >/dev/null 2>&1 || true
+    die "Không thể enable systemd service"
+  fi
 fi
 
 install -d -m 0750 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \

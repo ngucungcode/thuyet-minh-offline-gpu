@@ -459,6 +459,32 @@ fi
   || fail "DUB_NATIVE_ROOT không hợp lệ đã đổi source"
 assert_absent "${export_env_root}.migration-state.json"
 
+fingerprint_root="${TEST_ROOT}/fingerprint-legacy"
+fingerprint_stage="${TEST_ROOT}/fingerprint-stage"
+create_project_tree "${fingerprint_root}" old
+create_project_tree "${fingerprint_stage}" new
+printf '# DUB_NATIVE_ROOT intentionally uses the default\n' \
+  >"${fingerprint_root}/.env.native"
+mkdir -p "${fingerprint_root}/var/models" "${fingerprint_root}/.venv-native/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' >"${fingerprint_root}/.venv-native/bin/python"
+chmod +x "${fingerprint_root}/.venv-native/bin/python"
+printf '# incompatible runtime fixture\n' >>"${fingerprint_stage}/pyproject.toml"
+export MIGRATION_TEST_STACK_STATE="${TEST_ROOT}/fingerprint-stack.running"
+export MIGRATION_TEST_EVENTS="${TEST_ROOT}/fingerprint-stack.events"
+export MIGRATION_EXPECTED_JOURNAL="${fingerprint_root}.migration-state.json"
+touch "${MIGRATION_TEST_STACK_STATE}"
+if migrate_legacy_install "${fingerprint_root}" "${fingerprint_stage}"; then
+  fail "Migration chấp nhận runtime fingerprint không tương thích"
+fi
+[[ "$(<"${fingerprint_root}/SOURCE_MARKER")" == old ]] \
+  || fail "Fingerprint mismatch đã đổi source cũ"
+[[ "$(<"${fingerprint_stage}/SOURCE_MARKER")" == new ]] \
+  || fail "Fingerprint mismatch đã đổi staged source"
+[[ -e "${MIGRATION_TEST_STACK_STATE}" ]] \
+  || fail "Fingerprint mismatch đã dừng stack"
+assert_absent "${MIGRATION_TEST_EVENTS}"
+assert_absent "${fingerprint_root}.migration-state.json"
+
 fake_root="${TEST_ROOT}/fake"
 fake_stage="${TEST_ROOT}/fake-stage"
 mkdir -p "${fake_root}"

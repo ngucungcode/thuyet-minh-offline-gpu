@@ -684,6 +684,9 @@ migrate_legacy_install() {
   if [[ "${legacy_fingerprint}" == "${staged_fingerprint}" \
     && -x "${legacy_root}/.venv-native/bin/python" ]]; then
     MIGRATED_RUNTIME_REUSABLE=true
+  else
+    migration_error "Runtime legacy không tương thích source mới; chưa dừng stack hoặc đổi source"
+    return 1
   fi
   if migration_path_exists "${MIGRATION_JOURNAL_PATH}"; then
     migration_error "Đã có journal migration dang dở: ${MIGRATION_JOURNAL_PATH}"
