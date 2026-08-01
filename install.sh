@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.1.1"
+INSTALLER_VERSION="0.1.2"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
 SOURCE_REF="main"
@@ -34,6 +34,30 @@ log() {
 die() {
   printf '[thuyet-minh] Lỗi: %s\n' "$*" >&2
   exit 2
+}
+
+installer_stack_healthy() {
+  local status_output
+  local program
+  status_output="$("${PROJECT_ROOT}/scripts/native-stack.sh" status 2>/dev/null)" \
+    || return 1
+  for program in api prowlarr qbittorrent worker; do
+    printf '%s\n' "${status_output}" \
+      | grep -Eq "^${program}[[:space:]]+RUNNING[[:space:]]" || return 1
+  done
+  ! printf '%s\n' "${status_output}" \
+    | grep -Eq ' (BACKOFF|EXITED|FATAL|STOPPED|UNKNOWN) '
+}
+
+wait_for_installer_stack() {
+  local attempt
+  for attempt in {1..30}; do
+    if installer_stack_healthy; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 usage() {
@@ -140,6 +164,10 @@ case "${ACCEPTANCE_MODE}" in
   basic|full|none) ;;
   *) die "Acceptance phải là basic, full hoặc none" ;;
 esac
+
+if [[ -v DUB_NATIVE_ROOT ]]; then
+  die "Không truyền DUB_NATIVE_ROOT qua environment; hãy dùng --data-dir"
+fi
 
 [[ "${EUID}" -eq 0 ]] || die "Trình cài phải chạy bằng root (sudo)"
 
@@ -400,7 +428,13 @@ fi
 
 # shellcheck disable=SC1091
 source "${PROJECT_ROOT}/scripts/native-common.sh"
-install -d -m 0750 "${DUB_NATIVE_ROOT}"
+data_root_preparer="${PROJECT_ROOT}/installer/prepare-data-root.sh"
+[[ -x "${data_root_preparer}" ]] \
+  || die "Source thiếu helper chuẩn bị data root"
+data_root_state="$("${data_root_preparer}" "${DUB_NATIVE_ROOT}")" \
+  || die "Không thể chuẩn bị data root ${DUB_NATIVE_ROOT}"
+[[ "${data_root_state}" == "existing" || "${data_root_state}" == "created" ]] \
+  || die "Helper data root trả trạng thái không hợp lệ"
 state_file="${DUB_NATIVE_ROOT}/install-state.json"
 fingerprint="$(
   cd -- "${PROJECT_ROOT}"
@@ -412,6 +446,7 @@ fingerprint="$(
       scripts/native-bootstrap.sh \
       scripts/native-common.sh \
       scripts/install-llama-cpp.sh \
+      scripts/native-stack.sh \
       scripts/vieneu-offline.py
     find native -maxdepth 1 -type f -print0 \
       | sort -z \
@@ -440,6 +475,18 @@ if [[ "${bootstrap_required}" == true ]]; then
 else
   log "Runtime không đổi; bỏ qua bootstrap nặng"
 fi
+
+id "${DUB_NATIVE_USER}" >/dev/null 2>&1 \
+  || die "Không tồn tại runtime user ${DUB_NATIVE_USER}"
+runtime_group="$(id -gn "${DUB_NATIVE_USER}")" \
+  || die "Không xác định được primary group của ${DUB_NATIVE_USER}"
+command -v runuser >/dev/null \
+  || die "Không tìm thấy runuser"
+if [[ "${data_root_state}" == "created" ]]; then
+  install -d -m 0750 -o root -g "${runtime_group}" -- "${DUB_NATIVE_ROOT}"
+fi
+runuser -u "${DUB_NATIVE_USER}" -- test -x "${DUB_NATIVE_ROOT}" \
+  || die "Runtime user ${DUB_NATIVE_USER} không thể truy cập ${DUB_NATIVE_ROOT}"
 
 case "${MODEL_PROFILE}" in
   maximum)
@@ -489,8 +536,79 @@ else
   ln -s -- "${wrapper_target}" "${wrapper_link}"
 fi
 
+if [[ "${MIGRATION_ACTIVE}" == true ]]; then
+  case "${MIGRATION_OLD_STACK_MODE}" in
+    systemd|systemd-stopped)
+      if [[ "${AUTOSTART_MODE}" == "auto" ]]; then
+        AUTOSTART_MODE="systemd"
+      elif [[ "${AUTOSTART_MODE}" != "systemd" ]]; then
+        die "Migration không tự đổi control plane systemd; hãy giữ --autostart systemd"
+      fi
+      ;;
+    native)
+      if [[ "${AUTOSTART_MODE}" == "auto" ]]; then
+        AUTOSTART_MODE="provider"
+      elif [[ "${AUTOSTART_MODE}" == "systemd" ]]; then
+        die "Migration không tự đổi control plane native sang systemd"
+      fi
+      ;;
+    none)
+      if [[ "${AUTOSTART_MODE}" == "auto" ]]; then
+        AUTOSTART_MODE="provider"
+      elif [[ "${AUTOSTART_MODE}" == "systemd" ]]; then
+        die "Migration không tạo systemd control plane mới trong transaction"
+      fi
+      ;;
+  esac
+fi
+
+if [[ "${AUTOSTART_MODE}" == "auto" ]]; then
+  if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; then
+    AUTOSTART_MODE="systemd"
+  else
+    AUTOSTART_MODE="provider"
+  fi
+fi
+if [[ "${AUTOSTART_MODE}" == "systemd" ]]; then
+  [[ -d /run/systemd/system ]] || die "Máy này không chạy systemd"
+  if [[ "${MIGRATION_ACTIVE}" == true \
+    && "${MIGRATION_OLD_STACK_MODE}" == systemd* ]]; then
+    log "Giữ nguyên systemd unit và trạng thái enable hiện có"
+  else
+    unit_path="/etc/systemd/system/thuyet-minh-offline.service"
+    temporary_unit="$(mktemp /etc/systemd/system/.thuyet-minh-offline.XXXXXX)"
+    cat >"${temporary_unit}" <<EOF
+[Unit]
+Description=Thuyet Minh Offline GPU
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${PROJECT_ROOT}/scripts/native-stack.sh foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 "${temporary_unit}"
+    mv -f -- "${temporary_unit}" "${unit_path}"
+    systemctl daemon-reload
+    systemctl enable thuyet-minh-offline.service
+  fi
+elif [[ "${AUTOSTART_MODE}" == "provider" ]]; then
+  log "Startup command cho nhà cung cấp: ${PROJECT_ROOT}/scripts/native-stack.sh foreground"
+fi
+
 if [[ "${START_STACK}" == true ]]; then
-  "${PROJECT_ROOT}/scripts/native-stack.sh" start
+  if [[ "${AUTOSTART_MODE}" == "systemd" ]]; then
+    systemctl start thuyet-minh-offline.service \
+      || die "Không thể khởi động systemd service"
+    wait_for_installer_stack \
+      || die "Systemd service đã start nhưng stack chưa khỏe"
+  else
+    "${PROJECT_ROOT}/scripts/native-stack.sh" start
+  fi
   if [[ -s "${DUB_PROWLARR_API_KEY_FILE}" && -s "${DUB_QBITTORRENT_PASSWORD_FILE}" ]]; then
     "${PROJECT_ROOT}/scripts/native-init-services.sh"
   else
@@ -509,39 +627,6 @@ if [[ "${START_STACK}" == true ]]; then
       ;;
     none) ;;
   esac
-fi
-
-if [[ "${AUTOSTART_MODE}" == "auto" ]]; then
-  if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; then
-    AUTOSTART_MODE="systemd"
-  else
-    AUTOSTART_MODE="provider"
-  fi
-fi
-if [[ "${AUTOSTART_MODE}" == "systemd" ]]; then
-  [[ -d /run/systemd/system ]] || die "Máy này không chạy systemd"
-  unit_path="/etc/systemd/system/thuyet-minh-offline.service"
-  temporary_unit="$(mktemp /etc/systemd/system/.thuyet-minh-offline.XXXXXX)"
-  cat >"${temporary_unit}" <<EOF
-[Unit]
-Description=Thuyet Minh Offline GPU
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${PROJECT_ROOT}/scripts/native-stack.sh foreground
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  chmod 0644 "${temporary_unit}"
-  mv -f -- "${temporary_unit}" "${unit_path}"
-  systemctl daemon-reload
-  systemctl enable thuyet-minh-offline.service
-elif [[ "${AUTOSTART_MODE}" == "provider" ]]; then
-  log "Startup command cho nhà cung cấp: ${PROJECT_ROOT}/scripts/native-stack.sh foreground"
 fi
 
 install -d -m 0750 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \
@@ -574,6 +659,8 @@ install -m 0640 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \
 rm -f -- "${temporary_state}"
 
 if [[ "${MIGRATION_ACTIVE}" == true ]]; then
+  migration_verify_data_root_identity \
+    || die "Metadata data root đã thay đổi trong transaction migration"
   migration_write_journal committed "${MIGRATION_MOVED_ITEMS[@]}"
   migration_clear_journal
   MIGRATION_ACTIVE=false

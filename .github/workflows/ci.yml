@@ -39,7 +39,9 @@ jobs:
         run: bash -s -- --help < install.sh >/dev/null
 
       - name: Test legacy installer migration
-        run: bash tests/test-installer-migration.sh
+        run: |
+          sudo bash tests/test-data-root-permissions.sh
+          bash tests/test-installer-migration.sh
 
       - name: Run test suite
         run: python -m pytest -q
