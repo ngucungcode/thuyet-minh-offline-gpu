@@ -15,6 +15,13 @@ ACCEPTANCE_MODE="basic"
 ASSUME_YES=false
 DRY_RUN=false
 
+# BASH_SOURCE is absent when the installer is streamed through `bash -s`.
+SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
+SCRIPT_PATH=""
+if [[ -n "${SCRIPT_SOURCE}" ]]; then
+  SCRIPT_PATH="$(readlink -f -- "${SCRIPT_SOURCE}" 2>/dev/null || true)"
+fi
+
 log() {
   printf '[thuyet-minh] %s\n' "$*"
 }
@@ -125,7 +132,6 @@ esac
 
 [[ "${EUID}" -eq 0 ]] || die "Trình cài phải chạy bằng root (sudo)"
 
-SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true)"
 SCRIPT_ROOT=""
 if [[ -n "${SCRIPT_PATH}" && -f "${SCRIPT_PATH}" ]]; then
   candidate_root="$(CDPATH= cd -- "$(dirname -- "${SCRIPT_PATH}")" && pwd)"

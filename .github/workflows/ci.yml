@@ -35,5 +35,8 @@ jobs:
       - name: Check shell syntax
         run: bash -n install.sh scripts/*.sh
 
+      - name: Check streamed installer entrypoint
+        run: bash -s -- --help < install.sh >/dev/null
+
       - name: Run test suite
         run: python -m pytest -q
