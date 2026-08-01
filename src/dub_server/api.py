@@ -17,6 +17,7 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import (
@@ -101,6 +102,7 @@ class CoordinatorPort(Protocol):
 
 
 _LOGGER = logging.getLogger(__name__)
+_WEB_STATIC_ROOT = Path(__file__).resolve().with_name("web_static")
 
 
 async def _monitor_acquisition_jobs(
@@ -2174,6 +2176,19 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    web_index = _WEB_STATIC_ROOT / "index.html"
+    if web_index.is_file():
+        # API and documentation routes are registered first, so this final
+        # catch-all mount cannot shadow /v1, /docs, or /openapi.json.
+        application.mount(
+            "/",
+            StaticFiles(directory=_WEB_STATIC_ROOT, html=True),
+            name="web-dashboard",
+        )
+        application.state.web_dashboard_enabled = True
+    else:
+        application.state.web_dashboard_enabled = False
 
     return application
 

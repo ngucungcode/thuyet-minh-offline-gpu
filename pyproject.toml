@@ -65,6 +65,15 @@ dub = "dub_server.cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+dub_server = [
+  "web_static/*.html",
+  "web_static/*.png",
+  "web_static/assets/*.css",
+  "web_static/assets/*.js",
+  "web_static/assets/_vinext_fonts/*/*.woff2",
+]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 asyncio_mode = "auto"
