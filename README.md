@@ -14,16 +14,16 @@ khi sửa hệ thống, tự chọn model theo VRAM, khóa WebUI vào loopback, 
 chạy test/acceptance và cài lệnh `dub` toàn cục.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.1/install.sh \
-  | sudo bash -s -- --ref v0.1.1 --profile auto --start --yes
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.2/install.sh \
+  | sudo bash -s -- --ref v0.1.2 --profile auto --start --yes
 ```
 
 RTX 3090 24 GiB tự chọn profile `maximum` gồm Faster-Whisper Large-v3-Turbo,
 Gemma 4 31B Q4, TIGER-DnR và VieNeu v2. Có thể xem trước hoàn toàn không ghi:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.1/install.sh \
-  | sudo bash -s -- --ref v0.1.1 --dry-run
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.2/install.sh \
+  | sudo bash -s -- --ref v0.1.2 --dry-run
 ```
 
 Sau khi cài:
@@ -48,8 +48,8 @@ sạch, giữ nguyên `.env.native`, `var` và `.venv-native`, rồi lưu source
 đường dẫn backup được in ra; không tự xóa backup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.1/install.sh \
-  | sudo bash -s -- --ref v0.1.1 --migrate-existing \
+curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.2/install.sh \
+  | sudo bash -s -- --ref v0.1.2 --migrate-existing \
       --profile auto --start --yes
 ```
 

@@ -17,6 +17,11 @@ MIGRATION_SIGNAL_FAILED=""
 MIGRATION_SIGNAL_STACK_MODE="none"
 MIGRATION_SIGNAL_EXPECTED_ITEMS=()
 MIGRATION_JOURNAL_PATH=""
+MIGRATION_DATA_ROOT_DEVICE=""
+MIGRATION_DATA_ROOT_INODE=""
+MIGRATION_DATA_ROOT_UID=""
+MIGRATION_DATA_ROOT_GID=""
+MIGRATION_DATA_ROOT_MODE=""
 
 migration_log() {
   printf '[thuyet-minh] %s\n' "$*"
@@ -37,7 +42,10 @@ migration_write_journal() {
     "${MIGRATION_JOURNAL_PATH}" "${phase}" \
     "${MIGRATION_SIGNAL_TARGET}" "${MIGRATION_SIGNAL_BACKUP}" \
     "${MIGRATION_SIGNAL_FAILED}" "${MIGRATION_EFFECTIVE_DATA_DIR}" \
-    "${MIGRATION_SIGNAL_STACK_MODE}" "$@" <<'PY'
+    "${MIGRATION_SIGNAL_STACK_MODE}" \
+    "${MIGRATION_DATA_ROOT_DEVICE}" "${MIGRATION_DATA_ROOT_INODE}" \
+    "${MIGRATION_DATA_ROOT_UID}" "${MIGRATION_DATA_ROOT_GID}" \
+    "${MIGRATION_DATA_ROOT_MODE}" "$@" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -45,14 +53,21 @@ import sys
 
 path = Path(sys.argv[1])
 document = {
-    "schema_version": 1,
+    "schema_version": 2,
     "phase": sys.argv[2],
     "target": sys.argv[3],
     "backup": sys.argv[4],
     "failed_new": sys.argv[5],
     "data_root": sys.argv[6],
     "stack_mode": sys.argv[7],
-    "moved_items": sys.argv[8:],
+    "data_root_identity": None if not sys.argv[8] else {
+        "device": sys.argv[8],
+        "inode": sys.argv[9],
+        "uid": sys.argv[10],
+        "gid": sys.argv[11],
+        "mode": sys.argv[12],
+    },
+    "moved_items": sys.argv[13:],
 }
 temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
 payload = (json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n").encode()
@@ -92,7 +107,8 @@ PY
 
 migration_validate_project_tree() {
   local project_root="$1"
-  python3 - "${project_root}" <<'PY'
+  local tree_role="${2:-legacy}"
+  python3 - "${project_root}" "${tree_role}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -100,6 +116,7 @@ import sys
 import tomllib
 
 root = Path(sys.argv[1])
+tree_role = sys.argv[2]
 if not root.is_absolute() or root.is_symlink() or not root.is_dir():
     raise SystemExit("project root không phải thư mục tuyệt đối, thực")
 
@@ -118,6 +135,23 @@ required_files = (
     "scripts/native-stack.sh",
     "scripts/vieneu-offline.py",
 )
+if tree_role == "staged":
+    required_files += (
+        "installer/prepare-data-root.sh",
+        "scripts/dub-wrapper.sh",
+        "scripts/generate-sbom.py",
+        "scripts/native-acceptance.sh",
+        "scripts/native-init-services.sh",
+        "scripts/native-model.sh",
+        "scripts/native-phase2-acceptance.py",
+        "scripts/native-phase2-acceptance.sh",
+        "scripts/native-phase3-acceptance.py",
+        "scripts/native-phase3-acceptance.sh",
+        "scripts/native-phase4-acceptance.sh",
+        "scripts/native-preflight.sh",
+        "scripts/native-qbittorrent-smoke.py",
+        "scripts/phase4_acceptance.py",
+    )
 for relative in required_files:
     path = root / relative
     if path.is_symlink() or not path.is_file():
@@ -154,7 +188,20 @@ if components_document.get("schema_version") != 1 or not {
 } <= set(components):
     raise SystemExit("components.lock.json không phải catalog của dự án")
 
-for relative in ("scripts/native-bootstrap.sh", "scripts/native-stack.sh"):
+executable_files = ["scripts/native-bootstrap.sh", "scripts/native-stack.sh"]
+if tree_role == "staged":
+    executable_files += [
+        "installer/prepare-data-root.sh",
+        "scripts/dub-wrapper.sh",
+        "scripts/native-acceptance.sh",
+        "scripts/native-init-services.sh",
+        "scripts/native-model.sh",
+        "scripts/native-phase2-acceptance.sh",
+        "scripts/native-phase3-acceptance.sh",
+        "scripts/native-phase4-acceptance.sh",
+        "scripts/native-preflight.sh",
+    ]
+for relative in executable_files:
     if not os.access(root / relative, os.X_OK):
         raise SystemExit(f"script không executable: {relative}")
 PY
@@ -177,6 +224,9 @@ for raw_line in path.read_text(encoding="utf-8").splitlines():
     line = raw_line.strip()
     if not line or line.startswith("#"):
         continue
+    if re.match(r"(?:export[ \t]+)?DUB_NATIVE_ROOT\b", line) \
+            and not line.startswith("DUB_NATIVE_ROOT="):
+        raise SystemExit("Chỉ chấp nhận DUB_NATIVE_ROOT=/absolute/path dạng literal")
     if line.startswith("DUB_NATIVE_ROOT="):
         matches.append(line.removeprefix("DUB_NATIVE_ROOT="))
 
@@ -206,6 +256,7 @@ migration_runtime_fingerprint() {
         scripts/native-bootstrap.sh \
         scripts/native-common.sh \
         scripts/install-llama-cpp.sh \
+        scripts/native-stack.sh \
         scripts/vieneu-offline.py
       find native -maxdepth 1 -type f -print0 \
         | sort -z \
@@ -218,11 +269,133 @@ migration_restart_stack() {
   local project_root="$1"
   local stack_mode="$2"
   case "${stack_mode}" in
-    systemd) systemctl start thuyet-minh-offline.service ;;
-    native) "${project_root}/scripts/native-stack.sh" start ;;
+    systemd) systemctl start thuyet-minh-offline.service || return 1 ;;
+    systemd-stopped) return 0 ;;
+    native) "${project_root}/scripts/native-stack.sh" start || return 1 ;;
     none) return 0 ;;
     *) return 1 ;;
   esac
+  migration_wait_for_stack_health "${project_root}"
+}
+
+migration_stack_health_output() {
+  local project_root="$1"
+  local status_output
+
+  status_output="$("${project_root}/scripts/native-stack.sh" status 2>/dev/null)" \
+    || return 1
+  migration_stack_status_text_healthy "${status_output}"
+}
+
+migration_stack_status_text_healthy() {
+  local status_output="$1"
+  local program
+
+  for program in api prowlarr qbittorrent worker; do
+    printf '%s\n' "${status_output}" \
+      | grep -Eq "^${program}[[:space:]]+RUNNING[[:space:]]" || return 1
+  done
+  ! printf '%s\n' "${status_output}" \
+    | grep -Eq ' (BACKOFF|EXITED|FATAL|STOPPED|UNKNOWN) '
+}
+
+migration_native_supervisor_present() {
+  local project_root="$1"
+  local data_root="$2"
+  local pid_file="${data_root}/run/supervisord.pid"
+  local supervisor_pid=""
+
+  if [[ -r "${pid_file}" ]]; then
+    supervisor_pid="$(<"${pid_file}")"
+    if [[ "${supervisor_pid}" =~ ^[0-9]+$ ]] \
+      && kill -0 "${supervisor_pid}" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  if [[ -S "${data_root}/run/supervisor.sock" ]]; then
+    return 0
+  fi
+  python3 - "${project_root}/native/supervisord.conf" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+expected = os.path.realpath(sys.argv[1])
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        parts = (entry / "cmdline").read_bytes().split(b"\0")
+        arguments = [part.decode(errors="replace") for part in parts if part]
+    except (OSError, PermissionError):
+        continue
+    for index, argument in enumerate(arguments[:-1]):
+        if argument != "-c" or os.path.realpath(arguments[index + 1]) != expected:
+            continue
+        if any("supervisord" in os.path.basename(item) for item in arguments[:index]):
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+migration_wait_for_stack_health() {
+  local project_root="$1"
+  local attempt
+  for attempt in {1..30}; do
+    if migration_stack_health_output "${project_root}"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+migration_capture_data_root_identity() {
+  local data_root="$1"
+  if [[ ! -e "${data_root}" && ! -L "${data_root}" ]]; then
+    return 0
+  fi
+  [[ -d "${data_root}" && ! -L "${data_root}" \
+    && "$(readlink -f -- "${data_root}")" == "${data_root}" ]] || return 1
+  MIGRATION_DATA_ROOT_DEVICE="$(stat -c '%d' -- "${data_root}")"
+  MIGRATION_DATA_ROOT_INODE="$(stat -c '%i' -- "${data_root}")"
+  MIGRATION_DATA_ROOT_UID="$(stat -c '%u' -- "${data_root}")"
+  MIGRATION_DATA_ROOT_GID="$(stat -c '%g' -- "${data_root}")"
+  MIGRATION_DATA_ROOT_MODE="$(stat -c '%a' -- "${data_root}")"
+}
+
+migration_verify_data_root_identity() {
+  [[ -z "${MIGRATION_DATA_ROOT_DEVICE}" ]] && return 0
+  [[ -d "${MIGRATION_EFFECTIVE_DATA_DIR}" \
+    && ! -L "${MIGRATION_EFFECTIVE_DATA_DIR}" ]] || return 1
+  [[ "$(stat -c '%d:%i:%u:%g:%a' -- "${MIGRATION_EFFECTIVE_DATA_DIR}")" \
+    == "${MIGRATION_DATA_ROOT_DEVICE}:${MIGRATION_DATA_ROOT_INODE}:${MIGRATION_DATA_ROOT_UID}:${MIGRATION_DATA_ROOT_GID}:${MIGRATION_DATA_ROOT_MODE}" ]]
+}
+
+migration_restore_data_root_identity() {
+  [[ -z "${MIGRATION_DATA_ROOT_DEVICE}" ]] && return 0
+  [[ -d "${MIGRATION_EFFECTIVE_DATA_DIR}" \
+    && ! -L "${MIGRATION_EFFECTIVE_DATA_DIR}" ]] || return 1
+  [[ "$(stat -c '%d:%i' -- "${MIGRATION_EFFECTIVE_DATA_DIR}")" \
+    == "${MIGRATION_DATA_ROOT_DEVICE}:${MIGRATION_DATA_ROOT_INODE}" ]] || return 1
+  chown "${MIGRATION_DATA_ROOT_UID}:${MIGRATION_DATA_ROOT_GID}" \
+    -- "${MIGRATION_EFFECTIVE_DATA_DIR}" || return 1
+  chmod "${MIGRATION_DATA_ROOT_MODE}" -- "${MIGRATION_EFFECTIVE_DATA_DIR}" \
+    || return 1
+  migration_verify_data_root_identity
+}
+
+migration_recover_before_source_switch() {
+  local project_root="$1"
+  local stack_mode="$2"
+  shift 2
+  if migration_restart_stack "${project_root}" "${stack_mode}"; then
+    migration_clear_journal
+    return $?
+  fi
+  migration_write_journal rollback_incomplete "$@" || true
+  migration_error "Source chưa đổi nhưng trạng thái stack chưa phục hồi; giữ journal"
+  return 1
 }
 
 migration_abort_on_signal() {
@@ -250,9 +423,14 @@ migration_abort_on_signal() {
       else
         mv -- "${MIGRATION_SIGNAL_BACKUP}" "${MIGRATION_SIGNAL_TARGET}" \
           || recovery_ok=false
-        migration_restart_stack \
-          "${MIGRATION_SIGNAL_TARGET}" "${MIGRATION_SIGNAL_STACK_MODE}" \
-          || recovery_ok=false
+        if [[ "${recovery_ok}" == true ]]; then
+          migration_restore_data_root_identity || recovery_ok=false
+        fi
+        if [[ "${recovery_ok}" == true ]]; then
+          migration_restart_stack \
+            "${MIGRATION_SIGNAL_TARGET}" "${MIGRATION_SIGNAL_STACK_MODE}" \
+            || recovery_ok=false
+        fi
       fi
     else
       migration_restart_stack \
@@ -278,12 +456,21 @@ migration_rollback_switch() {
   local item
   local rollback_ok=true
 
-  if [[ "${new_source_active}" == true \
-    && -x "${legacy_root}/scripts/native-stack.sh" ]]; then
-    "${legacy_root}/scripts/native-stack.sh" stop >/dev/null 2>&1 || {
+  if [[ "${new_source_active}" == true ]]; then
+    if [[ "${old_stack_mode}" == systemd* ]]; then
+      systemctl stop thuyet-minh-offline.service >/dev/null 2>&1 || {
+        migration_error "Không thể dừng systemd stack source mới trước rollback"
+        return 1
+      }
+    elif [[ -x "${legacy_root}/scripts/native-stack.sh" ]]; then
+      "${legacy_root}/scripts/native-stack.sh" stop >/dev/null 2>&1 || {
+        migration_error "Không thể dừng stack source mới trước rollback"
+        return 1
+      }
+    else
       migration_error "Không thể dừng stack source mới trước rollback"
       return 1
-    }
+    fi
   fi
 
   for ((index=${#moved_items[@]} - 1; index >= 0; index--)); do
@@ -311,9 +498,17 @@ migration_rollback_switch() {
     migration_error "Không thể phục hồi source cũ từ ${backup_root}"
     return 1
   fi
-  migration_restart_stack "${legacy_root}" "${old_stack_mode}" \
-    || migration_error "Source cũ đã phục hồi nhưng stack cần được khởi động thủ công"
-  migration_error "Đã rollback source và dữ liệu cũ; source mới lỗi được giữ tại ${failed_root}"
+  if ! migration_restore_data_root_identity; then
+    migration_error "Source cũ đã phục hồi nhưng metadata data root chưa phục hồi"
+    migration_write_journal rollback_incomplete "${moved_items[@]}" || true
+    return 1
+  fi
+  if ! migration_restart_stack "${legacy_root}" "${old_stack_mode}"; then
+    migration_error "Source và dữ liệu cũ đã phục hồi nhưng stack chưa khỏe"
+    migration_write_journal rollback_incomplete "${moved_items[@]}" || true
+    return 1
+  fi
+  migration_error "Đã rollback source, dữ liệu và stack cũ; source mới lỗi được giữ tại ${failed_root}"
   return 0
 }
 
@@ -332,8 +527,9 @@ migrate_legacy_install() {
   local legacy_fingerprint
   local staged_fingerprint
   local stack_mode="none"
-  local stack_status_running=false
   local stop_output=""
+  local native_status_output=""
+  local native_status=0
   local database_path
   local active_jobs
   local new_source_active=false
@@ -348,6 +544,11 @@ migrate_legacy_install() {
   MIGRATION_MOVED_ITEMS=()
   MIGRATED_RUNTIME_REUSABLE=false
   MIGRATION_JOURNAL_PATH="${legacy_root}.migration-state.json"
+  MIGRATION_DATA_ROOT_DEVICE=""
+  MIGRATION_DATA_ROOT_INODE=""
+  MIGRATION_DATA_ROOT_UID=""
+  MIGRATION_DATA_ROOT_GID=""
+  MIGRATION_DATA_ROOT_MODE=""
 
   [[ "${legacy_root}" == /* && "${staged_root}" == /* \
     && "${requested_data_dir}" == /* ]] || {
@@ -382,11 +583,11 @@ migrate_legacy_install() {
     migration_error "Deployment đích đã là Git worktree; hãy dùng luồng update thông thường"
     return 1
   fi
-  migration_validate_project_tree "${legacy_root}" || {
+  migration_validate_project_tree "${legacy_root}" legacy || {
     migration_error "Không nhận diện được deployment cũ"
     return 1
   }
-  migration_validate_project_tree "${staged_root}" || {
+  migration_validate_project_tree "${staged_root}" staged || {
     migration_error "Source mới không vượt qua kiểm tra marker"
     return 1
   }
@@ -441,6 +642,10 @@ migrate_legacy_install() {
     migration_error "Chỉ tự động chuyển data nội bộ tại ${legacy_root}/var; hãy dùng data path ngoài source"
     return 1
   fi
+  migration_capture_data_root_identity "${effective_data_dir}" || {
+    migration_error "Data root phải là thư mục thực có metadata đọc được"
+    return 1
+  }
 
   if command -v mountpoint >/dev/null; then
     if mountpoint -q -- "${legacy_root}"; then
@@ -476,9 +681,15 @@ migrate_legacy_install() {
     migration_error "Không tạo được fingerprint source mới"
     return 1
   }
+  # The installer intentionally refuses to rebuild a persistent runtime after
+  # the source switch because rollback cannot undo mutations inside that venv.
+  # Reject an incompatible runtime here, before the journal or stack changes.
   if [[ "${legacy_fingerprint}" == "${staged_fingerprint}" \
     && -x "${legacy_root}/.venv-native/bin/python" ]]; then
     MIGRATED_RUNTIME_REUSABLE=true
+  else
+    migration_error "Runtime legacy không tương thích source mới; chưa dừng stack hoặc đổi source"
+    return 1
   fi
   if migration_path_exists "${MIGRATION_JOURNAL_PATH}"; then
     migration_error "Đã có journal migration dang dở: ${MIGRATION_JOURNAL_PATH}"
@@ -488,37 +699,30 @@ migrate_legacy_install() {
   if command -v systemctl >/dev/null \
     && systemctl is-active --quiet thuyet-minh-offline.service; then
     stack_mode="systemd"
-    migration_log "Dừng systemd service cũ trước khi đổi source"
-    systemctl stop thuyet-minh-offline.service || {
-      migration_error "Không thể dừng systemd service cũ"
+    migration_wait_for_stack_health "${legacy_root}" || {
+      migration_error "Systemd service cũ đang active nhưng stack không khỏe"
       return 1
     }
   else
-    if "${legacy_root}/scripts/native-stack.sh" status >/dev/null 2>&1; then
-      stack_status_running=true
-    fi
-    stop_output="$("${legacy_root}/scripts/native-stack.sh" stop 2>&1)" || {
-      migration_error "Không thể chứng minh stack cũ đã dừng sạch"
-      return 1
-    }
-    [[ -z "${stop_output}" ]] || printf '%s\n' "${stop_output}"
-    if [[ "${stack_status_running}" == true \
-      || "${stop_output}" != *"Stack native chưa chạy"* ]]; then
+    native_status_output="$("${legacy_root}/scripts/native-stack.sh" status 2>&1)" \
+      || native_status=$?
+    if [[ "${native_status}" -eq 0 ]]; then
       stack_mode="native"
-    fi
-  fi
-
-  database_path="${effective_data_dir}/state/jobs.sqlite3"
-  if [[ -f "${database_path}" ]]; then
-    active_jobs="$(sqlite3 -readonly "${database_path}" \
-      "SELECT count(*) FROM jobs WHERE active_slot = 1 OR status = 'cancelling';")" || {
-      migration_restart_stack "${legacy_root}" "${stack_mode}" || true
-      migration_error "Không kiểm tra được job đang hoạt động; chưa thay đổi source"
-      return 1
-    }
-    if [[ ! "${active_jobs}" =~ ^[0-9]+$ || "${active_jobs}" -ne 0 ]]; then
-      migration_restart_stack "${legacy_root}" "${stack_mode}" || true
-      migration_error "Còn job đang hoạt động; đã khởi động lại stack cũ và dừng migration"
+      migration_stack_status_text_healthy "${native_status_output}" || {
+        migration_error "Supervisor cũ đang chạy nhưng stack không đủ bốn service khỏe"
+        return 1
+      }
+    elif [[ "${native_status}" -eq 1 ]]; then
+      if migration_native_supervisor_present "${legacy_root}" "${effective_data_dir}"; then
+        migration_error "Supervisor còn tồn tại dù status báo stack chưa chạy"
+        return 1
+      fi
+      if command -v systemctl >/dev/null \
+        && systemctl cat thuyet-minh-offline.service >/dev/null 2>&1; then
+        stack_mode="systemd-stopped"
+      fi
+    else
+      migration_error "Không đọc được trạng thái native stack cũ (exit ${native_status})"
       return 1
     fi
   fi
@@ -528,7 +732,6 @@ migrate_legacy_install() {
   failed_root="${legacy_root}.failed-migration-${timestamp}-$$"
   if migration_path_exists "${backup_root}" || migration_path_exists "${failed_root}"; then
     migration_error "Đường dẫn backup đã tồn tại; chưa thay đổi source"
-    migration_restart_stack "${legacy_root}" "${stack_mode}" || true
     return 1
   fi
 
@@ -545,17 +748,71 @@ migrate_legacy_install() {
     MIGRATION_SIGNAL_ARMED=false
     trap - INT TERM HUP
     migration_clear_journal || true
-    migration_restart_stack "${legacy_root}" "${stack_mode}" || true
-    migration_error "Không thể ghi journal migration; chưa thay đổi source"
+    migration_error "Không thể ghi journal migration; chưa dừng stack hoặc đổi source"
     return 1
+  fi
+
+  case "${stack_mode}" in
+    systemd)
+      migration_log "Dừng systemd service cũ trước khi đổi source"
+      systemctl stop thuyet-minh-offline.service || {
+        migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+          || true
+        MIGRATION_SIGNAL_ARMED=false
+        trap - INT TERM HUP
+        migration_error "Không thể dừng systemd service cũ"
+        return 1
+      }
+      ;;
+    native)
+      stop_output="$("${legacy_root}/scripts/native-stack.sh" stop 2>&1)" || {
+        migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+          || true
+        MIGRATION_SIGNAL_ARMED=false
+        trap - INT TERM HUP
+        migration_error "Không thể chứng minh stack cũ đã dừng sạch"
+        return 1
+      }
+      [[ -z "${stop_output}" ]] || printf '%s\n' "${stop_output}"
+      ;;
+    none) ;;
+  esac
+  if ! migration_write_journal stack_stopped; then
+    migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+      || true
+    MIGRATION_SIGNAL_ARMED=false
+    trap - INT TERM HUP
+    migration_error "Không thể cập nhật journal sau khi dừng stack"
+    return 1
+  fi
+
+  database_path="${effective_data_dir}/state/jobs.sqlite3"
+  if [[ -f "${database_path}" ]]; then
+    active_jobs="$(sqlite3 -readonly "${database_path}" \
+      "SELECT count(*) FROM jobs WHERE active_slot = 1 OR status = 'cancelling';")" || {
+      migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+        || true
+      MIGRATION_SIGNAL_ARMED=false
+      trap - INT TERM HUP
+      migration_error "Không kiểm tra được job đang hoạt động; chưa thay đổi source"
+      return 1
+    }
+    if [[ ! "${active_jobs}" =~ ^[0-9]+$ || "${active_jobs}" -ne 0 ]]; then
+      migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+        || true
+      MIGRATION_SIGNAL_ARMED=false
+      trap - INT TERM HUP
+      migration_error "Còn job đang hoạt động; đã dừng migration"
+      return 1
+    fi
   fi
 
   if ! mv -- "${legacy_root}" "${backup_root}"; then
     MIGRATION_SIGNAL_ARMED=false
     trap - INT TERM HUP
     migration_error "Không thể tạo backup source cũ"
-    migration_clear_journal || true
-    migration_restart_stack "${legacy_root}" "${stack_mode}" || true
+    migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+      || true
     return 1
   fi
   if ! migration_write_journal old_moved; then
@@ -564,8 +821,12 @@ migrate_legacy_install() {
     MIGRATION_SIGNAL_ARMED=false
     trap - INT TERM HUP
     if [[ "${old_restore_ok}" == true ]]; then
-      migration_clear_journal || true
-      migration_restart_stack "${legacy_root}" "${stack_mode}" || true
+      if migration_restore_data_root_identity; then
+        migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+          || true
+      else
+        migration_write_journal rollback_incomplete || true
+      fi
     fi
     migration_error "Không cập nhật được journal sau backup; đã rollback"
     return 1
@@ -576,10 +837,14 @@ migrate_legacy_install() {
       migration_error "Cần phục hồi thủ công từ ${backup_root}"
       return 1
     }
-    migration_restart_stack "${legacy_root}" "${stack_mode}" || true
     MIGRATION_SIGNAL_ARMED=false
     trap - INT TERM HUP
-    migration_clear_journal || true
+    if migration_restore_data_root_identity; then
+      migration_recover_before_source_switch "${legacy_root}" "${stack_mode}" \
+        || true
+    else
+      migration_write_journal rollback_incomplete || true
+    fi
     return 1
   fi
   new_source_active=true
