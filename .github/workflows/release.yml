@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Validate release contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          installer_version="$(sed -n 's/^INSTALLER_VERSION="\([^"]*\)"/\1/p' install.sh)"
+          package_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test -n "${installer_version}"
+          test "${installer_version}" = "${package_version}"
+          test "${GITHUB_REF_NAME}" = "v${installer_version}"
+          bash -n install.sh
+
+      - name: Install test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --disable-pip-version-check -e '.[test]'
+
+      - name: Test backend and installer
+        run: |
+          bash -n install.sh installer/*.sh scripts/*.sh tests/*.sh
+          bash -s -- --help < install.sh >/dev/null
+          sudo bash tests/test-data-root-permissions.sh
+          bash tests/test-installer-migration.sh
+          python -m pytest -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.13.1"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Test dashboard and SBOM
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run embed
+          test -z "$(git status --porcelain -- ../src/dub_server/web_static)"
+          npm run validate:sbom
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout verified tagged source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Recheck immutable release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          installer_version="$(sed -n 's/^INSTALLER_VERSION="\([^\"]*\)"/\1/p' install.sh)"
+          package_version="$(sed -n '/^\[project\]$/,/^\[/ s/^version = "\([^\"]*\)"/\1/p' pyproject.toml)"
+          test -n "${installer_version}"
+          test "${installer_version}" = "${package_version}"
+          test "${GITHUB_REF_NAME}" = "v${installer_version}"
+          bash -n install.sh
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          asset_specs=(
+            "install.sh"
+            "release/sbom.cdx.json#sbom.cdx.json"
+            "THIRD_PARTY_NOTICES.md"
+          )
+          asset_sources=(
+            "install.sh"
+            "release/sbom.cdx.json"
+            "THIRD_PARTY_NOTICES.md"
+          )
+          asset_names=(
+            "install.sh"
+            "sbom.cdx.json"
+            "THIRD_PARTY_NOTICES.md"
+          )
+
+          verify_assets() {
+            local download_dir
+            download_dir="$(mktemp -d)"
+            for index in "${!asset_names[@]}"; do
+              gh release download "${GITHUB_REF_NAME}" \
+                --pattern "${asset_names[$index]}" \
+                --dir "${download_dir}"
+              cmp -- "${asset_sources[$index]}" \
+                "${download_dir}/${asset_names[$index]}"
+            done
+            rm -rf -- "${download_dir}"
+          }
+
+          if release_is_draft="$(gh release view "${GITHUB_REF_NAME}" \
+            --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "${release_is_draft}" != "true" ]]; then
+              verify_assets
+              echo "Release ${GITHUB_REF_NAME} đã được publish đúng asset; không sửa release bất biến."
+              exit 0
+            fi
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --verify-tag \
+              --generate-notes \
+              --draft \
+              --title "Thuyết Minh Offline GPU ${GITHUB_REF_NAME}"
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" "${asset_specs[@]}" --clobber
+          verify_assets
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

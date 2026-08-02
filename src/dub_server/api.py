@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from . import __version__
 from .admin_integrations import (
     AdminIntegrationError,
     OpenSubtitlesAdminClient,
@@ -822,7 +823,7 @@ def create_app(
 
     application = FastAPI(
         title="Thuyết Minh Offline GPU",
-        version="0.1.0",
+        version=__version__,
         description="Điều khiển tải nguồn hợp pháp và pipeline thuyết minh cục bộ.",
         lifespan=lifespan,
     )

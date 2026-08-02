@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+from . import __version__
+
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _NORMALIZE_NAME_RE = re.compile(r"[-_.]+")
@@ -474,7 +476,7 @@ def _application_version(
     try:
         return importlib.metadata.version("thuyet-minh-offline-gpu")
     except importlib.metadata.PackageNotFoundError:
-        return "0.1.0"
+        return __version__
 
 
 def _license(value: str) -> dict[str, dict[str, str]]:

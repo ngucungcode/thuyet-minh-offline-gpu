@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from dub_server import __version__
 from dub_server.opensubtitles import normalize_opensubtitles_api_root
 
 from dub_server.domain import (
@@ -232,7 +233,7 @@ class CompositeSubtitleProvider(SubtitleProvider):
         opensubtitles_api_key: str | None = None,
         opensubtitles_token: str | None = None,
         opensubtitles_base_url: str = "https://api.opensubtitles.com/api/v1",
-        user_agent: str = "ThuyetMinhOfflineGPU v0.1",
+        user_agent: str = f"ThuyetMinhOfflineGPU v{__version__}",
         embedded_probe: EmbeddedSubtitleProbe | None = None,
         timeout_seconds: float = 20.0,
         max_download_bytes: int = 20 * 1024 * 1024,

@@ -2,10 +2,11 @@
 
 set -Eeuo pipefail
 
-INSTALLER_VERSION="0.1.2"
+main() {
+INSTALLER_VERSION="0.2.0"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
-SOURCE_REF="main"
+SOURCE_REF="v${INSTALLER_VERSION}"
 INSTALL_DIR=""
 DATA_DIR=""
 DATA_DIR_EXPLICIT=false
@@ -71,14 +72,14 @@ Cách dùng:
 
 Tùy chọn:
   --repo URL                 Repository Git (dùng khi chạy qua curl)
-  --ref REF                  Branch, tag hoặc commit; mặc định main
+  --ref REF                  Branch, tag hoặc commit; mặc định tag của installer
   --install-dir PATH         Mặc định /workspace/thuyet-minh-offline hoặc /opt/...
   --data-dir PATH            Mặc định <install-dir>/var
   --profile PROFILE          auto, maximum, balanced, minimal hoặc none
   --start | --no-start       Khởi động stack sau cài; mặc định --start
   --autostart MODE           auto, systemd, provider hoặc none
   --acceptance MODE          basic, full hoặc none; mặc định basic
-  --migrate-existing         Nâng cấp deployment cũ không có Git; giữ dữ liệu và tạo backup
+  --migrate-existing         Nâng cấp deployment cũ hợp lệ; giữ dữ liệu và tạo backup
   --yes                      Xác nhận tải model và chạy không tương tác
   --dry-run                  Chỉ kiểm tra và in kế hoạch
   --help                     Hiển thị trợ giúp
@@ -295,8 +296,13 @@ if [[ "${DRY_RUN}" == true ]]; then
 fi
 
 if [[ "${MODEL_PROFILE}" != "none" && "${ASSUME_YES}" != true ]]; then
-  if [[ -t 0 ]]; then
-    read -r -p "Tiếp tục tải model và cài runtime? [y/N] " answer
+  if exec {prompt_fd}<>/dev/tty 2>/dev/null; then
+    if ! read -r -u "${prompt_fd}" -p \
+      "Tiếp tục tải model và cài runtime? [y/N] " answer; then
+      exec {prompt_fd}>&-
+      die "Không đọc được xác nhận; chạy không tương tác cần cờ --yes"
+    fi
+    exec {prompt_fd}>&-
     [[ "${answer}" =~ ^[Yy]$ ]] || die "Đã hủy cài đặt"
   else
     die "Chạy không tương tác cần cờ --yes"
@@ -330,12 +336,16 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
       || die "Không thể lấy source ${REPOSITORY_URL}@${SOURCE_REF}"
   elif is_git_worktree "${INSTALL_DIR}"; then
     current_origin="$(git -C "${INSTALL_DIR}" remote get-url origin)"
+    current_commit="$(git -C "${INSTALL_DIR}" rev-parse HEAD)"
     normalize_url() { printf '%s' "$1" | sed -E 's#\.git$##'; }
     [[ "$(normalize_url "${current_origin}")" == "$(normalize_url "${REPOSITORY_URL}")" ]] \
       || die "Repository hiện có không đúng origin: ${current_origin}"
     [[ -z "$(git -C "${INSTALL_DIR}" status --porcelain)" ]] \
       || die "Repository có thay đổi cục bộ; không tự ghi đè"
     git -C "${INSTALL_DIR}" fetch --depth 1 origin "${SOURCE_REF}"
+    target_commit="$(git -C "${INSTALL_DIR}" rev-parse FETCH_HEAD)"
+    [[ "${current_commit}" == "${target_commit}" ]] \
+      || die "Không tự nâng cấp in-place giữa hai release; source và runtime hiện tại chưa bị thay đổi"
     git -C "${INSTALL_DIR}" checkout --detach FETCH_HEAD
   elif [[ -n "$(find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
     if [[ "${MIGRATE_EXISTING}" != true ]]; then
@@ -683,3 +693,6 @@ fi
 log "Cài đặt hoàn tất"
 log "Kiểm tra: dub doctor && dub stack status"
 log "Bắt đầu: dub search \"Tên phim\" --year 2024"
+}
+
+main "$@"

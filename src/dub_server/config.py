@@ -15,6 +15,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from . import __version__
+
 
 class Settings(BaseSettings):
     """Application settings loaded from ``DUB_*`` environment variables."""
@@ -77,7 +79,7 @@ class Settings(BaseSettings):
     opensubtitles_base_url_file: Path | None = Path(
         "/run/secrets/opensubtitles_base_url"
     )
-    opensubtitles_user_agent: str = "ThuyetMinhOfflineGPU v0.1"
+    opensubtitles_user_agent: str = f"ThuyetMinhOfflineGPU v{__version__}"
 
     api_url: str = "http://127.0.0.1:8080"
     api_host: str = "127.0.0.1"

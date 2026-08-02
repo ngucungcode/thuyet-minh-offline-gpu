@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 
+from .. import __version__
 from .prowlarr import ProwlarrIndexerGateway
 from .qbittorrent import QBittorrentDownloadClient
 from .service import AcquisitionService
@@ -21,7 +22,7 @@ def build_acquisition_service(
     opensubtitles_api_key: str | None = None,
     opensubtitles_token: str | None = None,
     opensubtitles_base_url: str = "https://api.opensubtitles.com/api/v1",
-    opensubtitles_user_agent: str = "ThuyetMinhOfflineGPU v0.1",
+    opensubtitles_user_agent: str = f"ThuyetMinhOfflineGPU v{__version__}",
     embedded_probe: EmbeddedSubtitleProbe | None = None,
 ) -> AcquisitionService:
     """Build adapters around one client whose lifecycle remains API-owned."""
