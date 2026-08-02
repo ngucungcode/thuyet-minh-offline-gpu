@@ -130,6 +130,20 @@ def _asr_result(*, model_id: str = ASR_MODEL_ID) -> TranscriptionResult:
     )
 
 
+def _two_segment_asr_result(*, model_id: str = ASR_MODEL_ID) -> TranscriptionResult:
+    return TranscriptionResult(
+        source="asr",
+        language="en",
+        language_probability=0.96,
+        duration_us=DURATION_US,
+        model_id=model_id,
+        segments=(
+            TranscriptSegment(100_000, 500_000, "Hello offline"),
+            TranscriptSegment(500_000, 1_900_000, "world"),
+        ),
+    )
+
+
 def _stage(
     tmp_path: Path,
     store: StateStore,
@@ -239,7 +253,83 @@ async def test_asr_fallback_verifies_local_model_decodes_pcm_and_commits(
     assert recognizer_calls[0]["compute_type"] == "int8_float16"
     assert recognizer_calls[0]["language"] is None
     assert result.details["asr_model_id"] == ASR_MODEL_ID
+    assert result.details["asr_step"] == "finalizing"
+    assert result.details["asr_processed_us"] == DURATION_US
+    assert result.details["asr_duration_us"] == DURATION_US
+    assert result.details["asr_segment_count"] == 1
+    assert result.details["asr_progress_permille"] == 1000
     assert store.list_transcript_segments(job_id)[0].text == "Hello offline world"
+
+
+@pytest.mark.asyncio
+async def test_asr_progress_is_throttled_mapped_and_finalized_before_commit(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _ = _ready_job(tmp_path, transcript_source="asr")
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+
+    class ProgressRecognizer:
+        def transcribe(self, _media_path: Path, **kwargs: Any) -> TranscriptionResult:
+            progress = kwargs["on_progress"]
+            progress(500_000, 1)
+            progress(500_000, 1)
+            progress(500_001, 1)
+            progress(1_900_000, 2)
+            return _two_segment_asr_result()
+
+    result = await _stage(
+        tmp_path,
+        store,
+        decoder_factory=lambda: FakeDecoder([]),
+        recognizer_factory=ProgressRecognizer,
+        model_resolver=lambda *_args: SimpleNamespace(path=model_path),
+    ).run(job_id)
+
+    assert result.status is JobStatus.READY_TRANSLATION
+    assert result.progress_permille == 450
+    assert result.details["asr_step"] == "finalizing"
+    assert result.details["asr_processed_us"] == DURATION_US
+    assert result.details["asr_duration_us"] == DURATION_US
+    assert result.details["asr_segment_count"] == 2
+    assert result.details["asr_progress_permille"] == 1000
+
+    asr_status_events = [
+        event
+        for event in store.list_events(job_id, limit=1000)
+        if event.event_type == "job.status"
+        and isinstance(event.payload.get("details"), dict)
+        and event.payload["details"].get("asr_step") in {
+            "preparing",
+            "decoding",
+            "recognizing",
+            "finalizing",
+        }
+    ]
+    recognizing = [
+        event.payload
+        for event in asr_status_events
+        if event.payload["details"]["asr_step"] == "recognizing"
+    ]
+    assert [item["details"]["asr_progress_permille"] for item in recognizing] == [
+        0,
+        250,
+        950,
+    ]
+    assert [item["progress_permille"] for item in recognizing] == [275, 319, 440]
+
+    finalizing_index = next(
+        index
+        for index, event in enumerate(asr_status_events)
+        if event.payload["details"].get("asr_step") == "finalizing"
+    )
+    assert asr_status_events[finalizing_index].payload["progress_permille"] == 449
+    committed_index = next(
+        index
+        for index, event in enumerate(asr_status_events)
+        if event.payload.get("status") == JobStatus.READY_TRANSLATION.value
+    )
+    assert finalizing_index < committed_index
 
 
 @pytest.mark.asyncio
@@ -355,6 +445,8 @@ async def test_valid_checkpoint_artifact_commits_without_any_inference(
     ).run(job_id)
 
     assert result.status is JobStatus.READY_TRANSLATION
+    assert result.details["asr_step"] == "finalizing"
+    assert result.details["asr_progress_permille"] == 1000
     assert store.list_transcript_segments(job_id)[0].text == "Hello offline world"
 
 
@@ -382,6 +474,10 @@ async def test_cancellation_during_recognition_never_writes_or_commits(
 
     assert result.status is JobStatus.CANCELLING
     assert result.cancel_requested is True
+    assert result.details["asr_step"] == "recognizing"
+    assert result.details["asr_processed_us"] == 0
+    assert result.details["asr_segment_count"] == 0
+    assert result.details["asr_progress_permille"] == 0
     assert store.list_transcript_segments(job_id) == []
     assert not (tmp_path / "jobs" / job_id / "source-transcript.json").exists()
 

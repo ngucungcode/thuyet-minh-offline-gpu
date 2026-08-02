@@ -129,6 +129,16 @@ class TranscriptionStage:
                 running = self._ensure_running_status(job.id, resumed.result.source)
                 if self._is_cancel_requested(job.id):
                     return self._store.get_job(job.id)
+                if resumed.result.source == "asr":
+                    self._update_asr_progress(
+                        running.id,
+                        step="finalizing",
+                        processed_us=duration_us,
+                        duration_us=duration_us,
+                        segment_count=len(resumed.result.segments),
+                        stage_progress_permille=1000,
+                        overall_progress_permille=449,
+                    )
                 return self._commit(running, resumed)
 
             if source == "subtitle":
@@ -269,6 +279,15 @@ class TranscriptionStage:
         running = self._ensure_running_status(job.id, "asr")
         if self._is_cancel_requested(job.id):
             return self._store.get_job(job.id)
+        self._update_asr_progress(
+            running.id,
+            step="preparing",
+            processed_us=0,
+            duration_us=duration_us,
+            segment_count=0,
+            stage_progress_permille=0,
+            overall_progress_permille=275,
+        )
 
         verified = await asyncio.to_thread(
             self._model_resolver,
@@ -288,6 +307,15 @@ class TranscriptionStage:
         audio_stream_index = self._optional_non_negative_int(
             selected_media.get("audio_stream_index")
         )
+        self._update_asr_progress(
+            running.id,
+            step="decoding",
+            processed_us=0,
+            duration_us=duration_us,
+            segment_count=0,
+            stage_progress_permille=0,
+            overall_progress_permille=275,
+        )
         pcm_path = self._job_dir(running.id) / "source-audio-16k.wav"
         decoder = self._audio_decoder_factory()
         decoded = await decoder.decode(
@@ -301,10 +329,59 @@ class TranscriptionStage:
             return self._store.get_job(running.id)
 
         recognizer = self._recognizer_factory()
+        self._update_asr_progress(
+            running.id,
+            step="recognizing",
+            processed_us=0,
+            duration_us=duration_us,
+            segment_count=0,
+            stage_progress_permille=0,
+            overall_progress_permille=275,
+        )
+        last_persisted_end_us = 0
+        last_persisted_segment_count = 0
+        last_persisted_permille = 0
+        received_progress = False
 
-        def progress(_end_us: int, _segment_count: int) -> None:
+        def progress(end_us: int, segment_count: int) -> None:
+            nonlocal last_persisted_end_us
+            nonlocal last_persisted_segment_count
+            nonlocal last_persisted_permille
+            nonlocal received_progress
             if self._is_cancel_requested(running.id):
                 raise _StageCancelled()
+
+            bounded_end_us = min(max(int(end_us), 0), duration_us)
+            bounded_segment_count = max(int(segment_count), 0)
+            stage_progress = min(
+                999,
+                round(bounded_end_us * 1000 / duration_us),
+            )
+            should_persist = (
+                not received_progress
+                or stage_progress - last_persisted_permille >= 10
+                or bounded_end_us - last_persisted_end_us >= 2_000_000
+                or bounded_segment_count - last_persisted_segment_count >= 10
+            )
+            if not should_persist:
+                return
+
+            overall_progress = 275 + round(stage_progress * 174 / 1000)
+            updated = self._update_asr_progress(
+                running.id,
+                step="recognizing",
+                processed_us=bounded_end_us,
+                duration_us=duration_us,
+                segment_count=bounded_segment_count,
+                stage_progress_permille=stage_progress,
+                overall_progress_permille=overall_progress,
+            )
+            if self._shutdown_requested() or self._cancelled(updated):
+                raise _StageCancelled()
+            received_progress = True
+            last_persisted_end_us = bounded_end_us
+            last_persisted_segment_count = bounded_segment_count
+            last_persisted_permille = stage_progress
 
         result = await asyncio.to_thread(
             recognizer.transcribe,
@@ -318,7 +395,49 @@ class TranscriptionStage:
         )
         if self._is_cancel_requested(running.id):
             return self._store.get_job(running.id)
+        self._update_asr_progress(
+            running.id,
+            step="finalizing",
+            processed_us=duration_us,
+            duration_us=duration_us,
+            segment_count=len(result.segments),
+            stage_progress_permille=1000,
+            overall_progress_permille=449,
+        )
         return await self._publish_and_commit(running, result)
+
+    def _update_asr_progress(
+        self,
+        job_id: str,
+        *,
+        step: str,
+        processed_us: int,
+        duration_us: int,
+        segment_count: int,
+        stage_progress_permille: int,
+        overall_progress_permille: int,
+    ) -> JobRecord:
+        """Persist bounded ASR progress without advancing the transcript stage."""
+
+        current = self._store.get_job(job_id)
+        if self._shutdown_requested() or self._cancelled(current):
+            raise _StageCancelled()
+        details = {
+            **current.details,
+            "asr_step": step,
+            "asr_processed_us": min(max(processed_us, 0), duration_us),
+            "asr_duration_us": duration_us,
+            "asr_segment_count": max(segment_count, 0),
+            "asr_progress_permille": min(max(stage_progress_permille, 0), 1000),
+        }
+        bounded_overall = min(max(overall_progress_permille, 275), 449)
+        return self._store.update_status(
+            job_id,
+            JobStatus.TRANSCRIBING,
+            expected_status=JobStatus.TRANSCRIBING,
+            progress_permille=max(current.progress_permille, bounded_overall),
+            details=details,
+        )
 
     async def _publish_and_commit(
         self,

@@ -69,6 +69,30 @@ type JobError = {
   retryable?: boolean;
 };
 
+type JobDetails = JsonObject & {
+  transcript_source?: unknown;
+  stage_progress_permille?: unknown;
+  downloaded_bytes?: unknown;
+  total_bytes?: unknown;
+  speed_bytes_per_second?: unknown;
+  eta_seconds?: unknown;
+  asr_step?: unknown;
+  asr_processed_us?: unknown;
+  asr_duration_us?: unknown;
+  asr_segment_count?: unknown;
+  asr_progress_permille?: unknown;
+  translation_completed_blocks?: unknown;
+  translation_block_count?: unknown;
+  separation_progress_permille?: unknown;
+  phase4_message?: unknown;
+  tts_completed_blocks?: unknown;
+  tts_block_count?: unknown;
+  timing_completed_blocks?: unknown;
+  timing_block_count?: unknown;
+  export_processed_us?: unknown;
+  export_duration_us?: unknown;
+};
+
 type Job = {
   id: string;
   release_id: string;
@@ -82,7 +106,7 @@ type Job = {
     models?: Record<string, string | null>;
     voice?: { voice_id?: string | null; reference_path?: string | null } | null;
   };
-  details?: JsonObject;
+  details?: JobDetails;
   error?: JobError | null;
   result?: JsonObject | null;
   cancel_requested?: boolean;
@@ -221,6 +245,35 @@ const modelStages = [
 
 const nonActiveStatuses = new Set(["completed", "failed", "cancelled", "paused"]);
 
+const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+
+const stageProgressRanges: Record<string, readonly [number, number]> = {
+  acquisition: [0, 200],
+  subtitle: [200, 250],
+  asr: [275, 450],
+  translation: [450, 650],
+  separation: [650, 735],
+  tts: [735, 850],
+  timing: [850, 900],
+  mix: [900, 910],
+  export: [910, 985],
+  verify: [985, 1000],
+  done: [1000, 1000],
+};
+
+type ProgressMetric = {
+  label: string;
+  value: string;
+  hint?: string;
+};
+
+type JobProgressView = {
+  overallPercent: number;
+  stagePercent: number;
+  summary: string;
+  metrics: ProgressMetric[];
+};
+
 class ApiRequestError extends Error {
   code?: string;
   retryable?: boolean;
@@ -258,16 +311,94 @@ async function api<T>(path: string, init?: RequestInit, admin = false): Promise<
   return payload as T;
 }
 
-function formatBytes(value?: number | null) {
-  if (!value) return "Chưa rõ dung lượng";
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function nonNegativeNumber(value: unknown): number | null {
+  const parsed = finiteNumber(value);
+  return parsed === null || parsed < 0 ? null : parsed;
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function ratioPercent(completed: unknown, total: unknown): number | null {
+  const completedValue = nonNegativeNumber(completed);
+  const totalValue = nonNegativeNumber(total);
+  if (completedValue === null || totalValue === null || totalValue <= 0) return null;
+  return clampPercent((completedValue / totalValue) * 100);
+}
+
+function formatBytes(value?: unknown) {
+  const parsed = nonNegativeNumber(value);
+  if (parsed === null) return "Chưa rõ dung lượng";
   const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
+  let size = parsed;
   let unit = 0;
   while (size >= 1024 && unit < units.length - 1) {
     size /= 1024;
     unit += 1;
   }
   return `${size.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatByteRate(value: unknown) {
+  const parsed = nonNegativeNumber(value);
+  return parsed === null ? "Chưa đo được" : `${formatBytes(parsed)}/giây`;
+}
+
+function formatDurationSeconds(value: unknown) {
+  const parsed = nonNegativeNumber(value);
+  if (parsed === null) return "Chưa ước tính";
+  const totalSeconds = Math.round(parsed);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours} giờ ${String(minutes).padStart(2, "0")} phút`;
+  if (minutes > 0) return `${minutes} phút ${String(seconds).padStart(2, "0")} giây`;
+  return `${seconds} giây`;
+}
+
+function formatDurationUs(value: unknown) {
+  const parsed = nonNegativeNumber(value);
+  if (parsed === null) return "Chưa rõ";
+  const totalSeconds = Math.round(parsed / 1_000_000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatCount(value: unknown) {
+  const parsed = nonNegativeNumber(value);
+  return parsed === null ? "—" : Math.round(parsed).toLocaleString("vi-VN");
+}
+
+function formatElapsed(createdAt: string, updatedAt: string, status: string, nowMs: number) {
+  const start = new Date(createdAt).valueOf();
+  if (!Number.isFinite(start) || nowMs <= 0) return "Đang tính…";
+  const terminalEnd = new Date(updatedAt).valueOf();
+  const end = terminalStatuses.has(status) && Number.isFinite(terminalEnd) ? terminalEnd : nowMs;
+  return formatDurationSeconds(Math.max(0, (end - start) / 1000));
+}
+
+function formatFreshness(updatedAt: string, nowMs: number) {
+  const updated = new Date(updatedAt).valueOf();
+  if (!Number.isFinite(updated) || nowMs <= 0) return "Đang đồng bộ…";
+  const seconds = Math.max(0, Math.floor((nowMs - updated) / 1000));
+  if (seconds < 5) return "Vừa cập nhật";
+  if (seconds < 60) return `${seconds} giây trước`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} phút trước`;
+  return formatDate(updatedAt);
 }
 
 function formatDate(value?: string | null) {
@@ -316,6 +447,118 @@ function isSkippedTranscriptStage(job: Job, stage: string) {
   return (source === "asr" && stage === "subtitle") || (source === "subtitle" && stage === "asr");
 }
 
+function asrStepLabel(value: unknown) {
+  if (value === "preparing") return "Đang chuẩn bị model";
+  if (value === "decoding") return "Đang giải mã âm thanh";
+  if (value === "recognizing") return "Đang nhận dạng lời nói";
+  if (value === "finalizing") return "Đang hoàn thiện transcript";
+  return "Đang xử lý nhận dạng";
+}
+
+function fallbackStagePercent(job: Job) {
+  if (job.status === "completed" || job.stage === "done") return 100;
+  const range = stageProgressRanges[job.stage];
+  if (!range) return 0;
+  const [start, end] = range;
+  if (end <= start) return 100;
+  return clampPercent(((job.progress_permille - start) / (end - start)) * 100);
+}
+
+function jobProgressView(job: Job): JobProgressView {
+  const details = job.details ?? {};
+  const overallPercent = clampPercent((finiteNumber(job.progress_permille) ?? 0) / 10);
+  let stagePercent: number | null = null;
+  let summary = statusLabels[job.status] ?? job.status;
+  const metrics: ProgressMetric[] = [];
+
+  if (job.stage === "acquisition") {
+    stagePercent = nonNegativeNumber(details.stage_progress_permille);
+    stagePercent = stagePercent === null ? ratioPercent(details.downloaded_bytes, details.total_bytes) : stagePercent / 10;
+    const downloaded = nonNegativeNumber(details.downloaded_bytes);
+    const total = nonNegativeNumber(details.total_bytes);
+    const speed = nonNegativeNumber(details.speed_bytes_per_second);
+    const eta = nonNegativeNumber(details.eta_seconds);
+    if (downloaded !== null || total !== null) {
+      const transferred = `${formatBytes(downloaded)}${total !== null ? ` / ${formatBytes(total)}` : ""}`;
+      metrics.push({ label: "Đã tải", value: transferred });
+      summary = transferred;
+    }
+    if (speed !== null) metrics.push({ label: "Tốc độ", value: formatByteRate(speed) });
+    if (eta !== null) metrics.push({ label: "Còn lại", value: formatDurationSeconds(eta), hint: "ước tính" });
+  } else if (job.stage === "asr") {
+    stagePercent = nonNegativeNumber(details.asr_progress_permille);
+    stagePercent = stagePercent === null
+      ? ratioPercent(details.asr_processed_us, details.asr_duration_us)
+      : stagePercent / 10;
+    const processed = nonNegativeNumber(details.asr_processed_us);
+    const duration = nonNegativeNumber(details.asr_duration_us);
+    const segments = nonNegativeNumber(details.asr_segment_count);
+    if (processed !== null || duration !== null) {
+      const timeline = `${formatDurationUs(processed)}${duration !== null ? ` / ${formatDurationUs(duration)}` : ""}`;
+      metrics.push({ label: "Đã nhận dạng", value: timeline });
+      summary = timeline;
+    }
+    if (segments !== null) metrics.push({ label: "Đoạn lời", value: formatCount(segments), hint: "đã nhận diện" });
+    if (typeof details.asr_step === "string" && details.asr_step) {
+      metrics.push({
+        label: "Tác vụ ASR",
+        value: asrStepLabel(details.asr_step),
+      });
+    }
+  } else if (job.stage === "translation") {
+    stagePercent = ratioPercent(details.translation_completed_blocks, details.translation_block_count);
+    const completed = nonNegativeNumber(details.translation_completed_blocks);
+    const total = nonNegativeNumber(details.translation_block_count);
+    if (completed !== null || total !== null) {
+      const blocks = `${formatCount(completed)}${total !== null ? ` / ${formatCount(total)}` : ""}`;
+      metrics.push({ label: "Block đã dịch", value: blocks });
+      summary = `${blocks} block`;
+    }
+  } else if (job.stage === "separation") {
+    const permille = nonNegativeNumber(details.separation_progress_permille);
+    stagePercent = permille === null ? null : permille / 10;
+    if (typeof details.phase4_message === "string" && details.phase4_message.trim()) {
+      summary = details.phase4_message.trim();
+      metrics.push({ label: "Đang thực hiện", value: summary });
+    }
+  } else if (job.stage === "tts") {
+    stagePercent = ratioPercent(details.tts_completed_blocks, details.tts_block_count);
+    const completed = nonNegativeNumber(details.tts_completed_blocks);
+    const total = nonNegativeNumber(details.tts_block_count);
+    if (completed !== null || total !== null) {
+      const blocks = `${formatCount(completed)}${total !== null ? ` / ${formatCount(total)}` : ""}`;
+      metrics.push({ label: "Block tạo giọng", value: blocks });
+      summary = `${blocks} block`;
+    }
+  } else if (job.stage === "timing") {
+    stagePercent = ratioPercent(details.timing_completed_blocks, details.timing_block_count);
+    const completed = nonNegativeNumber(details.timing_completed_blocks);
+    const total = nonNegativeNumber(details.timing_block_count);
+    if (completed !== null || total !== null) {
+      const blocks = `${formatCount(completed)}${total !== null ? ` / ${formatCount(total)}` : ""}`;
+      metrics.push({ label: "Block đã khớp", value: blocks });
+      summary = `${blocks} block`;
+    }
+  } else if (job.stage === "export") {
+    stagePercent = ratioPercent(details.export_processed_us, details.export_duration_us);
+    const processed = nonNegativeNumber(details.export_processed_us);
+    const duration = nonNegativeNumber(details.export_duration_us);
+    if (processed !== null || duration !== null) {
+      const timeline = `${formatDurationUs(processed)}${duration !== null ? ` / ${formatDurationUs(duration)}` : ""}`;
+      metrics.push({ label: "Đã dựng", value: timeline });
+      summary = timeline;
+    }
+  }
+
+  const normalizedStagePercent = clampPercent(stagePercent ?? fallbackStagePercent(job));
+  metrics.unshift({
+    label: "Công đoạn hiện tại",
+    value: `${normalizedStagePercent.toFixed(1)}%`,
+    hint: stageLabels[job.stage] ?? job.stage,
+  });
+  return { overallPercent, stagePercent: normalizedStagePercent, summary, metrics };
+}
+
 export default function Home() {
   const [health, setHealth] = useState<Health | null>(null);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
@@ -341,6 +584,11 @@ export default function Home() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(0);
+  const [progressStream, setProgressStream] = useState<{
+    jobId: string;
+    state: "live" | "fallback";
+  } | null>(null);
 
   const [integrations, setIntegrations] = useState<IntegrationsStatus | null>(null);
   const [indexers, setIndexers] = useState<ProwlarrIndexer[]>([]);
@@ -404,6 +652,13 @@ export default function Home() {
     };
   }, [refreshCatalog, refreshIntegrations, refreshOverview]);
 
+  useEffect(() => {
+    const updateClock = () => setNowMs(Date.now());
+    updateClock();
+    const timer = window.setInterval(updateClock, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const activeJob = useMemo(
     () => jobs.find((job) => !nonActiveStatuses.has(job.status)),
     [jobs],
@@ -418,6 +673,48 @@ export default function Home() {
       null,
     [jobs, selectedJobId],
   );
+
+  useEffect(() => {
+    const jobId = selectedJob?.id;
+    if (!jobId || terminalStatuses.has(selectedJob.status)) return;
+
+    const stream = new EventSource(`/v1/jobs/${encodeURIComponent(jobId)}/events`);
+    let refreshTimer: number | null = null;
+    const requestRefresh = () => {
+      if (refreshTimer !== null) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void refreshOverview();
+      }, 150);
+    };
+    const handleOpen = () => setProgressStream({ jobId, state: "live" });
+    const handleError = () => setProgressStream({ jobId, state: "fallback" });
+    const eventTypes = [
+      "job.created",
+      "job.status",
+      "job.warning",
+      "job.checkpoint",
+      "translation.plan",
+      "translation.block",
+    ];
+    stream.addEventListener("open", handleOpen);
+    stream.addEventListener("error", handleError);
+    for (const eventType of eventTypes) stream.addEventListener(eventType, requestRefresh);
+
+    return () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      stream.removeEventListener("open", handleOpen);
+      stream.removeEventListener("error", handleError);
+      for (const eventType of eventTypes) stream.removeEventListener(eventType, requestRefresh);
+      stream.close();
+    };
+  }, [refreshOverview, selectedJob?.id, selectedJob?.status]);
+
+  const progressStreamState: "idle" | "connecting" | "live" | "fallback" = !selectedJob || terminalStatuses.has(selectedJob.status)
+    ? "idle"
+    : progressStream?.jobId === selectedJob.id
+      ? progressStream.state
+      : "connecting";
   const validModelCount = catalog.models.filter((model) => model.installed && model.valid).length;
 
   function modelsFor(stage: string) {
@@ -650,6 +947,7 @@ export default function Home() {
     selectedJob?.details?.subtitle_warnings,
     selectedJob?.result?.warnings,
   );
+  const selectedProgress = selectedJob ? jobProgressView(selectedJob) : null;
   const prowlarrStatus = integrations?.prowlarr;
   const openSubStatus = integrations?.opensubtitles;
 
@@ -928,7 +1226,7 @@ export default function Home() {
           ) : (
             <div className="job-list">
               {jobs.map((job) => {
-                const percent = Math.max(0, Math.min(100, job.progress_permille / 10));
+                const progress = jobProgressView(job);
                 const activeStage = stagePosition(job);
                 const title = job.spec?.search_query || shortId(job.release_id);
                 return (
@@ -938,32 +1236,41 @@ export default function Home() {
                   >
                     <div className="job-topline">
                       <span className="job-status">{statusLabels[job.status] ?? job.status}</span>
-                      <span className="job-percent">{percent.toFixed(0)}%</span>
+                      <span className="job-percent">{progress.overallPercent.toFixed(1)}%</span>
                     </div>
                     <h3>{title}</h3>
                     <p className="job-id">JOB {shortId(job.id)} · {stageLabels[job.stage] ?? job.stage}</p>
-                    <div className="progress-track" aria-label={`Tiến trình ${percent.toFixed(0)} phần trăm`}>
-                      <i style={{ width: `${percent}%` }} />
+                    <div
+                      className="progress-track"
+                      role="progressbar"
+                      aria-label={`Tiến trình tổng ${progress.overallPercent.toFixed(1)} phần trăm`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Number(progress.overallPercent.toFixed(1))}
+                    >
+                      <i style={{ width: `${progress.overallPercent}%` }} />
                     </div>
+                    <p className="job-live-metric">
+                      <strong>{progress.stagePercent.toFixed(1)}%</strong>
+                      <span>{progress.summary}</span>
+                    </p>
                     <div className="stage-track" aria-label="Các công đoạn xử lý">
-                      {stageOrder.map((stage, index) => (
-                        <span
-                          key={stage}
-                          className={
-                            isSkippedTranscriptStage(job, stage)
-                              ? "skipped"
-                              : index < activeStage
-                                ? "done"
-                                : index === activeStage
-                                  ? "current"
-                                  : ""
-                          }
-                          title={stageLabels[stage]}
-                        >
-                          <i />
-                          <small>{stageLabels[stage]}</small>
-                        </span>
-                      ))}
+                      {stageOrder.map((stage, index) => {
+                        const skipped = isSkippedTranscriptStage(job, stage);
+                        const state = skipped ? "bỏ qua" : index < activeStage ? "hoàn tất" : index === activeStage ? "đang chạy" : "đang chờ";
+                        return (
+                          <span
+                            key={stage}
+                            className={skipped ? "skipped" : index < activeStage ? "done" : index === activeStage ? "current" : ""}
+                            title={`${stageLabels[stage]} · ${state}`}
+                            aria-current={!skipped && index === activeStage ? "step" : undefined}
+                            aria-label={`${stageLabels[stage]}: ${state}`}
+                          >
+                            <i aria-hidden="true" />
+                            <small>{stageLabels[stage]}</small>
+                          </span>
+                        );
+                      })}
                     </div>
                     {job.error?.message && <p className="job-error">{job.error.message}</p>}
                     <div className="job-actions">
@@ -1013,17 +1320,115 @@ export default function Home() {
             <div><span>Ngôn ngữ</span><strong>{selectedJob.spec?.source_language ?? "auto"}</strong></div>
           </div>
 
-          <div className="detail-stage-track">
+          {selectedProgress && (
+            <div className="progress-overview">
+              <div className="progress-overview-head">
+                <div>
+                  <span className="progress-kicker">TIẾN TRÌNH TOÀN BỘ PIPELINE</span>
+                  <strong>{selectedProgress.overallPercent.toFixed(1)}%</strong>
+                  <p aria-live="polite">{selectedProgress.summary}</p>
+                </div>
+                <span className={`stream-indicator ${progressStreamState}`}>
+                  <i aria-hidden="true" />
+                  {progressStreamState === "live"
+                    ? "Cập nhật trực tiếp"
+                    : progressStreamState === "connecting"
+                      ? "Đang nối luồng sự kiện"
+                      : progressStreamState === "fallback"
+                        ? "Dự phòng cập nhật 3 giây"
+                        : selectedJob.status === "completed"
+                          ? "Đã chốt tiến trình"
+                          : selectedJob.status === "failed"
+                            ? "Đã dừng do lỗi"
+                            : selectedJob.status === "cancelled"
+                              ? "Đã hủy tiến trình"
+                          : "Theo dõi định kỳ"}
+                </span>
+              </div>
+
+              <div
+                className="progress-track progress-track-large"
+                role="progressbar"
+                aria-label={`Tiến trình tổng ${selectedProgress.overallPercent.toFixed(1)} phần trăm`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Number(selectedProgress.overallPercent.toFixed(1))}
+              >
+                <i style={{ width: `${selectedProgress.overallPercent}%` }} />
+              </div>
+
+              <div className="stage-progress-row">
+                <div className="stage-progress-copy">
+                  <span>Công đoạn {stageLabels[selectedJob.stage] ?? selectedJob.stage}</span>
+                  <strong>{selectedProgress.stagePercent.toFixed(1)}%</strong>
+                </div>
+                <div
+                  className="stage-progress-track"
+                  role="progressbar"
+                  aria-label={`Tiến trình công đoạn ${stageLabels[selectedJob.stage] ?? selectedJob.stage}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Number(selectedProgress.stagePercent.toFixed(1))}
+                >
+                  <i style={{ width: `${selectedProgress.stagePercent}%` }} />
+                </div>
+              </div>
+
+              <div className="progress-stat-grid">
+                {selectedProgress.metrics.map((metric) => (
+                  <div className="progress-stat" key={`${metric.label}-${metric.value}`}>
+                    <span>{metric.label}</span>
+                    <strong>{metric.value}</strong>
+                    {metric.hint && <small>{metric.hint}</small>}
+                  </div>
+                ))}
+                <div className="progress-stat">
+                  <span>Đã chạy</span>
+                  <strong>{formatElapsed(selectedJob.created_at, selectedJob.updated_at, selectedJob.status, nowMs)}</strong>
+                  <small>Từ {formatDate(selectedJob.created_at)}</small>
+                </div>
+                <div className="progress-stat">
+                  <span>Cập nhật gần nhất</span>
+                  <strong>{formatFreshness(selectedJob.updated_at, nowMs)}</strong>
+                  <small>{formatDate(selectedJob.updated_at)}</small>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="detail-stage-track" aria-label="Trạng thái từng công đoạn">
             {stageOrder.map((stage, index) => {
               const activeStage = stagePosition(selectedJob);
               const skipped = isSkippedTranscriptStage(selectedJob, stage);
+              const current = !skipped && index === activeStage;
+              const attention = current && ["failed", "paused", "cancelling", "cancelled"].includes(selectedJob.status);
+              const state = skipped
+                ? "Bỏ qua"
+                : index < activeStage
+                  ? "Hoàn tất"
+                  : current
+                    ? selectedJob.status === "failed"
+                      ? "Có lỗi"
+                      : selectedJob.status === "paused"
+                        ? "Tạm dừng"
+                        : selectedJob.status === "cancelling"
+                          ? "Đang hủy"
+                          : selectedJob.status === "cancelled"
+                            ? "Đã hủy"
+                            : "Đang chạy"
+                    : "Đang chờ";
               return (
                 <div
                   key={stage}
-                  className={skipped ? "skipped" : index < activeStage ? "done" : index === activeStage ? "current" : ""}
+                  className={`${skipped ? "skipped" : index < activeStage ? "done" : current ? "current" : ""} ${attention ? "attention" : ""}`}
+                  aria-current={current ? "step" : undefined}
+                  aria-label={`${stageLabels[stage]}: ${state}`}
                 >
-                  <i>{skipped ? "—" : index < activeStage ? "✓" : String(index + 1).padStart(2, "0")}</i>
+                  <i aria-hidden="true">
+                    {skipped ? "—" : index < activeStage ? "✓" : attention ? "!" : String(index + 1).padStart(2, "0")}
+                  </i>
                   <span>{stageLabels[stage]}</span>
+                  <small>{state}</small>
                 </div>
               );
             })}

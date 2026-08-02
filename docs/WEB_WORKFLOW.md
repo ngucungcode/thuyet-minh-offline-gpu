@@ -11,7 +11,11 @@
 5. Nếu job dừng ở `needs_subtitle_selection`, chọn một ứng viên hoặc chọn dùng
    ASR. Nếu dừng ở `needs_language`, chọn ngôn ngữ đúng để pipeline tiếp tục.
 6. Theo dõi các stage acquisition → subtitle/ASR → translation → separation →
-   TTS → timing → mix → export → verify.
+   TTS → timing → mix → export → verify. Dashboard hiển thị cả tiến độ tổng và
+   tiến độ công đoạn hiện tại: dung lượng/tốc độ/ETA khi tải, số segment ASR,
+   số block dịch/TTS/timing, tiến độ tách âm và thời lượng export đã xử lý. SSE
+   cập nhật ngay khi job đổi trạng thái; polling định kỳ vẫn được giữ làm dự
+   phòng nếu kết nối sự kiện bị ngắt.
 7. Khi hoàn tất, tải MP4, phụ đề tiếng Việt SRT và timing report JSON. Có thể hủy
    job đang chạy hoặc tiếp tục job đã pause/lỗi có thể retry ngay trên web.
 
@@ -45,6 +49,10 @@ Chỉ cấu hình nguồn mà bạn được phép truy cập và chỉ tải n�
 OpenSubtitles yêu cầu các request sau đăng nhập tiếp tục dùng `base_url` trả về;
 dashboard lưu route này sau khi giới hạn nó vào các host API chính thức. Xem
 [tài liệu API OpenSubtitles](https://ai.opensubtitles.com/docs).
+
+Backend chuẩn hóa thứ tự query tìm kiếm và chữ thường theo canonical URL của
+OpenSubtitles. Mọi redirect còn lại bị từ chối thay vì tự động chuyển tiếp API
+key/bearer token sang URL khác.
 
 1. Đăng ký/đăng nhập OpenSubtitles và tạo API consumer key.
 2. Trong mục **Tích hợp**, nhập API key, username và password rồi bấm lưu.
