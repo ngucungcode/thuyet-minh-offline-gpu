@@ -32,6 +32,27 @@ and container-layer licenses will be exported as an SBOM during Phase 5.
 | FFmpeg | Ubuntu 24.04 package | LGPL-2.1-or-later/GPL depending on build configuration | <https://ffmpeg.org/legal.html> |
 | Supervisor | 4.3.0 (native mode) | BSD-derived | <https://github.com/Supervisor/supervisor> |
 
+## Embedded web dashboard
+
+The production wheel contains the dashboard's compiled browser assets, not a
+Node.js server. Exact direct and transitive JavaScript dependencies are locked
+in `web/package-lock.json` and inventoried with runtime/build scope, integrity
+hashes, versions, licenses, and npm package URLs in `release/sbom.cdx.json`.
+
+| Component | Pinned version | Use | License | Source |
+|---|---:|---|---|---|
+| Next.js | 16.2.12 | Build/runtime browser bundle | MIT | <https://github.com/vercel/next.js> |
+| React | 19.2.6 | Browser UI runtime | MIT | <https://github.com/facebook/react> |
+| React DOM | 19.2.6 | Browser rendering runtime | MIT | <https://github.com/facebook/react> |
+| Vinext | 0.0.50 | Static dashboard build adapter | MIT | <https://github.com/cloudflare/vinext> |
+| Vite | 8.0.13 | Build-only bundler | MIT | <https://github.com/vitejs/vite> |
+| Tailwind CSS | 4.2.1 | Build-only CSS tooling | MIT | <https://github.com/tailwindlabs/tailwindcss> |
+| Cloudflare Vite plugin | 1.37.1 | Development/build adapter | MIT | <https://github.com/cloudflare/workers-sdk> |
+
+`npm ci` is required for a reproducible frontend build. Production native and
+Docker deployments serve the checked-in `dub_server/web_static` files through
+FastAPI and do not install or execute Node.js dependencies.
+
 The managed-container deployment reuses provider packages Python 3.11.0rc1 and
 PyTorch 2.7.0+cu126 instead of replacing them with the Docker pins above. It uses
 FFmpeg 4.4.2 from Ubuntu 22.04. These measured native versions are recorded in

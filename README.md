@@ -1,422 +1,220 @@
 # Thuyết Minh Offline GPU
 
-Biến thể Ubuntu/Docker của hệ thống thuyết minh video, dành cho nội dung mà
-người dùng sở hữu hoặc được phép tải và xử lý. ASR, dịch và TTS chạy cục bộ;
-không có suy luận đám mây. Dự án không cấu hình sẵn indexer/tracker, không vượt
-DRM và không tự xác định quyền sử dụng thay cho người dùng.
+Thuyết Minh Offline GPU là hệ thống tự phục vụ để tạo bản thuyết minh tiếng Việt
+trên máy chủ NVIDIA, vận hành qua dashboard web hoặc CLI `dub`.
 
-## Cài một lệnh
+Sau khi tải nguồn xong, ASR, dịch, tách thoại, TTS và dựng video đều chạy cục bộ.
+Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
-Đường triển khai được hỗ trợ đầy đủ là Ubuntu 22.04 x86_64, Python 3.11/3.12,
-NVIDIA CUDA compute capability 8.6, RAM từ 16 GiB và image nhà cung cấp đã có
-PyTorch CUDA. Trình cài không thay driver/CUDA, kiểm tra toàn bộ điều kiện trước
-khi sửa hệ thống, tự chọn model theo VRAM, khóa WebUI vào loopback, tạo secret,
-chạy test/acceptance và cài lệnh `dub` toàn cục.
+> Chỉ tải và xử lý nội dung, phụ đề và giọng nói mà bạn sở hữu, được cấp phép hoặc
+> có quyền sử dụng hợp pháp. Dự án không vượt DRM, không kèm indexer/tracker và
+> không xác định quyền sử dụng thay cho người dùng.
+
+## Tính năng
+
+- Dashboard tiếng Việt cho tìm nguồn, chọn model, tạo và theo dõi job.
+- Prowlarr và qBittorrent cho nguồn do người vận hành tự cấu hình hợp pháp.
+- Ưu tiên phụ đề nhúng, sidecar hoặc OpenSubtitles; fallback ASR CUDA offline.
+- Dịch sang tiếng Việt bằng Gemma 4 qua `llama.cpp` CUDA.
+- TIGER-DnR loại thoại diễn viên nhưng giữ nhạc và hiệu ứng.
+- VieNeu v2 hoặc Piper tạo lời thuyết minh tiếng Việt.
+- Khớp từng slot thoại, ducking, mix và xuất H.264 passthrough + AAC.
+- Checkpoint atomic, hủy, retry và tiếp tục sau khi tiến trình khởi động lại.
+- Tiến độ realtime theo stage, tốc độ tải, ETA, segment và số block.
+- Xuất MP4, phụ đề tiếng Việt SRT và timing report JSON.
+- Một job GPU nặng tại một thời điểm để kiểm soát VRAM.
+
+## Môi trường được hỗ trợ
+
+Trình cài production `v0.2.0` hỗ trợ đường triển khai native sau:
+
+- Ubuntu 22.04 x86_64.
+- Python 3.11 hoặc 3.12 tại lệnh `python3`.
+- NVIDIA GPU có compute capability chính xác `8.6` (`sm_86`).
+- Ít nhất 16 GiB RAM.
+- NVIDIA driver hoạt động và `nvidia-smi` nhìn thấy GPU.
+- CUDA toolkit có `nvcc` tại `/usr/local/cuda/bin/nvcc`.
+- PyTorch CUDA đã được image nhà cung cấp cài sẵn và `torch.cuda.is_available()` trả `True`.
+- Quyền `root` hoặc tài khoản có `sudo`.
+
+Trình cài không thay NVIDIA driver, CUDA toolkit hoặc PyTorch của nhà cung cấp.
+Docker Compose dành cho host có Docker daemon và NVIDIA Container Toolkit là
+đường triển khai nâng cao; image hiện tại cũng được build riêng cho `sm_86`.
+
+### Profile model
+
+| Profile | VRAM phù hợp | Dung lượng trống tối thiểu | Model chính |
+|---|---:|---:|---|
+| `auto` | Tự phát hiện | Theo profile được chọn | Tự chọn cấu hình bên dưới |
+| `maximum` | ≥22 GiB | 55 GiB | Large-v3-Turbo, Gemma 4 31B, TIGER-DnR, VieNeu |
+| `balanced` | ≥8 GiB | 35 GiB | Whisper Small, Gemma 4 E2B, TIGER-DnR, VieNeu |
+| `minimal` | ≥6 GiB | 25 GiB | Whisper Small, Gemma 4 E2B, TIGER-DnR, Piper |
+| `none` | Không cài model | 20 GiB | Chỉ runtime và dịch vụ |
+
+Các mức trên là dung lượng trống trước khi cài. Hãy dự phòng thêm dung lượng cho
+phim nguồn, artifact trung gian, output và backup nâng cấp.
+
+## Cài nhanh
+
+Trên Ubuntu đáp ứng đủ yêu cầu, chạy:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.2/install.sh \
-  | sudo bash -s -- --ref v0.1.2 --profile auto --start --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/latest/download/install.sh | sudo bash
 ```
 
-RTX 3090 24 GiB tự chọn profile `maximum` gồm Faster-Whisper Large-v3-Turbo,
-Gemma 4 31B Q4, TIGER-DnR và VieNeu v2. Có thể xem trước hoàn toàn không ghi:
+Installer kiểm tra toàn bộ preflight trước khi sửa hệ thống, tự chọn profile,
+tải và xác minh SHA-256 model, tạo secret, khởi động stack, chạy acceptance cơ
+bản và cài `dub` tại `/usr/local/bin/dub`.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.2/install.sh \
-  | sudo bash -s -- --ref v0.1.2 --dry-run
-```
-
-Sau khi cài:
+Kiểm tra sau cài:
 
 ```bash
 dub doctor
 dub stack status
-dub models profiles
-dub search "Tên phim" --year 2024
-dub submit --release-id RELEASE_ID --i-have-rights --subtitle-mode asr \
-  --wait --output result.mp4
+dub health
 ```
 
-`install.sh --help` liệt kê profile `maximum|balanced|minimal|none`, thư mục cài,
-data volume, Git ref, autostart và cổng nghiệm thu. Trình cài idempotent: không
-reset worktree có thay đổi, không ghi đè `.env.native`, không xoay secret sai
-ngữ cảnh và bỏ qua bootstrap nặng khi fingerprint runtime không đổi.
+Nếu đang ở shell `root` trên GPU container không có `sudo`, thay phần cuối lệnh
+cài bằng `| bash`.
 
-Deployment cũ được chép lên máy mà không có `.git` cần nâng cấp một lần bằng
-`--migrate-existing`. Trình cài clone source mới vào staging trước, dừng stack
-sạch, giữ nguyên `.env.native`, `var` và `.venv-native`, rồi lưu source cũ ở một
-đường dẫn backup được in ra; không tự xóa backup:
+### Mở dashboard
+
+Các giao diện quản trị chỉ bind loopback. Từ máy cá nhân, mở một SSH tunnel bằng
+lệnh một dòng sau; thay `SSH_PORT` và `GPU_HOST` bằng thông tin máy chủ:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/v0.1.2/install.sh \
-  | sudo bash -s -- --ref v0.1.2 --migrate-existing \
-      --profile auto --start --yes
+ssh -p SSH_PORT -L 8080:127.0.0.1:8080 -L 8081:127.0.0.1:8081 -L 9696:127.0.0.1:9696 root@GPU_HOST
 ```
 
-Chạy riêng `sudo bash -s -- ...` không tải installer và vì vậy không thực hiện
-gì; luôn giữ phần `curl ... |` ở đầu lệnh.
+Giữ phiên SSH này mở, sau đó truy cập:
 
-Trong lúc đổi source, installer ghi journal atomic cạnh thư mục cài và rollback
-khi nhận `INT`/`TERM` hoặc khi bước sau lỗi. Nếu máy mất điện đúng lúc rename,
-lần chạy sau sẽ dừng fail-closed khi thấy journal, thay vì coi source thiếu dữ
-liệu là một bản cài hợp lệ.
+| Dịch vụ | Địa chỉ trên máy cá nhân |
+|---|---|
+| Dashboard và API | `http://127.0.0.1:8080/` |
+| OpenAPI | `http://127.0.0.1:8080/docs` |
+| qBittorrent WebUI | `http://127.0.0.1:8081/` |
+| Prowlarr | `http://127.0.0.1:9696/` |
 
-## Trạng thái
+## Tạo bản thuyết minh đầu tiên
 
-Phase 1 cung cấp nền Docker/GPU và acquisition. Phase 2 nối transcript ưu tiên
-phụ đề và fallback ASR CUDA bằng `faster-whisper`. Phase 3 dịch offline sang
-tiếng Việt bằng Gemma 4 qua `llama.cpp` CUDA. Phase 4 tách thoại diễn viên bằng
-TIGER-DnR, giữ nhạc/hiệu ứng, tổng hợp giọng Việt bằng VieNeu hoặc Piper, fit
-timeline 48 kHz rồi mux một track AAC với video passthrough. Mỗi stage có
-checkpoint atomic để tiếp tục sau lỗi/process restart. Phase 5 bổ sung nghiệm
-thu native, CycloneDX SBOM và cleanup artifact có retention/dry-run an toàn.
+1. Mở Prowlarr và thêm indexer mà bạn được phép sử dụng; dự án không cài sẵn indexer.
+2. Trong dashboard, kiểm thử Prowlarr/qBittorrent và đăng nhập OpenSubtitles nếu cần.
+3. Tìm tên phim và năm, rồi chọn đúng release từ kết quả.
+4. Chọn ngôn ngữ nguồn, chế độ phụ đề và các model đã cài/verify.
+5. Xác nhận quyền sử dụng nội dung và giọng tham chiếu, nếu có, rồi tạo job.
+6. Nếu job yêu cầu chọn phụ đề hoặc ngôn ngữ, xử lý ngay trong thẻ chi tiết.
+7. Theo dõi tiến độ realtime và tải MP4/SRT/timing report khi hoàn tất.
 
-Các số đo Phase 4 (thời gian, VRAM, loudness và sai lệch A/V) chỉ được công bố
-sau khi `native-phase4-acceptance.sh` chạy xong trên GPU đích; README không suy
-diễn benchmark từ unit test hoặc fixture giả.
-
-## Chạy trực tiếp trên GPU container hiện tại
-
-Đây là chế độ triển khai chính cho máy thuê không có Docker daemon/systemd. Source,
-virtualenv và dữ liệu bền vững nằm dưới `/workspace/thuyet-minh-offline`; PyTorch/CUDA
-do nhà cung cấp cài sẵn được giữ nguyên, còn CTranslate2/faster-whisper được cài vào
-`.venv-native`. Supervisor quản lý đúng một tiến trình cho API, worker, Prowlarr và
-qBittorrent.
-
-Trạng thái đã nghiệm thu đến ngày 02/08/2026 trên máy hiện tại:
-
-- RTX 3090 24 GiB, driver 580.82.07, CUDA 12.6 và PyTorch 2.7.0: PASS.
-- CTranslate2 4.8.1 có `float16`/`int8_float16`: PASS.
-- 314 unit/integration test trên Ubuntu, GPU kernel smoke và qBittorrent 4.x
-  pause/resume smoke: PASS. Windows đạt 312 test và skip đúng 2 test phụ thuộc
-  symlink/GPU của Linux.
-- Hai model ASR đã cài và xác minh: Small (~484 MB) và Large-v3-Turbo
-  (~1,62 GB). Cả hai đạt transcript 7/7 token trên fixture tự sinh.
-- Hai model dịch đã cài và xác minh SHA-256: Gemma 4 E2B Q4 (~3,35 GB) và
-  Gemma 4 31B Q4 (~17,65 GB). Bản 31B dùng khoảng 18,67 GiB VRAM ở context
-  2.048 và là model mặc định.
-- `llama.cpp` `b10208` được build CUDA sm_86 từ commit đầy đủ đã khóa, tắt
-  CURL và Web UI; server chỉ bind cổng loopback trong lúc dịch.
-- API `8080`, qBittorrent WebUI `8081` và Prowlarr `9696` chỉ bind
-  `127.0.0.1`: PASS.
-- API/worker tự khởi động lại sau SIGTERM; SQLite dùng WAL: PASS.
-
-Các lệnh vận hành trên máy thuê:
+CLI tương đương:
 
 ```bash
-cd /workspace/thuyet-minh-offline
-./scripts/native-stack.sh status
-./scripts/native-stack.sh logs 200
-.venv-native/bin/dub health
-./scripts/native-acceptance.sh
-./scripts/native-phase2-acceptance.sh asr-faster-whisper-small
-./scripts/native-phase3-acceptance.sh mt-gemma4-31b-q4
-./scripts/native-phase4-acceptance.sh
-```
-
-Cài mới vào một GPU container Ubuntu 22.04 tương đương:
-
-```bash
-cd /workspace/thuyet-minh-offline
-./scripts/native-bootstrap.sh
-./scripts/native-stack.sh start
-./scripts/native-init-services.sh --rotate-secrets
-./scripts/native-acceptance.sh
-```
-
-`native-bootstrap.sh` pin qBittorrent từ Ubuntu Jammy và kiểm SHA-256 gói Prowlarr
-trước khi giải nén. `native-init-services.sh` khóa hai WebUI về loopback, tạo secret
-ngẫu nhiên và lưu chúng dưới `var/secrets` với mode `0600`; script không in giá trị
-secret. Tài khoản qBittorrent là `dub`; mật khẩu hiện tại nằm trong
-`var/secrets/qbittorrent_password` và chỉ nên đọc trong phiên SSH quản trị.
-
-Truy cập ba giao diện từ máy cá nhân bằng tunnel, không mở cổng quản trị ra Internet:
-
-```bash
-ssh -p <SSH_PORT> \
-  -L 8080:127.0.0.1:8080 \
-  -L 8081:127.0.0.1:8081 \
-  -L 9696:127.0.0.1:9696 \
-  root@<GPU_HOST>
-```
-
-Sau đó dùng API docs ở `http://127.0.0.1:8080/docs`, qBittorrent ở
-`http://127.0.0.1:8081` và Prowlarr ở `http://127.0.0.1:9696`. Prowlarr hiện chưa
-có indexer; quản trị viên phải tự thêm một indexer hợp pháp/content-agnostic trước
-khi tìm được nguồn thật. Không có tracker/indexer nào được đóng gói hoặc gợi ý sẵn.
-
-Supervisor sống qua việc ngắt SSH nhưng không tự sống lại khi nhà cung cấp khởi động
-lại toàn bộ container. Khi đó chạy `scripts/native-stack.sh start`, hoặc đặt startup
-command của nhà cung cấp thành:
-
-```bash
-/workspace/thuyet-minh-offline/scripts/native-stack.sh foreground
-```
-
-Container được quản lý này không có `CAP_NET_ADMIN`, vì vậy worker native không thể
-có network namespace tương đương `network_mode: none`. Worker chỉ mở model theo
-đường dẫn local đã kiểm SHA, đặt toàn bộ biến Hugging Face offline và cài audit hook
-chặn DNS/TCP IPv4/IPv6, ngoại trừ đúng cổng loopback cố định của `llama-server`.
-Đây là guard ở lớp tiến trình Python, không phải cô lập egress cấp kernel; cấu hình
-Docker vẫn dùng `network_mode: none` để đạt lớp kernel.
-
-## Chạy bằng Docker Compose (tùy chọn)
-
-Chế độ Docker cũ vẫn được giữ cho một Ubuntu host đầy đủ có Docker daemon và NVIDIA
-Container Toolkit. Nó không được dùng bên trong GPU container thuê hiện tại.
-
-### Yêu cầu máy chủ
-
-- Ubuntu 24.04 x86_64, Docker Engine và Docker Compose.
-- NVIDIA Container Toolkit đã cấu hình cho Docker.
-- NVIDIA driver `>=570.26`, compute capability `>=7.0`; model mặc định 31B cần
-  GPU 24 GiB, còn E2B là lựa chọn cho GPU nhỏ hơn.
-- Ít nhất 16 GiB RAM và dung lượng trống phù hợp với media/model.
-
-Image ứng dụng khóa CUDA 12.8/cuDNN 9 theo digest. Worker kiểm `nvidia-smi`,
-thực thi một CUDA matrix multiplication bằng PyTorch và kiểm compute type CUDA
-của CTranslate2 trước khi nhận việc.
-
-## Cấu hình ban đầu
-
-```bash
-cd gpu-server
-cp .env.example .env
-cp secrets/prowlarr_api_key.example secrets/prowlarr_api_key.txt
-cp secrets/qbittorrent_password.example secrets/qbittorrent_password.txt
-cp secrets/opensubtitles_api_key.example secrets/opensubtitles_api_key.txt
-cp secrets/opensubtitles_token.example secrets/opensubtitles_token.txt
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
-sed -i "s/^PUID=.*/PUID=${HOST_UID}/; s/^PGID=.*/PGID=${HOST_GID}/" .env
-chown "${HOST_UID}:${HOST_GID}" secrets/*.txt
-chmod 600 secrets/*.txt
-```
-
-Giữ cùng `PUID`/`PGID` cho API, worker, model-manager và qBittorrent. Hai giá
-trị phải trùng chủ sở hữu các file secret trên host vì Compose mount secret từ
-file và tiến trình API không chạy root. Mặc định `10001` chỉ phù hợp khi host
-thực sự sở hữu file bằng UID/GID đó. Sau khi đổi UID/GID phải rebuild image.
-
-Build image nền rồi khởi động riêng hai giao diện quản trị:
-
-```bash
-docker compose build api
-docker compose up -d prowlarr qbittorrent
-```
-
-- Mở Prowlarr tại `http://127.0.0.1:9696`, tự thêm indexer mà bạn được phép sử dụng.
-- Mở qBittorrent tại `http://127.0.0.1:8081`, đổi mật khẩu WebUI cho trùng secret
-  và đặt `Default Save Path` thành `/data/incoming`.
-- Cổng peer TCP/UDP `${TORRENTING_PORT:-6881}` được publish để torrent có thể
-  nhận kết nối vào; WebUI vẫn chỉ bind vào loopback.
-- Tạo ứng dụng Prowlarr trỏ tới qBittorrent bằng địa chỉ nội bộ
-  `http://qbittorrent:8080`, không dùng cổng loopback `8081`; không bật tự động
-  tải ngoài ý muốn.
-- Cổng peer `6881` bind mọi interface. Chỉ mở nó qua firewall khi cần; không
-  publish API/WebUI ra LAN nếu chưa bổ sung xác thực và TLS.
-- OpenSubtitles là tùy chọn. Nếu dùng, điền API key và bearer token của tài khoản
-  vào hai secret tương ứng; token có thể hết hạn và phải được thay thủ công. Nếu
-  thiếu một trong hai, hệ thống chỉ dùng subtitle nhúng/sidecar rồi fallback ASR.
-
-Sau khi lấy API key Prowlarr và đã đổi mật khẩu qBittorrent, thay `REPLACE_ME`
-trong các file secret, chạy lại lệnh `chown`/`chmod` ở trên rồi khởi động ứng
-dụng. Mỗi lần đổi secret phải recreate API để mount lại giá trị:
-
-```bash
-docker compose config --quiet
-docker compose run --rm --no-deps worker python3.12 -m dub_server.worker --once
-docker compose up -d --force-recreate api worker
-curl -fsS http://127.0.0.1:8080/v1/health | \
-  jq -e '.status == "ok" and .gpu.ready == true and .acquisition_configured == true'
-```
-
-OpenAPI ở `http://127.0.0.1:8080/docs`. Worker dùng `network_mode: none`, vì
-vậy chỉ đọc job và artifact qua SQLite/volume dùng chung sau khi tải hoàn tất.
-Service một-lần `volume-init` tạo các thư mục dùng chung với UID/GID đã cấu hình
-trước khi API, worker hoặc qBittorrent khởi động. API, Prowlarr, qBittorrent và
-model-manager dùng các mạng egress riêng; qBittorrent chỉ được mount volume
-`incoming`, không được ghi vào `jobs` hoặc `output`; worker chỉ đọc `incoming`.
-API phải chạy đúng một process Uvicorn như cấu hình Compose hiện tại; không tăng
-`--workers` nếu chưa thay khóa mutation nội bộ bằng lease liên tiến trình.
-
-## CLI/API đầy đủ
-
-```bash
-dub version
-dub doctor
-dub stack start
-dub stack status
-dub stack logs --lines 200
-dub models list
-dub models profiles
-dub models recommend
-dub models install-profile maximum --yes
 dub search "Tên phim" --year 2024
 dub submit --release-id RELEASE_ID --i-have-rights \
-  --asr-model asr-faster-whisper-small \
-  --translation-model mt-gemma4-31b-q4 \
-  --separation-model separation-tiger-dnr \
-  --tts-model tts-vieneu-v2 --wait -o result.mp4
+  --subtitle-mode prefer --wait -o result.mp4
+```
+
+`RELEASE_ID` phải lấy từ một kết quả tìm kiếm hợp lệ. V1 chỉ nhận loại nội dung
+`movie`; hệ thống không nhận URL tải tùy ý từ client.
+
+## Vận hành
+
+```bash
+dub stack status
+dub stack logs --lines 200
 dub jobs list --limit 20
-dub watch JOB_ID --fetch-dir ./results
-dub events JOB_ID
 dub status JOB_ID
-dub subtitle-select JOB_ID SUBTITLE_ID
-dub subtitle-use-asr JOB_ID
-dub language-select JOB_ID en
+dub watch JOB_ID --fetch-dir ./results
 dub cancel JOB_ID
 dub resume JOB_ID
 dub fetch JOB_ID --kind all -o ./results
+```
+
+Quản lý model:
+
+```bash
+dub models profiles
+dub models recommend
+dub models list
+dub models install-profile maximum --yes
+```
+
+Cleanup mặc định chỉ in kế hoạch và không xóa file:
+
+```bash
 dub maintenance cleanup
 dub maintenance cleanup --apply --yes
 dub maintenance sbom
 ```
 
-`dub watch` dùng SSE, tự reconnect bằng event cursor và hiển thị stage, phần trăm,
-tốc độ tải, ETA và số block. `dub fetch` ghi qua `.part`, hỗ trợ HTTP Range và chỉ
-publish file đích atomically. Mọi lệnh destructive đều yêu cầu cờ xác nhận rõ.
+Job đã hoàn tất và toàn bộ thư mục nguồn `incoming` nằm ngoài phạm vi cleanup tự
+động. Luôn đọc dry-run trước khi dùng `--apply`.
 
-API chính nằm dưới `/v1`: `health`, `capabilities`, `models`, `search`, `jobs`,
-`jobs/{id}`, chọn subtitle/ASR, chọn lại ngôn ngữ, `cancel`, `resume` và stream tiến độ SSE. Tạo job bắt buộc gửi
-`rights_confirmed: true`; `release_id` phải xuất phát từ một lần tìm kiếm hợp lệ,
-không nhận URL tải tùy ý từ client. ID model được kiểm tra đúng stage theo catalog.
-Trạng thái `cancelling` của job đang chạy tiếp tục giữ slot cho tới khi
-qBittorrent xác nhận pause. Job vốn đã `paused`/`failed` không giữ slot trong lúc
-hủy, và hệ thống không gửi lệnh pause muộn nếu một job khác đang sở hữu backend.
-Không công bố hủy hoàn tất khi trạng thái backend còn chưa chắc chắn. `resume`
-chỉ nhận job `paused` hoặc lỗi có cờ retry; stage có artifact/checkpoint hợp lệ
-không chạy inference lại.
+## Cài bản ghim và rollback
 
-Theo dõi chi tiết bằng `dub status JOB_ID` hoặc SSE (trường `progress_permille`
-chạy từ 0 đến 1000 và event ghi rõ stage):
+Để cài mới đúng bản `v0.2.0` thay vì `latest`, dùng URL bất biến:
 
 ```bash
-curl -N -H 'Accept: text/event-stream' \
-  http://127.0.0.1:8080/v1/jobs/JOB_ID/events
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.0/install.sh | sudo bash
 ```
 
-Luồng transcript cố định của Phase 2:
+Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
+thay đổi và không ghi đè `.env.native`. Bản `v0.2.0` không tự nâng cấp in-place từ
+release khác vì source, virtualenv và database cần một transaction nâng cấp riêng.
+Nếu commit đích khác, installer dừng trước khi checkout hoặc sửa runtime.
 
-```text
-READY_OFFLINE
-  ├─ subtitle → parse SRT/VTT/ASS → source-transcript.json
-  └─ asr → FFmpeg PCM mono 16 kHz → faster-whisper CUDA → source-transcript.json
-       └─ confidence < 0,5 → NEEDS_LANGUAGE → language-select → chạy lại local
+Deployment legacy không có Git cũng bị từ chối theo mặc định. Cờ
+`--migrate-existing` chỉ dành cho bản source có runtime fingerprint giống hệt;
+khác fingerprint sẽ dừng trước khi đổi source. Không dùng cờ này để ép nâng
+`v0.1.x` lên `v0.2.0`.
 
-source-transcript.json + SQLite segments/checkpoint → READY_TRANSLATION
-  → Gemma 4/llama.cpp → translated-transcript.json → READY_TTS
-  → TIGER-DnR: dialogue + music + effects
-      ├─ bỏ dialogue gốc
-      └─ music + effects → accompaniment.wav
-  → VieNeu/Piper → fit từng slot → narration-48k.wav
-  → loudness + ducking → video copy + AAC → JOB_ID.mp4
-  → xác minh đúng 1 video track + 1 audio track → COMPLETED
-```
+Trước mọi thay đổi release, hãy snapshot toàn bộ thư mục cài và data volume. Không
+chỉ đổi source về bản cũ trong khi giữ database từ release mới hơn. Giữ nguyên
+backup và journal nếu installer yêu cầu phục hồi thủ công.
 
-Timestamp dùng số nguyên microsecond, được clamp theo duration và ép không overlap.
-Artifact JSON ghi qua file tạm + `os.replace`, lưu SHA-256 trong checkpoint và được
-dùng lại sau restart mà không chạy inference lần nữa. Khi hủy offline, worker
-giải phóng subprocess/model và xóa file `.part` trước khi chốt `CANCELLED`; nguồn
-torrent trong `incoming` không bị cleanup artifact đụng tới.
+## Bảo mật và mạng
 
-### Nghiệm thu native Phase 4
+- Chỉ cần mở cổng SSH của máy chủ để quản trị qua tunnel.
+- Không public trực tiếp các cổng `8080`, `8081` hoặc `9696`; chúng không có TLS công khai.
+- Cổng peer theo cấu hình qBittorrent là tùy chọn; Docker mặc định dùng TCP/UDP
+  `6881`. Chỉ mở cổng peer thực tế qua firewall khi cần.
+- Secret native nằm dưới `var/secrets` với mode `0600`; không đưa chúng vào Git hoặc log.
+- API acquisition có mạng để tìm/tải nguồn; worker suy luận chỉ dùng model local đã verify.
+- Docker worker dùng `network_mode: none`; native worker dùng offline audit guard ở tầng tiến trình.
+- Model chỉ được tải bởi model-manager có egress; worker không tải model hoặc fallback cloud.
+- OpenSubtitles là tùy chọn; API route chỉ chấp nhận host chính thức đã allowlist.
+- Dashboard/API hiện được thiết kế cho một người vận hành tin cậy qua loopback/SSH.
 
-Cài và verify đủ model trước khi chạy. Lệnh không truyền đối số dùng fixture ngắn
-tự sinh; lệnh có `--input` dùng một clip local mà người vận hành có quyền xử lý:
+## Khắc phục sự cố
+
+- **`dub: command not found`:** installer chưa hoàn tất. Xem lỗi đầu tiên rồi chạy
+  lại lệnh cài. Không chạy riêng `sudo bash -s -- ...` vì nó không tải installer.
+- **Preflight GPU thất bại:** chạy ba lệnh kiểm tra sau:
 
 ```bash
-./scripts/native-model.sh install separation-tiger-dnr
-./scripts/native-model.sh install tts-vieneu-v2
-./scripts/native-model.sh install tts-neucodec-onnx-int8
-./scripts/native-model.sh verify separation-tiger-dnr
-./scripts/native-model.sh verify tts-vieneu-v2
-./scripts/native-model.sh verify tts-neucodec-onnx-int8
-./scripts/native-phase4-acceptance.sh
-./scripts/native-phase4-acceptance.sh --quick --quick-duration-seconds 10
-./scripts/native-phase4-acceptance.sh --quick --quick-duration-seconds 300
-./scripts/native-phase4-acceptance.sh --quick --quick-duration-seconds 1800
-./scripts/native-phase4-acceptance.sh \
-  --input /data/incoming/authorized-test.mkv --clip-duration-seconds 12
+nvidia-smi
+/usr/local/cuda/bin/nvcc --version
+python3 -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
 ```
 
-Script tạm dừng worker, ép toàn bộ runtime model sang offline, kiểm separation,
-TTS, sample count/timing, loudness, MP4 track contract và ghi báo cáo vào
-`var/state/phase4-acceptance.json`; worker được khởi động lại bằng trap kể cả khi
-nghiệm thu lỗi. Không coi fixture nhanh là benchmark phim dài.
+GPU phải là `sm_86`; runtime hiện không hỗ trợ chung mọi GPU CUDA.
 
-Kết quả nghiệm thu RTX 3090 mới nhất nằm trong `PHASE4_REPORT.md` và
-`PHASE5_REPORT.md`; ma trận 10 giây, 5 phút và 30 phút đều đã chạy thật.
+- **Stack hoặc dashboard không phản hồi:** chạy `dub stack status`, xem
+  `dub stack logs --lines 200`, rồi dùng `dub stack restart`. Tạo lại tunnel và
+  kiểm tra cổng local nếu stack đã khỏe.
+- **Tìm kiếm không có kết quả:** thêm một indexer hợp pháp trong Prowlarr, bấm
+  **Test**, **Save**, rồi kiểm thử lại tích hợp trong dashboard.
+- **OpenSubtitles lỗi hoặc token hết hạn:** đăng nhập lại ở mục **Tích hợp**, hoặc
+  chọn ASR để tiếp tục mà không dùng OpenSubtitles.
+- **Job lỗi có thể retry:** đọc lỗi bằng `dub status JOB_ID`, sửa nguyên nhân rồi
+  chạy `dub resume JOB_ID`; checkpoint hợp lệ không chạy lại stage đã hoàn tất.
 
-### SBOM và cleanup Phase 5
+## Tài liệu và giấy phép
 
-SBOM dùng đúng Python distributions đang cài cộng với hai lock manifest, sau đó
-ghi CycloneDX 1.6 atomically:
+- [Workflow web và cấu hình tích hợp](docs/WEB_WORKFLOW.md)
+- [Catalog model bất biến](config/models.lock.json)
+- [SBOM CycloneDX 1.6 của release](release/sbom.cdx.json)
+- [Thông báo dependency và model](THIRD_PARTY_NOTICES.md)
+- [Báo lỗi trên GitHub](https://github.com/ngucungcode/thuyet-minh-offline-gpu/issues)
 
-```bash
-.venv-native/bin/python scripts/generate-sbom.py \
-  --models-lock config/models.lock.json \
-  --native-lock native/components.lock.json \
-  --output var/reports/sbom.cdx.json
-```
-
-Cleanup mặc định chỉ dry-run. Nó chỉ lập kế hoạch cho thư mục/tệp mang đúng ID
-job dưới `jobs` và `output`: job đã hủy được dọn ngay, job lỗi retry giữ 7 ngày.
-Job đang chạy, job hoàn tất, lỗi không retry và toàn bộ `incoming` đều bị loại
-khỏi phạm vi. Xem JSON dry-run trước, rồi mới thêm `--apply` nếu đúng mục tiêu:
-
-```bash
-.venv-native/bin/python scripts/cleanup-job-artifacts.py
-.venv-native/bin/python scripts/cleanup-job-artifacts.py --apply
-```
-
-Khi dùng `--apply`, cleanup khóa transaction SQLite, đọc lại revision/status và
-retention ngay trước khi xóa toàn bộ action của từng job. Nếu job vừa được
-resume sau lúc lập plan, cleanup bỏ qua job đó.
-
-## Kiểm thử cục bộ
-
-```bash
-python3.12 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e '.[test]'
-pytest
-```
-
-Các test acquisition dùng HTTP mock và không liên hệ indexer, torrent hoặc
-OpenSubtitles thật. Máy không đạt cấu hình GPU vẫn chạy được unit test, nhưng
-không được coi là đã vượt cổng GPU production.
-
-## Model
-
-`config/models.lock.json` là catalog bất biến. ASR, Gemma 4, TIGER-DnR, VieNeu v2,
-NeuCodec ONNX int8 và Piper tiếng Việt đều pin revision, size, SHA-256 từng file
-và tree hash. VieNeu v2 là lựa chọn TTS chất lượng cao mặc định và cần cài thêm
-entry hỗ trợ `tts-neucodec-onnx-int8`; Piper là fallback CPU có thể chọn độc lập.
-TIGER-DnR là model separation mặc định. Trạng thái cài thật luôn lấy từ receipt
-verify trên máy đang chạy, không suy ra từ catalog.
-
-Model chỉ được tải qua process model-manager có egress; worker không import trình
-tải và luôn băm lại toàn bộ tree trước inference:
-
-```bash
-cd /workspace/thuyet-minh-offline
-./scripts/native-model.sh list
-./scripts/native-model.sh install mt-gemma4-31b-q4
-./scripts/native-model.sh verify mt-gemma4-31b-q4
-./scripts/native-model.sh install separation-tiger-dnr
-./scripts/native-model.sh install tts-piper-vi-vais1000-medium
-./scripts/native-model.sh verify tts-piper-vi-vais1000-medium
-```
-
-Receipt ngoài model tree giúp API hiển thị lần xác minh gần nhất mà không băm lại
-hàng GB mỗi request; worker không tin receipt và vẫn xác minh file/size/hash thật.
-
-## Giấy phép
-
-Mã nguồn được phát hành theo
-[GPL-3.0-or-later](LICENSE). Attribution, giấy phép runtime/model và nghĩa vụ phân
-phối tương ứng nằm trong [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Người
-dùng chỉ được tải và xử lý nội dung/giọng nói mà mình sở hữu, được cấp phép hoặc
-có quyền sử dụng hợp pháp. Bản CycloneDX sinh từ runtime GPU đã nghiệm thu nằm tại
-[release/sbom.cdx.json](release/sbom.cdx.json).
+Mã nguồn được phát hành theo [GPL-3.0-or-later](LICENSE). Việc dùng phần mềm không
+trao quyền đối với phim, phụ đề, torrent, model giọng hoặc giọng nói của bên thứ ba.

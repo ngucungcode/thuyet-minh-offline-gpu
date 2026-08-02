@@ -265,6 +265,26 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     assert models.json()["models"][0]["valid"] is False
 
 
+def test_embedded_dashboard_shares_the_api_origin(tmp_path: Path, monkeypatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    with client:
+        dashboard = client.get("/")
+        api_health = client.get("/v1/health")
+
+        assert dashboard.status_code == 200
+        assert dashboard.headers["content-type"].startswith("text/html")
+        assert "Lồng Tiếng GPU Studio" in dashboard.text
+        assert client.app.state.web_dashboard_enabled is True
+        asset_path = dashboard.text.split('href="/assets/', maxsplit=1)[1].split(
+            '"', maxsplit=1
+        )[0]
+        asset = client.get(f"/assets/{asset_path}")
+
+    assert api_health.status_code == 200
+    assert asset.status_code == 200
+    assert asset.headers["content-type"].startswith("text/css")
+
+
 def test_job_history_lists_newest_first_and_filters_status(
     tmp_path: Path,
     monkeypatch,

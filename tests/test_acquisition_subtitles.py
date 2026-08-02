@@ -76,6 +76,11 @@ def test_find_prefers_embedded_sidecar_and_exact_hash(tmp_path: Path) -> None:
         assert request.url.path == "/api/v1/subtitles"
         assert request.headers["Authorization"] == "Bearer token"
         assert request.headers["Api-Key"] == "secret"
+        assert [key for key, _value in request.url.params.multi_items()] == [
+            "languages",
+            "moviebytesize",
+            "moviehash",
+        ]
         seen_params.update(dict(request.url.params))
         return httpx.Response(
             200,
@@ -115,6 +120,111 @@ def test_find_prefers_embedded_sidecar_and_exact_hash(tmp_path: Path) -> None:
         assert by_source[SubtitleSource.EMBEDDED].language == "en"
         assert seen_params["moviebytesize"] == str(128 * 1024)
         assert len(seen_params["moviehash"]) == 16
+
+    asyncio.run(scenario())
+
+
+def test_vip_api_root_is_used_for_subtitle_search(tmp_path: Path) -> None:
+    media = _media(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "vip-api.opensubtitles.com"
+        assert request.url.path == "/api/v1/subtitles"
+        return httpx.Response(200, json={"data": []})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CompositeSubtitleProvider(
+                client=client,
+                opensubtitles_api_key="secret",
+                opensubtitles_token="token",
+                opensubtitles_base_url="vip-api.opensubtitles.com",
+                embedded_probe=FakeProbe(),
+            )
+            await provider.find(media)
+
+    asyncio.run(scenario())
+
+
+def test_search_uses_opensubtitles_canonical_query_form(tmp_path: Path) -> None:
+    media = _media(tmp_path)
+    media.path.write_bytes(b"small fixture without an OpenSubtitles hash")
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        assert request.url.query.decode() == (
+            "languages=en&query=fixture&type=movie&year=2026"
+        )
+        return httpx.Response(200, json={"data": []})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CompositeSubtitleProvider(
+                client=client,
+                opensubtitles_api_key="secret",
+                opensubtitles_token="token",
+                embedded_probe=FakeProbe(),
+            )
+            await provider.find(media)
+
+    asyncio.run(scenario())
+    assert len(seen_urls) == 1
+
+
+def test_unexpected_opensubtitles_redirect_is_not_followed(tmp_path: Path) -> None:
+    media = _media(tmp_path)
+    request_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_hosts.append(request.url.host)
+        return httpx.Response(
+            302,
+            headers={"Location": "https://attacker.invalid/collect"},
+            content=b"<html>redirect</html>",
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            provider = CompositeSubtitleProvider(
+                client=client,
+                opensubtitles_api_key="secret",
+                opensubtitles_token="token",
+                embedded_probe=FakeProbe(),
+            )
+            with pytest.raises(AcquisitionError) as caught:
+                await provider.find(media)
+        assert caught.value.code is AcquisitionErrorCode.SUBTITLE_UNAVAILABLE
+        assert caught.value.retryable is True
+        assert "chuyển hướng" in caught.value.message_vi
+
+    asyncio.run(scenario())
+    assert request_hosts == ["api.opensubtitles.com"]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://api.opensubtitles.com/api/v1",
+        "https://attacker.invalid/api/v1",
+        "https://api.opensubtitles.com.attacker.invalid/api/v1",
+        "https://api.opensubtitles.com:444/api/v1",
+        "https://api.opensubtitles.com/api/v2",
+        "https://api.opensubtitles.com/api/v1?token=secret",
+        "https://user:pass@api.opensubtitles.com/api/v1",
+    ],
+)
+def test_unofficial_opensubtitles_api_roots_are_rejected(base_url: str) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(ValueError, match="OpenSubtitles API URL"):
+                CompositeSubtitleProvider(
+                    client=client,
+                    opensubtitles_base_url=base_url,
+                )
 
     asyncio.run(scenario())
 

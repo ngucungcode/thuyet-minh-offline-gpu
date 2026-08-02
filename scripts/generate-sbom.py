@@ -10,6 +10,9 @@ from pathlib import Path
 from dub_server.sbom import write_cyclonedx_sbom
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Tạo CycloneDX SBOM cục bộ")
     parser.add_argument(
@@ -27,11 +30,17 @@ def main() -> int:
         type=Path,
         default=Path("var/reports/sbom.cdx.json"),
     )
+    parser.add_argument(
+        "--web-lock",
+        type=Path,
+        default=PROJECT_ROOT / "web" / "package-lock.json",
+    )
     args = parser.parse_args()
     document = write_cyclonedx_sbom(
         args.output,
         args.models_lock,
         args.native_lock,
+        web_lock_path=args.web_lock,
     )
     print(
         json.dumps(

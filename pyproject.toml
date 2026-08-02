@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thuyet-minh-offline-gpu"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local NVIDIA GPU pipeline for legally acquired Vietnamese video dubbing"
 readme = "README.md"
 requires-python = ">=3.11.0rc1,<3.13"
 license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
   "fastapi==0.139.2",
   "httpx==0.28.1",
@@ -64,6 +64,15 @@ dub = "dub_server.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+dub_server = [
+  "web_static/*.html",
+  "web_static/*.png",
+  "web_static/assets/*.css",
+  "web_static/assets/*.js",
+  "web_static/assets/_vinext_fonts/*/*.woff2",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"

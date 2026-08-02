@@ -17,6 +17,7 @@ from typing import Any, Iterator
 import httpx
 import typer
 
+from . import __version__
 from .config import Settings
 
 
@@ -427,7 +428,7 @@ def version() -> None:
     try:
         package_version = metadata.version("thuyet-minh-offline-gpu")
     except metadata.PackageNotFoundError:
-        package_version = "0.1.0+source"
+        package_version = f"{__version__}+source"
     _print_json(
         {
             "cli": package_version,

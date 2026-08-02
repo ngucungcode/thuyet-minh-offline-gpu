@@ -26,7 +26,8 @@ for secret_path in \
   "${DUB_PROWLARR_API_KEY_FILE}" \
   "${DUB_QBITTORRENT_PASSWORD_FILE}" \
   "${DUB_OPENSUBTITLES_API_KEY_FILE}" \
-  "${DUB_OPENSUBTITLES_TOKEN_FILE}"; do
+  "${DUB_OPENSUBTITLES_TOKEN_FILE}" \
+  "${DUB_OPENSUBTITLES_BASE_URL_FILE}"; do
   if [[ -e "${secret_path}" ]]; then
     mode="$(stat -c '%a' "${secret_path}")"
     if [[ "${mode}" != "600" && "${mode}" != "400" ]]; then
