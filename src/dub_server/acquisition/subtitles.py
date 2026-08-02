@@ -449,7 +449,18 @@ class CompositeSubtitleProvider(SubtitleProvider):
         exact: bool,
         media: MediaAsset,
     ) -> tuple[SubtitleCandidate, ...]:
-        response = await self._api_request("GET", "/subtitles", params=parameters)
+        # OpenSubtitles canonicalizes search URLs by sorting query keys and
+        # lower-casing the free-text query. Sending that canonical form avoids
+        # a 301 HTML response which must never be parsed as an API payload.
+        canonical_parameters = {
+            key: (value.lower() if key == "query" else value)
+            for key, value in sorted(parameters.items())
+        }
+        response = await self._api_request(
+            "GET",
+            "/subtitles",
+            params=canonical_parameters,
+        )
         try:
             payload = response.json()
         except ValueError as exc:
@@ -583,6 +594,7 @@ class CompositeSubtitleProvider(SubtitleProvider):
                 json=json_body,
                 headers=headers,
                 timeout=self._timeout,
+                follow_redirects=False,
             )
         except httpx.TimeoutException as exc:
             raise _subtitle_error("OpenSubtitles phản hồi quá thời gian cho phép", retryable=True) from exc
@@ -592,6 +604,14 @@ class CompositeSubtitleProvider(SubtitleProvider):
             raise _subtitle_error("OpenSubtitles từ chối thông tin xác thực", retryable=False)
         if response.status_code == 429 or response.status_code >= 500:
             raise _subtitle_error("OpenSubtitles tạm thời không khả dụng", retryable=True)
+        if 300 <= response.status_code < 400:
+            # The API key and bearer token must not be forwarded through an
+            # implicit redirect. Search requests are already canonicalized;
+            # any remaining redirect is unexpected and safe to retry later.
+            raise _subtitle_error(
+                "OpenSubtitles trả về chuyển hướng không mong đợi",
+                retryable=True,
+            )
         if response.status_code >= 400:
             raise _subtitle_error("OpenSubtitles từ chối yêu cầu", retryable=False)
         return response

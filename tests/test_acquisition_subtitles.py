@@ -76,6 +76,11 @@ def test_find_prefers_embedded_sidecar_and_exact_hash(tmp_path: Path) -> None:
         assert request.url.path == "/api/v1/subtitles"
         assert request.headers["Authorization"] == "Bearer token"
         assert request.headers["Api-Key"] == "secret"
+        assert [key for key, _value in request.url.params.multi_items()] == [
+            "languages",
+            "moviebytesize",
+            "moviehash",
+        ]
         seen_params.update(dict(request.url.params))
         return httpx.Response(
             200,
@@ -139,6 +144,65 @@ def test_vip_api_root_is_used_for_subtitle_search(tmp_path: Path) -> None:
             await provider.find(media)
 
     asyncio.run(scenario())
+
+
+def test_search_uses_opensubtitles_canonical_query_form(tmp_path: Path) -> None:
+    media = _media(tmp_path)
+    media.path.write_bytes(b"small fixture without an OpenSubtitles hash")
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        assert request.url.query.decode() == (
+            "languages=en&query=fixture&type=movie&year=2026"
+        )
+        return httpx.Response(200, json={"data": []})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CompositeSubtitleProvider(
+                client=client,
+                opensubtitles_api_key="secret",
+                opensubtitles_token="token",
+                embedded_probe=FakeProbe(),
+            )
+            await provider.find(media)
+
+    asyncio.run(scenario())
+    assert len(seen_urls) == 1
+
+
+def test_unexpected_opensubtitles_redirect_is_not_followed(tmp_path: Path) -> None:
+    media = _media(tmp_path)
+    request_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_hosts.append(request.url.host)
+        return httpx.Response(
+            302,
+            headers={"Location": "https://attacker.invalid/collect"},
+            content=b"<html>redirect</html>",
+        )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=True,
+        ) as client:
+            provider = CompositeSubtitleProvider(
+                client=client,
+                opensubtitles_api_key="secret",
+                opensubtitles_token="token",
+                embedded_probe=FakeProbe(),
+            )
+            with pytest.raises(AcquisitionError) as caught:
+                await provider.find(media)
+        assert caught.value.code is AcquisitionErrorCode.SUBTITLE_UNAVAILABLE
+        assert caught.value.retryable is True
+        assert "chuyển hướng" in caught.value.message_vi
+
+    asyncio.run(scenario())
+    assert request_hosts == ["api.opensubtitles.com"]
 
 
 @pytest.mark.parametrize(
