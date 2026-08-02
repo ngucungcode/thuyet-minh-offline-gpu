@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     opensubtitles_token_file: Path | None = Path(
         "/run/secrets/opensubtitles_token"
     )
+    opensubtitles_base_url_file: Path | None = Path(
+        "/run/secrets/opensubtitles_base_url"
+    )
     opensubtitles_user_agent: str = "ThuyetMinhOfflineGPU v0.1"
 
     api_url: str = "http://127.0.0.1:8080"

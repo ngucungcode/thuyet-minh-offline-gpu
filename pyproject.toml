@@ -9,7 +9,7 @@ description = "Local NVIDIA GPU pipeline for legally acquired Vietnamese video d
 readme = "README.md"
 requires-python = ">=3.11.0rc1,<3.13"
 license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
   "fastapi==0.139.2",
   "httpx==0.28.1",

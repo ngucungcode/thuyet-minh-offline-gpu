@@ -119,6 +119,52 @@ def test_find_prefers_embedded_sidecar_and_exact_hash(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_vip_api_root_is_used_for_subtitle_search(tmp_path: Path) -> None:
+    media = _media(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "vip-api.opensubtitles.com"
+        assert request.url.path == "/api/v1/subtitles"
+        return httpx.Response(200, json={"data": []})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CompositeSubtitleProvider(
+                client=client,
+                opensubtitles_api_key="secret",
+                opensubtitles_token="token",
+                opensubtitles_base_url="vip-api.opensubtitles.com",
+                embedded_probe=FakeProbe(),
+            )
+            await provider.find(media)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://api.opensubtitles.com/api/v1",
+        "https://attacker.invalid/api/v1",
+        "https://api.opensubtitles.com.attacker.invalid/api/v1",
+        "https://api.opensubtitles.com:444/api/v1",
+        "https://api.opensubtitles.com/api/v2",
+        "https://api.opensubtitles.com/api/v1?token=secret",
+        "https://user:pass@api.opensubtitles.com/api/v1",
+    ],
+)
+def test_unofficial_opensubtitles_api_roots_are_rejected(base_url: str) -> None:
+    async def scenario() -> None:
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(ValueError, match="OpenSubtitles API URL"):
+                CompositeSubtitleProvider(
+                    client=client,
+                    opensubtitles_base_url=base_url,
+                )
+
+    asyncio.run(scenario())
+
+
 def test_remote_zip_is_validated_then_materialized_atomically(tmp_path: Path) -> None:
     media = _media(tmp_path)
     archive_payload = _zip_payload("nested/Fixture.en.srt", SRT)

@@ -9,6 +9,21 @@ const serverEntry = path.join(distRoot, "server", "index.js");
 const outputRoot = path.resolve(webRoot, "..", "src", "dub_server", "web_static");
 const stagingRoot = `${outputRoot}.staging-${process.pid}`;
 const backupRoot = `${outputRoot}.backup-${process.pid}`;
+const embeddedDeploymentVersion = "embedded-static-v1";
+
+function stabilizeRenderedHtml(html) {
+  const deploymentVersionPattern = /\\\"deploymentVersion\\\":\\\"[^\"\\]+\\\"/g;
+  const matches = html.match(deploymentVersionPattern) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected one Vinext deploymentVersion in rendered HTML, found ${matches.length}`,
+    );
+  }
+  return html.replace(
+    deploymentVersionPattern,
+    `\\\"deploymentVersion\\\":\\\"${embeddedDeploymentVersion}\\\"`,
+  );
+}
 
 async function renderIndex() {
   const workerUrl = pathToFileURL(serverEntry);
@@ -31,7 +46,7 @@ async function renderIndex() {
   if (!response.ok) {
     throw new Error(`Không thể render dashboard: HTTP ${response.status}`);
   }
-  const html = await response.text();
+  const html = stabilizeRenderedHtml(await response.text());
   if (!html.includes('<html lang="vi">') || !html.includes("/assets/")) {
     throw new Error("HTML dashboard không có cấu trúc hoặc asset client mong đợi");
   }

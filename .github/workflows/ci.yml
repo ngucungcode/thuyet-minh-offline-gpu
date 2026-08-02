@@ -45,3 +45,67 @@ jobs:
 
       - name: Run test suite
         run: python -m pytest -q
+
+      - name: Build and inspect distributable wheel
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pip wheel --no-deps . --wheel-dir dist
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1, wheels
+          with ZipFile(wheels[0]) as archive:
+              names = set(archive.namelist())
+          expected_static = {
+              path.relative_to("src").as_posix()
+              for path in Path("src/dub_server/web_static").rglob("*")
+              if path.is_file()
+          }
+          wheel_static = {
+              name for name in names if name.startswith("dub_server/web_static/")
+          }
+          assert wheel_static == expected_static, (wheel_static - expected_static, expected_static - wheel_static)
+          assert "dub_server/web_static/index.html" in names
+          assert "dub_server/web_static/og.png" in names
+          assert any(name.startswith("dub_server/web_static/assets/") and name.endswith(".css") for name in names)
+          assert any(name.startswith("dub_server/web_static/assets/") and name.endswith(".js") for name in names)
+          assert any(name.endswith(".dist-info/licenses/LICENSE") for name in names)
+          assert any(name.endswith(".dist-info/licenses/THIRD_PARTY_NOTICES.md") for name in names)
+          PY
+
+  web:
+    runs-on: ubuntu-22.04
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.13.1"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Lint dashboard
+        run: npm run lint
+
+      - name: Test and build dashboard
+        run: npm test
+
+      - name: Validate release SBOM against CycloneDX 1.6
+        run: npm run validate:sbom
+
+      - name: Verify embedded production assets
+        run: |
+          npm run embed
+          git diff --exit-code -- ../src/dub_server/web_static

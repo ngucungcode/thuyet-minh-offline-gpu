@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -18,7 +19,18 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, sta
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
+
+from .admin_integrations import (
+    AdminIntegrationError,
+    OpenSubtitlesAdminClient,
+    ProwlarrAdminClient,
+    atomic_write_secret_bundle,
+    can_delete_secret_bundle,
+    can_manage_secret_bundle,
+    delete_secret_bundle,
+    has_pending_secret_deletion,
+)
 
 from .config import (
     ModelCatalog,
@@ -36,6 +48,10 @@ from .domain import (
     ReleaseCandidate,
 )
 from .gpu import inspect_gpu, read_gpu_report
+from .opensubtitles import (
+    DEFAULT_OPENSUBTITLES_API_ROOT,
+    normalize_opensubtitles_api_root,
+)
 from .state import (
     ActiveJobExists,
     InvalidTransition,
@@ -48,6 +64,44 @@ from .state import (
 
 
 _SHA256_HEX = frozenset("0123456789abcdef")
+
+
+def _opensubtitles_secret_paths(settings: Settings) -> tuple[Path, Path, Path] | None:
+    paths = (
+        settings.opensubtitles_api_key_file,
+        settings.opensubtitles_token_file,
+        settings.opensubtitles_base_url_file,
+    )
+    if any(path is None for path in paths):
+        return None
+    api_key_path, token_path, base_url_path = paths
+    assert api_key_path is not None
+    assert token_path is not None
+    assert base_url_path is not None
+    return api_key_path, token_path, base_url_path
+
+
+def _configured_opensubtitles_api_root(settings: Settings) -> str:
+    persisted = read_secret(settings.opensubtitles_base_url_file)
+    return normalize_opensubtitles_api_root(
+        persisted if persisted is not None else settings.opensubtitles_url
+    )
+
+
+def _acquisition_opensubtitles_configuration(
+    settings: Settings,
+) -> tuple[str | None, str | None, str]:
+    """Load an all-or-disabled provider configuration without blocking startup."""
+
+    try:
+        api_key = read_secret(settings.opensubtitles_api_key_file)
+        token = read_secret(settings.opensubtitles_token_file)
+        api_root = _configured_opensubtitles_api_root(settings)
+    except (OSError, ValueError):
+        return None, None, DEFAULT_OPENSUBTITLES_API_ROOT
+    if not api_key or not token:
+        return None, None, api_root
+    return api_key, token, api_root
 
 
 def _sealed_file_sha256(path: Path) -> tuple[str, int]:
@@ -218,6 +272,86 @@ class JobListResponse(BaseModel):
     count: int
 
 
+class AdminIntegrationStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool
+    editable: bool
+    can_manage: bool
+    cleanup_pending: bool = False
+    can_delete: bool = False
+
+
+class AdminIntegrationsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prowlarr: AdminIntegrationStatus
+    opensubtitles: AdminIntegrationStatus
+
+
+class ProwlarrIndexerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    name: str
+    definition_name: str | None = None
+    implementation_name: str | None = None
+    protocol: str | None = None
+    privacy: str | None = None
+    enabled: bool
+    supports_search: bool
+    supports_rss: bool
+    priority: int | None = None
+    disabled_until: str | None = None
+    most_recent_failure: str | None = None
+
+
+class ProwlarrIndexerListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ProwlarrIndexerResponse]
+    count: int
+
+
+class ProwlarrTestResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    indexer_id: int
+    ok: bool
+    failure_count: int
+
+
+class ProwlarrTestAllResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    all_ok: bool
+    failed_count: int
+    results: list[ProwlarrTestResult]
+
+
+class OpenSubtitlesConfigureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr = Field(min_length=1, max_length=4096)
+    username: str = Field(min_length=1, max_length=256)
+    password: SecretStr = Field(min_length=1, max_length=4096)
+
+
+class OpenSubtitlesDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: Literal["DELETE_OPENSUBTITLES_CREDENTIALS"]
+
+
+class OpenSubtitlesConfigurationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool
+    authenticated: bool
+    restart_required: bool
+    quota: dict[str, int | bool | str | None] | None = None
+
+
 def _public_release(candidate: ReleaseCandidate) -> ReleaseResponse:
     """Never expose provider URLs or opaque GUIDs through the public API."""
 
@@ -344,6 +478,7 @@ def create_app(
     state_store: StateStore | None = None,
     acquisition_service: AcquisitionPort | None = None,
     coordinator: CoordinatorPort | None = None,
+    admin_http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """Create an app with explicit adapter injection for deterministic tests."""
 
@@ -351,6 +486,7 @@ def create_app(
     active_job_operations: dict[str, asyncio.Task[Any]] = {}
     cancellation_reconciliations: dict[str, asyncio.Task[None]] = {}
     backend_mutation_lock = asyncio.Lock()
+    admin_configuration_lock = asyncio.Lock()
 
     async def mutate_backend(
         operation: Any,
@@ -485,6 +621,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        owned_admin_client: httpx.AsyncClient | None = None
+        configured_admin_client = admin_http_client
+        if configured_admin_client is None:
+            owned_admin_client = httpx.AsyncClient(follow_redirects=False)
+            configured_admin_client = owned_admin_client
+        application.state.admin_http_client = configured_admin_client
         if state_store is None:
             configured_settings.ensure_local_directories()
             application.state.job_store = StateStore(
@@ -515,6 +657,11 @@ def create_app(
             if prowlarr_key and qbittorrent_password:
                 from .acquisition import build_acquisition_service
 
+                (
+                    opensubtitles_api_key,
+                    opensubtitles_token,
+                    opensubtitles_api_root,
+                ) = _acquisition_opensubtitles_configuration(configured_settings)
                 client = httpx.AsyncClient(follow_redirects=False)
                 configured_acquisition = build_acquisition_service(
                     client=client,
@@ -523,16 +670,9 @@ def create_app(
                     qbittorrent_url=configured_settings.qbittorrent_url,
                     qbittorrent_username=configured_settings.qbittorrent_username,
                     qbittorrent_password=qbittorrent_password,
-                    opensubtitles_api_key=read_secret(
-                        configured_settings.opensubtitles_api_key_file
-                    ),
-                    opensubtitles_token=read_secret(
-                        configured_settings.opensubtitles_token_file
-                    ),
-                    opensubtitles_base_url=(
-                        configured_settings.opensubtitles_url.rstrip("/")
-                        .removesuffix("/api/v1")
-                    ),
+                    opensubtitles_api_key=opensubtitles_api_key,
+                    opensubtitles_token=opensubtitles_token,
+                    opensubtitles_base_url=opensubtitles_api_root,
                     opensubtitles_user_agent=(
                         configured_settings.opensubtitles_user_agent
                     ),
@@ -677,6 +817,8 @@ def create_app(
                 )
             if client is not None:
                 await client.aclose()
+            if owned_admin_client is not None:
+                await owned_admin_client.aclose()
 
     application = FastAPI(
         title="Thuyết Minh Offline GPU",
@@ -685,6 +827,14 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.settings = configured_settings
+
+    @application.middleware("http")
+    async def prevent_admin_response_caching(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        if request.url.path.startswith("/v1/admin/"):
+            response.headers["Cache-Control"] = "no-store, private"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(
@@ -736,9 +886,77 @@ def create_app(
             )
         return configured
 
+    def local_admin_request(
+        request: Request,
+        marker: Annotated[
+            str | None,
+            Header(alias="X-Dub-Admin-Request"),
+        ] = None,
+    ) -> None:
+        """Require an explicit header and a direct loopback client."""
+
+        host = request.client.host if request.client is not None else ""
+        try:
+            address = ipaddress.ip_address(host.split("%", 1)[0])
+        except ValueError:
+            allowed = False
+        else:
+            mapped = getattr(address, "ipv4_mapped", None)
+            allowed = address.is_loopback or bool(mapped and mapped.is_loopback)
+        if marker != "1" or not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "admin_local_access_required",
+                    "message": "Tính năng quản trị chỉ dùng được từ máy cục bộ",
+                    "retryable": False,
+                },
+            )
+
+    def admin_error(error: AdminIntegrationError) -> HTTPException:
+        return HTTPException(
+            status_code=error.status_code,
+            detail={
+                "code": error.code,
+                "message": error.message,
+                "retryable": error.retryable,
+            },
+        )
+
+    def prowlarr_admin(request: Request) -> ProwlarrAdminClient:
+        try:
+            api_key = read_secret(configured_settings.prowlarr_api_key_file)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "prowlarr_secret_unreadable",
+                    "message": "Không thể đọc khóa API Prowlarr",
+                    "retryable": False,
+                },
+            ) from exc
+        if api_key is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "prowlarr_not_configured",
+                    "message": "Prowlarr chưa được cấu hình",
+                    "retryable": False,
+                },
+            )
+        try:
+            return ProwlarrAdminClient(
+                base_url=configured_settings.prowlarr_url,
+                api_key=api_key,
+                client=request.app.state.admin_http_client,
+            )
+        except AdminIntegrationError as exc:
+            raise admin_error(exc) from exc
+
     StoreDependency = Annotated[StateStore, Depends(job_store)]
     AcquisitionDependency = Annotated[AcquisitionPort, Depends(acquisition)]
     CoordinatorDependency = Annotated[CoordinatorPort, Depends(job_coordinator)]
+    LocalAdminDependency = Annotated[None, Depends(local_admin_request)]
 
     @application.get("/v1/health")
     def health(
@@ -823,6 +1041,256 @@ def create_app(
             "one_active_job_per_gpu": True,
             "drm_supported": False,
         }
+
+    @application.get(
+        "/v1/admin/integrations",
+        response_model=AdminIntegrationsResponse,
+    )
+    def admin_integrations(
+        _admin: LocalAdminDependency,
+    ) -> AdminIntegrationsResponse:
+        try:
+            prowlarr_configured = (
+                read_secret(configured_settings.prowlarr_api_key_file) is not None
+            )
+        except OSError:
+            prowlarr_configured = False
+        try:
+            opensubtitles_api_key = read_secret(
+                configured_settings.opensubtitles_api_key_file
+            )
+            opensubtitles_token = read_secret(
+                configured_settings.opensubtitles_token_file
+            )
+            persisted_opensubtitles_base_url = read_secret(
+                configured_settings.opensubtitles_base_url_file
+            )
+            normalize_opensubtitles_api_root(
+                persisted_opensubtitles_base_url
+                if persisted_opensubtitles_base_url is not None
+                else configured_settings.opensubtitles_url
+            )
+            opensubtitles_base_url_valid = True
+        except (AdminIntegrationError, OSError, ValueError):
+            opensubtitles_api_key = None
+            opensubtitles_token = None
+            opensubtitles_base_url_valid = False
+
+        opensubtitles_paths = _opensubtitles_secret_paths(configured_settings)
+        opensubtitles_configured = bool(
+            opensubtitles_api_key
+            and opensubtitles_token
+            and opensubtitles_base_url_valid
+        )
+        cleanup_pending = bool(
+            opensubtitles_paths is not None
+            and has_pending_secret_deletion(opensubtitles_paths)
+        )
+        editable = bool(
+            opensubtitles_paths is not None
+            and can_manage_secret_bundle(opensubtitles_paths)
+        )
+        can_delete = bool(
+            opensubtitles_paths is not None
+            and can_delete_secret_bundle(opensubtitles_paths)
+            and (opensubtitles_configured or cleanup_pending)
+        )
+        return AdminIntegrationsResponse(
+            prowlarr=AdminIntegrationStatus(
+                configured=prowlarr_configured,
+                editable=False,
+                can_manage=False,
+            ),
+            opensubtitles=AdminIntegrationStatus(
+                configured=opensubtitles_configured,
+                editable=editable,
+                can_manage=editable,
+                cleanup_pending=cleanup_pending,
+                can_delete=can_delete,
+            ),
+        )
+
+    @application.get(
+        "/v1/admin/prowlarr/indexers",
+        response_model=ProwlarrIndexerListResponse,
+    )
+    async def admin_prowlarr_indexers(
+        request: Request,
+        _admin: LocalAdminDependency,
+    ) -> ProwlarrIndexerListResponse:
+        adapter = prowlarr_admin(request)
+        try:
+            items = await adapter.list_indexers()
+        except AdminIntegrationError as exc:
+            raise admin_error(exc) from exc
+        validated = [ProwlarrIndexerResponse.model_validate(item) for item in items]
+        return ProwlarrIndexerListResponse(items=validated, count=len(validated))
+
+    @application.post(
+        "/v1/admin/prowlarr/test-all",
+        response_model=ProwlarrTestAllResponse,
+    )
+    async def admin_prowlarr_test_all(
+        request: Request,
+        _admin: LocalAdminDependency,
+    ) -> ProwlarrTestAllResponse:
+        adapter = prowlarr_admin(request)
+        try:
+            payload = await adapter.test_all()
+        except AdminIntegrationError as exc:
+            raise admin_error(exc) from exc
+        return ProwlarrTestAllResponse.model_validate(payload)
+
+    @application.put(
+        "/v1/admin/opensubtitles",
+        response_model=OpenSubtitlesConfigurationResponse,
+    )
+    async def admin_configure_opensubtitles(
+        payload: OpenSubtitlesConfigureRequest,
+        request: Request,
+        _admin: LocalAdminDependency,
+    ) -> OpenSubtitlesConfigurationResponse:
+        opensubtitles_paths = _opensubtitles_secret_paths(configured_settings)
+        if opensubtitles_paths is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "secret_store_read_only",
+                    "message": (
+                        "Bản triển khai này không cho phép sửa secret OpenSubtitles từ web"
+                    ),
+                    "retryable": False,
+                },
+            )
+        if has_pending_secret_deletion(opensubtitles_paths):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "secret_cleanup_pending",
+                    "message": (
+                        "Secret OpenSubtitles cũ chưa được dọn; hãy thử xóa cấu hình lại"
+                    ),
+                    "retryable": True,
+                },
+            )
+        if not can_manage_secret_bundle(opensubtitles_paths):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "secret_store_read_only",
+                    "message": (
+                        "Bản triển khai này không cho phép sửa secret OpenSubtitles từ web"
+                    ),
+                    "retryable": False,
+                },
+            )
+        api_key_path, token_path, base_url_path = opensubtitles_paths
+
+        api_key = payload.api_key.get_secret_value().strip()
+        username = payload.username.strip()
+        password = payload.password.get_secret_value()
+        if not api_key or not username or not password:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "invalid_opensubtitles_credentials",
+                    "message": "Thông tin đăng nhập OpenSubtitles không hợp lệ",
+                    "retryable": False,
+                },
+            )
+
+        async with admin_configuration_lock:
+            if has_pending_secret_deletion(opensubtitles_paths):
+                raise admin_error(
+                    AdminIntegrationError(
+                        status_code=409,
+                        code="secret_cleanup_pending",
+                        message="Secret OpenSubtitles cũ chưa được dọn; hãy thử xóa cấu hình lại",
+                        retryable=True,
+                    )
+                )
+            if not can_manage_secret_bundle(opensubtitles_paths):
+                raise admin_error(
+                    AdminIntegrationError(
+                        status_code=503,
+                        code="secret_store_read_only",
+                        message="Bản triển khai này không cho phép sửa secret OpenSubtitles từ web",
+                        retryable=False,
+                    )
+                )
+            try:
+                adapter = OpenSubtitlesAdminClient(
+                    api_url=configured_settings.opensubtitles_url,
+                    user_agent=configured_settings.opensubtitles_user_agent,
+                    client=request.app.state.admin_http_client,
+                )
+                token, api_root, quota = await adapter.login_and_test(
+                    api_key=api_key,
+                    username=username,
+                    password=password,
+                )
+                await asyncio.to_thread(
+                    atomic_write_secret_bundle,
+                    (
+                        (api_key_path, api_key),
+                        (token_path, token),
+                        (base_url_path, api_root),
+                    ),
+                )
+            except AdminIntegrationError as exc:
+                raise admin_error(exc) from exc
+        return OpenSubtitlesConfigurationResponse(
+            configured=True,
+            authenticated=True,
+            restart_required=True,
+            quota=quota,
+        )
+
+    @application.delete(
+        "/v1/admin/opensubtitles",
+        response_model=OpenSubtitlesConfigurationResponse,
+    )
+    async def admin_delete_opensubtitles(
+        _payload: OpenSubtitlesDeleteRequest,
+        _admin: LocalAdminDependency,
+    ) -> OpenSubtitlesConfigurationResponse:
+        opensubtitles_paths = _opensubtitles_secret_paths(configured_settings)
+        if (
+            opensubtitles_paths is None
+            or not can_delete_secret_bundle(opensubtitles_paths)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "secret_store_read_only",
+                    "message": (
+                        "Bản triển khai này không cho phép sửa secret OpenSubtitles từ web"
+                    ),
+                    "retryable": False,
+                },
+            )
+        async with admin_configuration_lock:
+            if not can_delete_secret_bundle(opensubtitles_paths):
+                raise admin_error(
+                    AdminIntegrationError(
+                        status_code=503,
+                        code="secret_store_read_only",
+                        message="Bản triển khai này không cho phép sửa secret OpenSubtitles từ web",
+                        retryable=False,
+                    )
+                )
+            try:
+                await asyncio.to_thread(
+                    delete_secret_bundle,
+                    opensubtitles_paths,
+                )
+            except AdminIntegrationError as exc:
+                raise admin_error(exc) from exc
+        return OpenSubtitlesConfigurationResponse(
+            configured=False,
+            authenticated=False,
+            restart_required=True,
+        )
 
     @application.get("/v1/models", response_model=ModelCatalog)
     def models() -> ModelCatalog:

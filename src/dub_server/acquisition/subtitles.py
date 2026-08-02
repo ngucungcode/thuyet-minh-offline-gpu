@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from dub_server.opensubtitles import normalize_opensubtitles_api_root
+
 from dub_server.domain import (
     AcquisitionError,
     AcquisitionErrorCode,
@@ -229,7 +231,7 @@ class CompositeSubtitleProvider(SubtitleProvider):
         client: httpx.AsyncClient,
         opensubtitles_api_key: str | None = None,
         opensubtitles_token: str | None = None,
-        opensubtitles_base_url: str = "https://api.opensubtitles.com",
+        opensubtitles_base_url: str = "https://api.opensubtitles.com/api/v1",
         user_agent: str = "ThuyetMinhOfflineGPU v0.1",
         embedded_probe: EmbeddedSubtitleProbe | None = None,
         timeout_seconds: float = 20.0,
@@ -237,13 +239,15 @@ class CompositeSubtitleProvider(SubtitleProvider):
         max_archive_entries: int = 20,
         max_uncompressed_bytes: int = 40 * 1024 * 1024,
     ) -> None:
-        parsed = urlsplit(opensubtitles_base_url)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise ValueError("OpenSubtitles base URL phải dùng HTTPS")
         self._client = client
         self._api_key = opensubtitles_api_key
         self._token = opensubtitles_token
-        self._base_url = opensubtitles_base_url.rstrip("/")
+        try:
+            self._api_root = normalize_opensubtitles_api_root(
+                opensubtitles_base_url
+            )
+        except ValueError as exc:
+            raise ValueError("OpenSubtitles API URL không hợp lệ") from exc
         self._user_agent = user_agent
         self._probe = embedded_probe or FfprobeSubtitleProbe()
         self._timeout = httpx.Timeout(timeout_seconds)
@@ -445,7 +449,7 @@ class CompositeSubtitleProvider(SubtitleProvider):
         exact: bool,
         media: MediaAsset,
     ) -> tuple[SubtitleCandidate, ...]:
-        response = await self._api_request("GET", "/api/v1/subtitles", params=parameters)
+        response = await self._api_request("GET", "/subtitles", params=parameters)
         try:
             payload = response.json()
         except ValueError as exc:
@@ -507,7 +511,7 @@ class CompositeSubtitleProvider(SubtitleProvider):
 
     async def _download_remote(self, file_id: int) -> tuple[bytes, str]:
         response = await self._api_request(
-            "POST", "/api/v1/download", json_body={"file_id": file_id}
+            "POST", "/download", json_body={"file_id": file_id}
         )
         try:
             payload = response.json()
@@ -574,7 +578,7 @@ class CompositeSubtitleProvider(SubtitleProvider):
         try:
             response = await self._client.request(
                 method,
-                f"{self._base_url}{path}",
+                f"{self._api_root}{path}",
                 params=params,
                 json=json_body,
                 headers=headers,

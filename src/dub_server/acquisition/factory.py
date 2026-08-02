@@ -20,7 +20,7 @@ def build_acquisition_service(
     qbittorrent_password: str,
     opensubtitles_api_key: str | None = None,
     opensubtitles_token: str | None = None,
-    opensubtitles_base_url: str = "https://api.opensubtitles.com",
+    opensubtitles_base_url: str = "https://api.opensubtitles.com/api/v1",
     opensubtitles_user_agent: str = "ThuyetMinhOfflineGPU v0.1",
     embedded_probe: EmbeddedSubtitleProbe | None = None,
 ) -> AcquisitionService:

@@ -6,12 +6,16 @@ Node.js, reverse proxy hay cấu hình CORS trên máy GPU.
 
 ## Chức năng
 
-- Kiểm tra trạng thái API, GPU và catalog model.
+- Kiểm tra trạng thái API, GPU, acquisition và catalog model.
 - Tìm nguồn qua indexer đã được quản trị viên cấu hình.
-- Chọn kết quả hoặc nhập `Release ID`, ngôn ngữ nguồn và chế độ phụ đề.
+- Chọn kết quả hoặc nhập `Release ID`, ngôn ngữ nguồn, chế độ phụ đề, model
+  ASR/dịch/tách âm/TTS và giọng tham chiếu tùy chọn.
 - Bắt buộc xác nhận quyền trước khi tạo job.
 - Tự cập nhật danh sách job và tiến độ từng công đoạn mỗi 3 giây.
-- Hủy, tiếp tục và tải MP4 hoàn tất.
+- Xử lý ngay trên web các trạng thái cần chọn ngôn ngữ hoặc chọn phụ đề.
+- Hủy, tiếp tục, làm mới và tải MP4, SRT cùng timing report.
+- Xem/trắc nghiệm kết nối Prowlarr và cấu hình OpenSubtitles mà không trả secret
+  về trình duyệt.
 - Hiển thị tốt trên desktop và điện thoại.
 
 API hiện tại chưa có endpoint nhập magnet hoặc upload `.torrent` trực tiếp.
@@ -37,6 +41,41 @@ ssh -L 8080:127.0.0.1:8080 -p SSH_PORT root@GPU_HOST
 
 Sau đó mở `http://127.0.0.1:8080/` trên máy cá nhân.
 
+Để nút “Mở Prowlarr” cũng hoạt động, thêm tunnel cổng quản trị:
+
+```bash
+ssh -p SSH_PORT \
+  -L 8080:127.0.0.1:8080 \
+  -L 9696:127.0.0.1:9696 \
+  root@GPU_HOST
+```
+
+## Prowlarr và OpenSubtitles
+
+Dashboard chỉ đọc danh sách indexer đã cấu hình và gọi kiểm thử tất cả indexer.
+Việc thêm/sửa credential indexer vẫn diễn ra trong Prowlarr tại
+`http://127.0.0.1:9696`: vào **Indexers → Add Indexer**, chọn dịch vụ mà bạn có
+quyền sử dụng, nhập cấu hình của chính bạn rồi bấm **Test** và **Save**. Dự án
+không đóng gói preset tracker/indexer và không nhận credential indexer tùy ý qua
+API của dashboard.
+
+Với OpenSubtitles, tạo API consumer key trong tài khoản OpenSubtitles rồi mở mục
+**Tích hợp** trên dashboard. Nhập API key, tên đăng nhập và mật khẩu; backend dùng
+chúng đúng một lần để đăng nhập, chỉ lưu API key, bearer token và `base_url` API
+đã allowlist trong `var/secrets` với mode `0600`, và không lưu mật khẩu. Ba file
+được commit/xóa như một bundle; lỗi cleanup có thể retry ngay trên dashboard.
+Sau khi lưu hoặc xóa cấu hình, chạy `dub stack restart` để service acquisition
+nạp lại secret. Token có thể hết hạn; khi đó đăng nhập lại từ cùng biểu mẫu.
+
+Biểu mẫu ghi secret được thiết kế cho profile native trên GPU VM. Với Docker
+Compose, `/run/secrets` thường là mount chỉ đọc; hãy cập nhật các file secret ở
+host theo phần “Cấu hình ban đầu” của README, đặt `DUB_OPENSUBTITLES_URL` đúng
+bằng `base_url` do login trả về, rồi force-recreate API thay vì dùng biểu mẫu.
+
+Các endpoint quản trị này chỉ chấp nhận request loopback có header chủ ý của
+dashboard. Vì vậy phải giữ API bind ở `127.0.0.1` và truy cập qua SSH tunnel;
+không đưa dashboard này lên Internet nếu chưa có lớp xác thực và TLS riêng.
+
 ## Phát triển frontend
 
 Yêu cầu Node.js 22.13 trở lên. Tạo `.env.local` nếu API không dùng địa chỉ mặc
@@ -52,6 +91,10 @@ Chạy frontend ở cổng 3000 với route `/v1/*` chuyển tiếp về backend
 npm ci
 npm run dev
 ```
+
+Proxy phát triển chỉ chuyển tiếp API workflow thông thường và cố ý chặn
+`/v1/admin/*`. Để thử cấu hình Prowlarr/OpenSubtitles, hãy chạy `npm run embed`,
+khởi động `dub serve` và mở dashboard cùng origin ở cổng 8080 qua SSH tunnel.
 
 ## Cập nhật asset trong gói Python
 

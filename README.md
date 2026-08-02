@@ -140,10 +140,18 @@ ssh -p <SSH_PORT> \
   root@<GPU_HOST>
 ```
 
-Sau đó dùng API docs ở `http://127.0.0.1:8080/docs`, qBittorrent ở
-`http://127.0.0.1:8081` và Prowlarr ở `http://127.0.0.1:9696`. Prowlarr hiện chưa
+Sau đó dùng dashboard ở `http://127.0.0.1:8080/`, API docs ở
+`http://127.0.0.1:8080/docs`, qBittorrent ở `http://127.0.0.1:8081` và Prowlarr
+ở `http://127.0.0.1:9696`. Dashboard bao phủ tìm/chọn nguồn, cấu hình model,
+chọn phụ đề/ngôn ngữ khi pipeline yêu cầu, theo dõi job, hủy/tiếp tục và tải
+MP4/SRT/timing report. Prowlarr hiện chưa
 có indexer; quản trị viên phải tự thêm một indexer hợp pháp/content-agnostic trước
 khi tìm được nguồn thật. Không có tracker/indexer nào được đóng gói hoặc gợi ý sẵn.
+
+Hướng dẫn chi tiết để thêm indexer trong giao diện Prowlarr và đăng nhập
+OpenSubtitles API mà không lưu mật khẩu nằm tại
+[`docs/WEB_WORKFLOW.md`](docs/WEB_WORKFLOW.md). Các thao tác tích hợp chỉ chạy
+qua loopback/SSH tunnel; không công khai cổng quản trị ra Internet.
 
 Supervisor sống qua việc ngắt SSH nhưng không tự sống lại khi nhà cung cấp khởi động
 lại toàn bộ container. Khi đó chạy `scripts/native-stack.sh start`, hoặc đặt startup
@@ -216,8 +224,12 @@ docker compose up -d prowlarr qbittorrent
 - Cổng peer `6881` bind mọi interface. Chỉ mở nó qua firewall khi cần; không
   publish API/WebUI ra LAN nếu chưa bổ sung xác thực và TLS.
 - OpenSubtitles là tùy chọn. Nếu dùng, điền API key và bearer token của tài khoản
-  vào hai secret tương ứng; token có thể hết hạn và phải được thay thủ công. Nếu
-  thiếu một trong hai, hệ thống chỉ dùng subtitle nhúng/sidecar rồi fallback ASR.
+  vào hai file secret tương ứng, đồng thời đặt `DUB_OPENSUBTITLES_URL` trong
+  `.env` đúng bằng `base_url` mà endpoint login trả về (host thường hoặc VIP),
+  rồi force-recreate
+  API. Token có thể hết hạn và phải được thay thủ công. Nếu thiếu key/token hoặc
+  URL không thuộc allowlist chính thức, hệ thống chỉ dùng subtitle nhúng/sidecar
+  rồi fallback ASR.
 
 Sau khi lấy API key Prowlarr và đã đổi mật khẩu qBittorrent, thay `REPLACE_ME`
 trong các file secret, chạy lại lệnh `chown`/`chmod` ở trên rồi khởi động ứng
@@ -350,13 +362,15 @@ Kết quả nghiệm thu RTX 3090 mới nhất nằm trong `PHASE4_REPORT.md` v�
 
 ### SBOM và cleanup Phase 5
 
-SBOM dùng đúng Python distributions đang cài cộng với hai lock manifest, sau đó
-ghi CycloneDX 1.6 atomically:
+SBOM dùng đúng Python distributions đang cài cộng với lock manifest của model,
+native và toàn bộ dependency web/npm, sau đó ghi CycloneDX 1.6 atomically. CI
+xác minh file phát hành bằng schema CycloneDX 1.6 chính thức:
 
 ```bash
 .venv-native/bin/python scripts/generate-sbom.py \
   --models-lock config/models.lock.json \
   --native-lock native/components.lock.json \
+  --web-lock web/package-lock.json \
   --output var/reports/sbom.cdx.json
 ```
 

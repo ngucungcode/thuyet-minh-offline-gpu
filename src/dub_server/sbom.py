@@ -1,13 +1,15 @@
 """CycloneDX SBOM generation without a runtime SBOM dependency.
 
-The generator inventories the Python environment together with the two lock
-manifests that describe downloaded models and native/system components.  It
-does not inspect or download model payloads; the immutable lock metadata is
-the source of truth for those components.
+The generator inventories the Python environment together with lock manifests
+for downloaded models, native/system components, and the embedded web build.
+It does not inspect or download payloads; immutable lock metadata is the source
+of truth for those components.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import importlib.metadata
 import json
@@ -19,7 +21,7 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -34,6 +36,7 @@ def build_cyclonedx_sbom(
     models_lock_path: Path,
     native_lock_path: Path,
     *,
+    web_lock_path: Path | None = None,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
     generated_at: datetime | None = None,
     serial_number: str | None = None,
@@ -56,12 +59,39 @@ def build_cyclonedx_sbom(
     python_components = _python_components(distribution_list)
     model_components = _model_components(models_lock["models"])
     native_components = _native_components(native_lock["components"])
+    web_components: list[dict[str, Any]] = []
+    if web_lock_path is not None:
+        web_lock = _read_web_lock(web_lock_path)
+        web_components = _npm_components(web_lock["packages"])
     components = sorted(
-        [*python_components, *model_components, *native_components],
+        [
+            *python_components,
+            *model_components,
+            *native_components,
+            *web_components,
+        ],
         key=lambda item: item["bom-ref"],
     )
     refs = [item["bom-ref"] for item in components]
     application_ref = "application:thuyet-minh-offline-gpu"
+
+    lock_properties = [
+        {
+            "name": "thuyetminh:models-lock-sha256",
+            "value": _file_sha256(models_lock_path),
+        },
+        {
+            "name": "thuyetminh:native-lock-sha256",
+            "value": _file_sha256(native_lock_path),
+        },
+    ]
+    if web_lock_path is not None:
+        lock_properties.append(
+            {
+                "name": "thuyetminh:web-lock-sha256",
+                "value": _file_sha256(web_lock_path),
+            }
+        )
 
     return {
         "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
@@ -83,20 +113,11 @@ def build_cyclonedx_sbom(
                     {
                         "type": "application",
                         "name": "stdlib-sbom-generator",
-                        "version": "1",
+                        "version": "2",
                     }
                 ]
             },
-            "properties": [
-                {
-                    "name": "thuyetminh:models-lock-sha256",
-                    "value": _file_sha256(models_lock_path),
-                },
-                {
-                    "name": "thuyetminh:native-lock-sha256",
-                    "value": _file_sha256(native_lock_path),
-                },
-            ],
+            "properties": lock_properties,
         },
         "components": components,
         "dependencies": [
@@ -111,6 +132,7 @@ def write_cyclonedx_sbom(
     models_lock_path: Path,
     native_lock_path: Path,
     *,
+    web_lock_path: Path | None = None,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
     generated_at: datetime | None = None,
     serial_number: str | None = None,
@@ -120,6 +142,7 @@ def write_cyclonedx_sbom(
     document = build_cyclonedx_sbom(
         models_lock_path,
         native_lock_path,
+        web_lock_path=web_lock_path,
         distributions=distributions,
         generated_at=generated_at,
         serial_number=serial_number,
@@ -164,6 +187,20 @@ def _read_lock(path: Path, *, expected_collection: str) -> dict[str, Any]:
         raise SbomError(
             f"Lock manifest thiếu collection {expected_collection}: {path}"
         )
+    return raw
+
+
+def _read_web_lock(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SbomError(f"Không thể đọc web package lock: {path}") from exc
+    if (
+        not isinstance(raw, dict)
+        or raw.get("lockfileVersion") not in {2, 3}
+        or not isinstance(raw.get("packages"), dict)
+    ):
+        raise SbomError(f"Web package lock không đúng schema npm: {path}")
     return raw
 
 
@@ -329,6 +366,104 @@ def _native_components(components: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _npm_components(packages: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Inventory every pinned npm package, including build-only dependencies."""
+
+    by_ref: dict[str, dict[str, Any]] = {}
+    scopes_by_ref: dict[str, set[str]] = {}
+    paths_by_ref: dict[str, set[str]] = {}
+    for package_path, raw in packages.items():
+        if not package_path or not isinstance(package_path, str):
+            continue
+        if not isinstance(raw, dict):
+            raise SbomError("web package lock chứa package không hợp lệ")
+        version = str(raw.get("version") or "").strip()
+        name = _npm_package_name(package_path)
+        if not name or not version:
+            continue
+        encoded_name = "/".join(quote(part, safe="") for part in name.split("/"))
+        encoded_version = quote(version, safe=".+-~")
+        bom_ref = f"npm:{name}@{version}"
+        scope = "development" if raw.get("dev") is True else "runtime"
+        scopes_by_ref.setdefault(bom_ref, set()).add(scope)
+        paths_by_ref.setdefault(bom_ref, set()).add(package_path)
+
+        component: dict[str, Any] = {
+            "type": "library",
+            "bom-ref": bom_ref,
+            "name": name,
+            "version": version,
+            "purl": f"pkg:npm/{encoded_name}@{encoded_version}",
+        }
+        license_name = str(raw.get("license") or "").strip()
+        if license_name:
+            component["licenses"] = [_license(license_name)]
+        integrity_hash = _npm_integrity_hash(raw.get("integrity"))
+        if integrity_hash is not None:
+            component["hashes"] = [integrity_hash]
+        resolved = str(raw.get("resolved") or "").strip()
+        parsed_resolved = urlsplit(resolved)
+        if (
+            parsed_resolved.scheme == "https"
+            and parsed_resolved.hostname
+            and not parsed_resolved.username
+            and not parsed_resolved.password
+            and not parsed_resolved.query
+            and not parsed_resolved.fragment
+        ):
+            component["externalReferences"] = [
+                {"type": "distribution", "url": resolved}
+            ]
+        by_ref.setdefault(bom_ref, component)
+
+    for bom_ref, component in by_ref.items():
+        scopes = scopes_by_ref[bom_ref]
+        effective_scope = "runtime" if "runtime" in scopes else "development"
+        component["scope"] = "required" if effective_scope == "runtime" else "excluded"
+        component["properties"] = [
+            {"name": "thuyetminh:npm:scope", "value": effective_scope},
+            {
+                "name": "thuyetminh:npm:lock-paths",
+                "value": json.dumps(sorted(paths_by_ref[bom_ref]), separators=(",", ":")),
+            },
+        ]
+    return list(by_ref.values())
+
+
+def _npm_package_name(package_path: str) -> str | None:
+    marker = "node_modules/"
+    if marker not in package_path:
+        return None
+    name = package_path.rsplit(marker, 1)[1].strip("/")
+    if not name or "/node_modules/" in name:
+        return None
+    if name.startswith("@"):
+        parts = name.split("/")
+        return name if len(parts) == 2 and all(parts) else None
+    return name if "/" not in name else None
+
+
+def _npm_integrity_hash(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, str) or "-" not in value:
+        return None
+    algorithm, encoded = value.split("-", 1)
+    cyclone_algorithm = {
+        "sha256": "SHA-256",
+        "sha384": "SHA-384",
+        "sha512": "SHA-512",
+    }.get(algorithm.lower())
+    if cyclone_algorithm is None:
+        return None
+    try:
+        digest = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    expected_bytes = {"SHA-256": 32, "SHA-384": 48, "SHA-512": 64}
+    if len(digest) != expected_bytes[cyclone_algorithm]:
+        return None
+    return {"alg": cyclone_algorithm, "content": digest.hex()}
+
+
 def _application_version(
     distributions: Iterable[importlib.metadata.Distribution],
 ) -> str:
@@ -343,10 +478,10 @@ def _application_version(
 
 
 def _license(value: str) -> dict[str, dict[str, str]]:
-    # Lock manifests use SPDX identifiers. Python package metadata is less
-    # predictable, so long/free-form values are represented as names.
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]{0,79}", value):
-        return {"license": {"id": value}}
+    # Package metadata frequently uses short legacy labels such as "BSD" or
+    # "Apache" that look like identifiers but are not valid SPDX IDs. Keep the
+    # exact declared value as a CycloneDX license name unless a dedicated SPDX
+    # parser is introduced; this remains schema-valid without inventing an ID.
     return {"license": {"name": value[:512]}}
 
 
