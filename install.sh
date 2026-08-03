@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 main() {
-INSTALLER_VERSION="0.2.2"
+INSTALLER_VERSION="0.2.3"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
 SOURCE_REF="v${INSTALLER_VERSION}"
@@ -18,7 +18,7 @@ ASSUME_YES=false
 DRY_RUN=false
 MIGRATE_EXISTING=false
 UPGRADE_EXISTING=false
-COMPATIBLE_UPGRADE_FROM="0.2.0 0.2.1"
+COMPATIBLE_UPGRADE_FROM="0.2.0 0.2.1 0.2.2"
 MIGRATED_RUNTIME_REUSABLE=false
 MIGRATION_BACKUP_PATH=""
 MIGRATION_ACTIVE=false
@@ -350,8 +350,23 @@ fi
 
 command -v flock >/dev/null || die "Không tìm thấy flock"
 install -d -m 0755 /run/lock
-exec 9>/run/lock/thuyet-minh-offline-install.lock
-flock -n 9 || die "Một trình cài khác đang chạy"
+installer_lock_path=/run/lock/thuyet-minh-offline-install.lock
+exec 9>"${installer_lock_path}"
+if ! flock -n 9; then
+  lock_owner=""
+  if command -v lslocks >/dev/null; then
+    lock_owner="$(
+      lslocks --noheadings --raw --output PID,COMMAND,PATH 2>/dev/null \
+        | awk -v path="${installer_lock_path}" \
+          '$3 == path {print "PID " $1 " (" $2 ")"; exit}' \
+        || true
+    )"
+  fi
+  if [[ -n "${lock_owner}" ]]; then
+    die "Một trình cài khác đang chạy hoặc tiến trình cũ đang giữ khóa: ${lock_owner}. Không xóa file lock"
+  fi
+  die "Một trình cài khác đang chạy hoặc tiến trình cũ đang giữ khóa. Không xóa file lock"
+fi
 
 if [[ -z "${SCRIPT_ROOT}" ]]; then
   if ! command -v git >/dev/null || ! command -v curl >/dev/null; then
@@ -678,7 +693,7 @@ if [[ "${START_STACK}" == true ]]; then
       die "Systemd service đã start nhưng stack chưa khỏe"
     fi
   else
-    "${PROJECT_ROOT}/scripts/native-stack.sh" start
+    "${PROJECT_ROOT}/scripts/native-stack.sh" start 9>&-
   fi
   if [[ -s "${DUB_PROWLARR_API_KEY_FILE}" && -s "${DUB_QBITTORRENT_PASSWORD_FILE}" ]]; then
     "${PROJECT_ROOT}/scripts/native-init-services.sh"

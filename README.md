@@ -26,7 +26,7 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Trình cài production `v0.2.2` hỗ trợ đường triển khai native sau:
+Trình cài production `v0.2.3` hỗ trợ đường triển khai native sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
@@ -151,12 +151,32 @@ Job đã hoàn tất và toàn bộ thư mục nguồn `incoming` nằm ngoài p
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` hoặc `v0.2.1` lên `v0.2.2`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0`, `v0.2.1` hoặc `v0.2.2` lên `v0.2.3`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.2/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.3/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
+
+Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
+installer. Nếu gặp `Một trình cài khác đang chạy`, không xóa file lock. Trước tiên kiểm tra
+tiến trình giữ khóa; nếu không còn installer/model bootstrap thật và chỉ stack cũ giữ khóa,
+dừng stack rồi thử lại:
+
+```bash
+LOCK=/run/lock/thuyet-minh-offline-install.lock
+sudo lslocks -o PID,COMMAND,TYPE,MODE,PATH | grep -F "$LOCK" || true
+pgrep -af 'install\.sh|bash -s|native-bootstrap|native-model|apt-get|supervisord' || true
+dub jobs list --limit 20
+# Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
+dub stack stop
+sudo flock -n "$LOCK" true && echo LOCK_FREE
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.3/install.sh | sudo bash -s -- --upgrade-existing --yes
+```
+
+Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
+song. `v0.2.3` đóng descriptor khóa trước khi tạo daemon nên thao tác dừng stack này chỉ cần
+thực hiện một lần khi nâng cấp từ deployment bị ảnh hưởng.
 
 Trình cài chỉ chấp nhận đường nâng cấp đã khai báo, từ chối worktree bẩn, origin sai
 hoặc còn job đang hoạt động. Source mới được kích hoạt bằng transaction có journal;
@@ -173,10 +193,10 @@ không mã hóa lại hoặc cắt luồng hình:
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.2.2` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.2.3` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.2/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.3/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
