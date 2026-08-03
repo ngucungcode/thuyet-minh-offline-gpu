@@ -157,11 +157,38 @@ prepare_installed_release() {
 upgrade_root="${TEST_ROOT}/upgrade-current"
 upgrade_stage="${TEST_ROOT}/upgrade-stage"
 create_git_project "${upgrade_root}" 0.2.2 old
-create_git_project "${upgrade_stage}" 0.2.3 new
+create_git_project "${upgrade_stage}" 0.2.4 new
+# The target release changes only provider stack control around the persistent
+# runtime.
+# This must not force an in-place venv rebuild, but the full fingerprint still
+# needs to record that the release contents changed.
+printf '\n# provider stack control changed in the target release\n' \
+  >>"${upgrade_stage}/scripts/native-stack.sh"
+git -C "${upgrade_stage}" add scripts/native-stack.sh
+git -C "${upgrade_stage}" commit --amend --no-edit -q
 prepare_installed_release "${upgrade_root}" 0.2.2 model-bytes
+job_checkpoint="${upgrade_root}/var/data/jobs/job-upgrade/checkpoint.json"
+mkdir -p "$(dirname -- "${job_checkpoint}")"
+printf '%s\n' \
+  '{"job_id":"job-upgrade","stage":"phase4","status":"failed"}' \
+  >"${job_checkpoint}"
 model_inode_before="$(stat -c '%i' -- "${upgrade_root}/var/models/sentinel")"
+job_inode_before="$(stat -c '%i' -- "${job_checkpoint}")"
+job_hash_before="$(sha256sum -- "${job_checkpoint}" | awk '{print $1}')"
 old_commit="$(git -C "${upgrade_root}" rev-parse HEAD)"
 new_commit="$(git -C "${upgrade_stage}" rev-parse HEAD)"
+old_runtime_fingerprint="$(migration_runtime_fingerprint "${upgrade_root}")"
+new_runtime_fingerprint="$(migration_runtime_fingerprint "${upgrade_stage}")"
+old_compatibility_fingerprint="$(
+  migration_runtime_compatibility_fingerprint "${upgrade_root}"
+)"
+new_compatibility_fingerprint="$(
+  migration_runtime_compatibility_fingerprint "${upgrade_stage}"
+)"
+[[ "${old_runtime_fingerprint}" != "${new_runtime_fingerprint}" ]] \
+  || fail "Full runtime fingerprint không phản ánh source release mới"
+[[ "${old_compatibility_fingerprint}" == "${new_compatibility_fingerprint}" ]] \
+  || fail "Thay đổi provider control plane bị coi nhầm là runtime không tương thích"
 export MIGRATION_TEST_STACK_STATE="${TEST_ROOT}/upgrade-stack.running"
 export MIGRATION_TEST_EVENTS="${TEST_ROOT}/upgrade-stack.events"
 export MIGRATION_EXPECTED_JOURNAL="${upgrade_root}.migration-state.json"
@@ -169,7 +196,7 @@ touch "${MIGRATION_TEST_STACK_STATE}"
 
 migrate_git_release_upgrade \
   "${upgrade_root}" "${upgrade_stage}" "${upgrade_root}/var" false \
-  0.2.3 "0.2.0 0.2.1 0.2.2"
+  0.2.4 "0.2.0 0.2.1 0.2.2 0.2.3"
 
 [[ "$(<"${upgrade_root}/SOURCE_MARKER")" == new ]] \
   || fail "Source release mới chưa active"
@@ -183,6 +210,11 @@ migrate_git_release_upgrade \
 [[ "$(stat -c '%i' -- "${upgrade_root}/var/models/sentinel")" \
   == "${model_inode_before}" ]] \
   || fail "Upgrade đã copy thay vì rename data root"
+[[ -f "${job_checkpoint}" \
+  && "$(stat -c '%i' -- "${job_checkpoint}")" == "${job_inode_before}" \
+  && "$(sha256sum -- "${job_checkpoint}" | awk '{print $1}')" \
+    == "${job_hash_before}" ]] \
+  || fail "Upgrade làm mất hoặc thay đổi checkpoint job trong var"
 [[ ! -e "${MIGRATION_TEST_STACK_STATE}" ]] \
   || fail "Stack cũ chưa dừng trước source swap"
 
@@ -203,6 +235,12 @@ trap - INT TERM HUP
 [[ "$(stat -c '%i' -- "${upgrade_root}/var/models/sentinel")" \
   == "${model_inode_before}" ]] \
   || fail "Rollback làm đổi data inode"
+job_checkpoint="${upgrade_root}/var/data/jobs/job-upgrade/checkpoint.json"
+[[ -f "${job_checkpoint}" \
+  && "$(stat -c '%i' -- "${job_checkpoint}")" == "${job_inode_before}" \
+  && "$(sha256sum -- "${job_checkpoint}" | awk '{print $1}')" \
+    == "${job_hash_before}" ]] \
+  || fail "Rollback làm mất hoặc thay đổi checkpoint job trong var"
 [[ -e "${MIGRATION_TEST_STACK_STATE}" ]] \
   || fail "Rollback chưa khởi động lại stack cũ"
 [[ "$(tr '\n' ' ' <"${MIGRATION_TEST_EVENTS}")" == "stop start " ]] \
