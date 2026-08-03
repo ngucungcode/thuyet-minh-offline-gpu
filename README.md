@@ -26,7 +26,7 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Trình cài production `v0.2.0` hỗ trợ đường triển khai native sau:
+Trình cài production `v0.2.1` hỗ trợ đường triển khai native sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
@@ -149,23 +149,41 @@ dub maintenance sbom
 Job đã hoàn tất và toàn bộ thư mục nguồn `incoming` nằm ngoài phạm vi cleanup tự
 động. Luôn đọc dry-run trước khi dùng `--apply`.
 
-## Cài bản ghim và rollback
+## Nâng cấp, cài bản ghim và rollback
 
-Để cài mới đúng bản `v0.2.0` thay vì `latest`, dùng URL bất biến:
+Để nâng cấp deployment Git sạch từ `v0.2.0` lên `v0.2.1`, chạy một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.0/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.1/install.sh | sudo bash -s -- --upgrade-existing --yes
+```
+
+Trình cài chỉ chấp nhận đường nâng cấp đã khai báo, từ chối worktree bẩn, origin sai
+hoặc còn job đang hoạt động. Source mới được kích hoạt bằng transaction có journal;
+`.env.native`, model, virtualenv và dữ liệu được giữ nguyên. Nếu health check hoặc
+acceptance thất bại, trình cài phục hồi source và trạng thái stack cũ. Backup source
+cũ được giữ lại để kiểm tra thủ công.
+
+Sau khi nâng cấp bản vá này, job từng dừng ở lỗi `output_track_layout_invalid` sẽ có
+thể tiếp tục từ checkpoint:
+
+```bash
+dub resume JOB_ID
+```
+
+Để cài mới đúng bản `v0.2.1` thay vì `latest`, dùng URL bất biến:
+
+```bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.1/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
-thay đổi và không ghi đè `.env.native`. Bản `v0.2.0` không tự nâng cấp in-place từ
-release khác vì source, virtualenv và database cần một transaction nâng cấp riêng.
-Nếu commit đích khác, installer dừng trước khi checkout hoặc sửa runtime.
+thay đổi và không ghi đè `.env.native`. Nếu commit đích khác mà không có
+`--upgrade-existing`, installer dừng trước khi checkout hoặc sửa runtime.
 
 Deployment legacy không có Git cũng bị từ chối theo mặc định. Cờ
 `--migrate-existing` chỉ dành cho bản source có runtime fingerprint giống hệt;
 khác fingerprint sẽ dừng trước khi đổi source. Không dùng cờ này để ép nâng
-`v0.1.x` lên `v0.2.0`.
+`v0.1.x` lên `v0.2.x`.
 
 Trước mọi thay đổi release, hãy snapshot toàn bộ thư mục cài và data volume. Không
 chỉ đổi source về bản cũ trong khi giữ database từ release mới hơn. Giữ nguyên

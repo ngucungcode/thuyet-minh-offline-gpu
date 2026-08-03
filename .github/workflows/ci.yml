@@ -42,6 +42,7 @@ jobs:
         run: |
           sudo bash tests/test-data-root-permissions.sh
           bash tests/test-installer-migration.sh
+          bash tests/test-installer-git-upgrade.sh
 
       - name: Run test suite
         run: python -m pytest -q

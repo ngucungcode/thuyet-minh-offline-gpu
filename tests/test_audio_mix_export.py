@@ -134,6 +134,8 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert all(not item.startswith("0:a") for item in maps)
     assert command[command.index("-c:v") + 1] == "copy"
     assert command[command.index("-c:a") + 1] == "aac"
+    assert command[command.index("-map_chapters") + 1] == "-1"
+    assert command[command.index("-write_tmcd") + 1] == "0"
     assert command[command.index("-protocol_whitelist") + 1] == "file,pipe"
     assert "shell" not in runner.calls[0][1]
 
@@ -234,6 +236,8 @@ def test_verification_rejects_any_extra_or_original_audio_track(tmp_path: Path) 
 
     assert captured.value.code == MediaExportErrorCode.TRACK_LAYOUT_INVALID
     assert captured.value.retryable is False
+    assert "3 luồng" in captured.value.message_vi
+    assert "2:audio/aac" in captured.value.message_vi
     assert output.read_bytes() == b"keep previous"
     assert not output.with_name(".dubbed.part.mp4").exists()
 
@@ -308,9 +312,20 @@ FFPROBE = shutil.which("ffprobe")
 )
 def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -> None:
     source = tmp_path / "source.mp4"
+    chapters = tmp_path / "chapters.ffmetadata"
     accompaniment = tmp_path / "accompaniment.wav"
     narration = tmp_path / "narration.wav"
     output = tmp_path / "dubbed.mp4"
+    chapters.write_text(
+        ";FFMETADATA1\n"
+        "title=Timecoded source\n"
+        "[CHAPTER]\n"
+        "TIMEBASE=1/1000\n"
+        "START=0\n"
+        "END=1000\n"
+        "title=Opening\n",
+        encoding="utf-8",
+    )
 
     subprocess.run(
         [
@@ -328,12 +343,26 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
             "lavfi",
             "-i",
             "sine=frequency=330:sample_rate=48000:duration=2",
+            "-f",
+            "ffmetadata",
+            "-i",
+            str(chapters),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-map_metadata",
+            "2",
+            "-map_chapters",
+            "2",
             "-c:v",
             "mpeg4",
             "-q:v",
             "5",
             "-c:a",
             "aac",
+            "-timecode",
+            "01:00:00:00",
             str(source),
         ],
         check=True,
@@ -341,6 +370,29 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=30,
+    )
+    source_probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,codec_name,codec_tag_string",
+            "-of",
+            "json",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    source_streams = json.loads(source_probe.stdout)["streams"]
+    assert len(source_streams) > 2
+    assert any(
+        item.get("codec_tag_string") == "tmcd" for item in source_streams
     )
     for target, frequency in ((accompaniment, 440), (narration, 880)):
         subprocess.run(

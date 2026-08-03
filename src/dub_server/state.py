@@ -533,8 +533,37 @@ class StateStore:
                         "CREATE UNIQUE INDEX jobs_one_active_idx "
                         "ON jobs((1)) WHERE active_slot = 1"
                     )
+                    if schema_version < 6:
+                        now = _utc_now()
+                        affected = connection.execute(
+                            "SELECT id, error_code FROM jobs "
+                            "WHERE status = ? AND retryable = 0 "
+                            "AND error_code = ?",
+                            (
+                                JobStatus.FAILED.value,
+                                "output_track_layout_invalid",
+                            ),
+                        ).fetchall()
+                        for row in affected:
+                            connection.execute(
+                                "UPDATE jobs SET retryable = 1, "
+                                "revision = revision + 1, updated_at = ? "
+                                "WHERE id = ?",
+                                (now, row["id"]),
+                            )
+                            self._insert_event(
+                                connection,
+                                str(row["id"]),
+                                "job.error_reclassified",
+                                {
+                                    "code": str(row["error_code"]),
+                                    "retryable": True,
+                                    "reason": "mp4_auxiliary_track_fix",
+                                },
+                                now,
+                            )
                     connection.execute(
-                        "UPDATE schema_metadata SET value = '5' "
+                        "UPDATE schema_metadata SET value = '6' "
                         "WHERE key = 'schema_version'"
                     )
                     connection.commit()

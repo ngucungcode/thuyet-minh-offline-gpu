@@ -421,7 +421,7 @@ class FfmpegAudioMixExporter:
             "-map_metadata",
             "0",
             "-map_chapters",
-            "0",
+            "-1",
             "-sn",
             "-dn",
             "-c:v",
@@ -434,6 +434,8 @@ class FfmpegAudioMixExporter:
             "48000",
             "-ac",
             "2",
+            "-write_tmcd",
+            "0",
             "-movflags",
             "+faststart",
             "-progress",
@@ -455,7 +457,8 @@ class FfmpegAudioMixExporter:
             "-protocol_whitelist",
             "file",
             "-show_entries",
-            "format=duration:stream=index,codec_type,codec_name,start_time,duration",
+            "format=duration:stream=index,codec_type,codec_name,codec_tag_string,"
+            "start_time,duration",
             "-of",
             "json",
             os.fspath(temporary),
@@ -500,9 +503,23 @@ class FfmpegAudioMixExporter:
         videos = [stream for stream in streams if stream.get("codec_type") == "video"]
         audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
         if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
+            layout_parts: list[str] = []
+            for stream in streams[:8]:
+                codec = str(stream.get("codec_name", "?"))
+                codec_tag = str(stream.get("codec_tag_string", ""))
+                if codec_tag and codec_tag != codec:
+                    codec = f"{codec}[{codec_tag}]"
+                layout_parts.append(
+                    f"{stream.get('index', '?')}:{stream.get('codec_type', '?')}/"
+                    f"{codec}"
+                )
+            layout = ", ".join(layout_parts)
+            if len(streams) > 8:
+                layout = f"{layout}, …"
             raise MediaExportError(
                 MediaExportErrorCode.TRACK_LAYOUT_INVALID,
-                "Video đầu ra phải có đúng một luồng hình và một luồng tiếng thuyết minh",
+                "Video đầu ra phải có đúng một luồng hình và một luồng tiếng "
+                f"thuyết minh; ffprobe thấy {len(streams)} luồng ({layout or 'trống'})",
                 retryable=False,
             )
         audio_codec = str(audios[0].get("codec_name", "")).lower()
