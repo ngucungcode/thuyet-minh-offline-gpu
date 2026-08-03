@@ -67,7 +67,7 @@ TERMINAL_STATUSES = frozenset(
     {JobStatus.COMPLETED, JobStatus.CANCELLED}
 )
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 ACTIVE_JOB_STATUSES = (
     JobStatus.CREATED,
@@ -542,15 +542,27 @@ class StateStore:
                     )
                     if schema_version < _SCHEMA_VERSION:
                         now = _utc_now()
-                        affected = connection.execute(
-                            "SELECT id, error_code FROM jobs "
-                            "WHERE status = ? AND retryable = 0 "
-                            "AND error_code = ?",
-                            (
-                                JobStatus.FAILED.value,
-                                "output_track_layout_invalid",
-                            ),
-                        ).fetchall()
+                        reclassified_errors: dict[str, str] = {}
+                        if schema_version < 6:
+                            reclassified_errors["output_track_layout_invalid"] = (
+                                "mp4_auxiliary_track_fix"
+                            )
+                        if schema_version < 7:
+                            reclassified_errors["output_duration_mismatch"] = (
+                                "video_canonical_duration_fix"
+                            )
+                        affected: list[sqlite3.Row] = []
+                        if reclassified_errors:
+                            placeholders = ",".join("?" for _ in reclassified_errors)
+                            affected = connection.execute(
+                                "SELECT id, error_code FROM jobs "
+                                "WHERE status = ? AND retryable = 0 "
+                                f"AND error_code IN ({placeholders})",
+                                (
+                                    JobStatus.FAILED.value,
+                                    *reclassified_errors,
+                                ),
+                            ).fetchall()
                         for row in affected:
                             connection.execute(
                                 "UPDATE jobs SET retryable = 1, "
@@ -565,7 +577,9 @@ class StateStore:
                                 {
                                     "code": str(row["error_code"]),
                                     "retryable": True,
-                                    "reason": "mp4_auxiliary_track_fix",
+                                    "reason": reclassified_errors[
+                                        str(row["error_code"])
+                                    ],
                                 },
                                 now,
                             )

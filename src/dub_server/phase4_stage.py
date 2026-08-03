@@ -1260,6 +1260,21 @@ class Phase4Stage:
                 on_progress=progress,
             )
             self._raise_if_cancelled(job_id)
+            if abs(
+                exported.duration_us - translation.result.duration_us
+            ) > 100_000:
+                warnings = self._store.get_job(job_id).details.get("warnings", [])
+                if not any(
+                    isinstance(item, Mapping)
+                    and item.get("code") == "output_duration_adjusted_to_video"
+                    for item in (warnings if isinstance(warnings, list) else [])
+                ):
+                    self._store.append_warning(
+                        job_id,
+                        "output_duration_adjusted_to_video",
+                        "Timeline đầu ra đã được căn theo luồng hình; phần tiếng thiếu "
+                        "được đệm im lặng hoặc phần vượt quá hình được loại bỏ",
+                    )
         self._set_status(
             job_id,
             JobStatus.VERIFYING,

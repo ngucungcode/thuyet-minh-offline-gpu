@@ -262,6 +262,11 @@ def test_schema_six_makes_legacy_track_layout_failure_retryable(
         stage=JobStage.EXPORT,
         force=True,
     )
+    store.save_checkpoint(
+        job.id,
+        JobStage.TIMING,
+        {"completed": True, "timeline_sha256": "a" * 64},
+    )
     store.update_status(
         job.id,
         JobStatus.FAILED,
@@ -287,6 +292,54 @@ def test_schema_six_makes_legacy_track_layout_failure_retryable(
     resumed = reopened.resume(job.id)
     assert resumed.status is JobStatus.MUXING
     assert resumed.error_code is None
+    assert reopened.get_checkpoint(job.id, JobStage.TIMING).payload["completed"] is True
+
+
+def test_schema_seven_makes_legacy_duration_failure_retryable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    store = StateStore(database)
+    job = store.create_job("release-1", {"rights_confirmed": True})
+    store.update_status(
+        job.id,
+        JobStatus.MUXING,
+        stage=JobStage.EXPORT,
+        force=True,
+    )
+    store.save_checkpoint(
+        job.id,
+        JobStage.TIMING,
+        {"completed": True, "timeline_sha256": "b" * 64},
+    )
+    store.update_status(
+        job.id,
+        JobStatus.FAILED,
+        error_code="output_duration_mismatch",
+        error_message="Container dài hơn luồng hình",
+        retryable=False,
+    )
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE schema_metadata SET value = '6' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = StateStore(database)
+    migrated = reopened.get_job(job.id)
+
+    assert migrated.retryable is True
+    assert migrated.revision == 3
+    event = reopened.list_events(job.id)[-1]
+    assert event.event_type == "job.error_reclassified"
+    assert event.payload["reason"] == "video_canonical_duration_fix"
+    resumed = reopened.resume(job.id)
+    assert resumed.status is JobStatus.MUXING
+    assert resumed.error_code is None
+    assert reopened.get_checkpoint(job.id, JobStage.TIMING).payload["completed"] is True
 
 
 def test_future_schema_is_rejected_without_downgrading_metadata(
@@ -297,7 +350,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "UPDATE schema_metadata SET value = '7' WHERE key = 'schema_version'"
+            "UPDATE schema_metadata SET value = '8' WHERE key = 'schema_version'"
         )
         connection.commit()
     finally:
@@ -313,7 +366,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
         ).fetchone()[0]
     finally:
         connection.close()
-    assert version == "7"
+    assert version == "8"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

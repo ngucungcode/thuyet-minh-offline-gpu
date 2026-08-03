@@ -204,8 +204,9 @@ class FakeTimingFitter:
 
 
 class FakeExporter:
-    def __init__(self) -> None:
+    def __init__(self, *, duration_us: int | None = None) -> None:
         self.calls = 0
+        self.duration_us = duration_us
 
     async def export(
         self,
@@ -227,7 +228,7 @@ class FakeExporter:
             callback(ExportProgress(expected_duration_us, expected_duration_us, 1.0))
         return ExportedMedia(
             path=output,
-            duration_us=expected_duration_us,
+            duration_us=self.duration_us or expected_duration_us,
             video_start_us=0,
             audio_start_us=0,
             audio_codec="aac",
@@ -313,6 +314,28 @@ async def test_phase4_completes_with_exact_artifacts_and_track_contract(tmp_path
     assert synthesizer.closed is True
     assert fitter.calls == ["Một", "Hai"]
     assert exporter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_phase4_warns_when_output_follows_shorter_video_timeline(tmp_path) -> None:
+    store, job_id, _source = _ready_job(tmp_path)
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=FakeSynthesizer(),
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(duration_us=1_600_000),
+    ).run(job_id)
+
+    assert result.status is JobStatus.COMPLETED
+    warnings = result.details["warnings"]
+    assert any(
+        item["code"] == "output_duration_adjusted_to_video" for item in warnings
+    )
+    assert result.result is not None
+    assert result.result["duration_us"] == 1_600_000
 
 
 @pytest.mark.asyncio
