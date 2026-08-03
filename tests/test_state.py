@@ -11,6 +11,7 @@ from dub_server.state import (
     InvalidTransition,
     JobStage,
     JobStatus,
+    StateError,
     StateStore,
 )
 
@@ -286,6 +287,33 @@ def test_schema_six_makes_legacy_track_layout_failure_retryable(
     resumed = reopened.resume(job.id)
     assert resumed.status is JobStatus.MUXING
     assert resumed.error_code is None
+
+
+def test_future_schema_is_rejected_without_downgrading_metadata(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    StateStore(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE schema_metadata SET value = '7' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(StateError, match="schema mới hơn"):
+        StateStore(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == "7"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

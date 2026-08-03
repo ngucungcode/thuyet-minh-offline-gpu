@@ -267,6 +267,23 @@ if migrate_git_release_upgrade \
 fi
 [[ -e "${MIGRATION_TEST_STACK_STATE}" ]] \
   || fail "State mismatch đã dừng stack"
+[[ "$(<"${state_root}/SOURCE_MARKER")" == old ]] \
+  || fail "State mismatch đã đổi source"
 assert_absent "${MIGRATION_TEST_EVENTS}"
+assert_absent "${state_root}.migration-state.json"
+
+# A nested directory must never be accepted as the deployment worktree root.
+if migration_validate_git_tree "${state_root}/src"; then
+  fail "Git validator chấp nhận thư mục con thay cho worktree root"
+fi
+
+# Fingerprint parsing failures must propagate even when called in an if guard.
+fingerprint_root="${TEST_ROOT}/fingerprint-invalid"
+create_git_project "${fingerprint_root}" 0.2.0 invalid
+printf 'not valid toml = [\n' >"${fingerprint_root}/pyproject.toml"
+if migration_runtime_compatibility_fingerprint \
+  "${fingerprint_root}" >/dev/null 2>&1; then
+  fail "Compatibility fingerprint che giấu lỗi parse pyproject.toml"
+fi
 
 printf 'Installer Git upgrade tests: PASS\n'

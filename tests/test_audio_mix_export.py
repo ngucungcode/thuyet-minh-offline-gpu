@@ -217,6 +217,7 @@ def test_verification_rejects_any_extra_or_original_audio_track(tmp_path: Path) 
                 "index": 2,
                 "codec_type": "audio",
                 "codec_name": "aac",
+                "codec_tag_string": "mp4a",
                 "start_time": "0.0",
                 "duration": "2.0",
             }
@@ -237,7 +238,7 @@ def test_verification_rejects_any_extra_or_original_audio_track(tmp_path: Path) 
     assert captured.value.code == MediaExportErrorCode.TRACK_LAYOUT_INVALID
     assert captured.value.retryable is False
     assert "3 luồng" in captured.value.message_vi
-    assert "2:audio/aac" in captured.value.message_vi
+    assert "2:audio/aac[mp4a]" in captured.value.message_vi
     assert output.read_bytes() == b"keep previous"
     assert not output.with_name(".dubbed.part.mp4").exists()
 
@@ -377,6 +378,7 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
             "-v",
             "error",
             "-show_entries",
+            "chapter=start_time,end_time:"
             "stream=codec_type,codec_name,codec_tag_string",
             "-of",
             "json",
@@ -389,11 +391,13 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
         text=True,
         timeout=30,
     )
-    source_streams = json.loads(source_probe.stdout)["streams"]
+    source_payload = json.loads(source_probe.stdout)
+    source_streams = source_payload["streams"]
     assert len(source_streams) > 2
     assert any(
         item.get("codec_tag_string") == "tmcd" for item in source_streams
     )
+    assert source_payload["chapters"]
     for target, frequency in ((accompaniment, 440), (narration, 880)):
         subprocess.run(
             [
@@ -440,7 +444,7 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_type,codec_name",
+            "chapter=start_time,end_time:stream=codec_type,codec_name",
             "-of",
             "json",
             str(output),
@@ -452,8 +456,10 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
         text=True,
         timeout=30,
     )
-    streams = json.loads(probe.stdout)["streams"]
+    output_payload = json.loads(probe.stdout)
+    streams = output_payload["streams"]
     assert [(item["codec_type"], item["codec_name"]) for item in streams] == [
         ("video", "mpeg4"),
         ("audio", "aac"),
     ]
+    assert output_payload.get("chapters", []) == []

@@ -267,10 +267,11 @@ migration_runtime_fingerprint() {
 
 migration_runtime_compatibility_fingerprint() {
   local project_root="$1"
+  local project_manifest
   (
+    set -o pipefail
     cd -- "${project_root}" || exit 1
-    {
-      python3 - pyproject.toml <<'PY'
+    project_manifest="$(python3 - pyproject.toml <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -282,21 +283,26 @@ with path.open("rb") as handle:
 project = document.get("project")
 if not isinstance(project, dict):
     raise SystemExit("pyproject.toml thiếu bảng project")
-# Release metadata is intentionally excluded. All dependency, build backend,
-# entrypoint and tool configuration remains part of the compatibility gate.
+# Release metadata is intentionally excluded. The environment example is also
+# excluded because it only changes the release User-Agent default; an existing
+# .env.native is preserved verbatim. Dependencies, build configuration,
+# entrypoints, tools, model locks and native runtime files remain gated.
 project.pop("version", None)
 print(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 PY
+    )" || exit 1
+    {
+      printf '%s\n' "${project_manifest}" || exit 1
       sha256sum \
         config/models.lock.json \
         scripts/native-bootstrap.sh \
         scripts/native-common.sh \
         scripts/install-llama-cpp.sh \
         scripts/native-stack.sh \
-        scripts/vieneu-offline.py
+        scripts/vieneu-offline.py || exit 1
       find native -maxdepth 1 -type f -print0 \
         | sort -z \
-        | xargs -0 sha256sum
+        | xargs -0 sha256sum || exit 1
     } | sha256sum | awk '{print $1}'
   )
 }
@@ -334,9 +340,16 @@ migration_version_is_compatible() {
 
 migration_validate_git_tree() {
   local project_root="$1"
+  local resolved_root
+  local worktree_root
 
   git -C "${project_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || return 1
+  resolved_root="$(readlink -f -- "${project_root}")" || return 1
+  worktree_root="$(git -C "${project_root}" rev-parse --show-toplevel)" \
+    || return 1
+  worktree_root="$(readlink -f -- "${worktree_root}")" || return 1
+  [[ "${resolved_root}" == "${worktree_root}" ]] || return 1
   git -C "${project_root}" diff --quiet -- \
     || return 1
   git -C "${project_root}" diff --cached --quiet -- \
@@ -781,11 +794,11 @@ migrate_legacy_install() {
       legacy_tree_role=legacy
       ;;
     git)
-      migration_validate_git_tree "${legacy_root}" \
-        && migration_validate_git_tree "${staged_root}" || {
+      if ! migration_validate_git_tree "${legacy_root}" \
+        || ! migration_validate_git_tree "${staged_root}"; then
         migration_error "Source Git không sạch hoặc không hợp lệ"
         return 1
-      }
+      fi
       legacy_tree_role=staged
       ;;
     *)

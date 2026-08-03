@@ -67,6 +67,8 @@ TERMINAL_STATUSES = frozenset(
     {JobStatus.COMPLETED, JobStatus.CANCELLED}
 )
 
+_SCHEMA_VERSION = 6
+
 ACTIVE_JOB_STATUSES = (
     JobStatus.CREATED,
     JobStatus.SEARCHING,
@@ -501,6 +503,11 @@ class StateStore:
                         "WHERE key = 'schema_version'"
                     ).fetchone()
                     schema_version = int(version_row[0]) if version_row else 1
+                    if schema_version > _SCHEMA_VERSION:
+                        raise StateError(
+                            "Cơ sở dữ liệu có schema mới hơn ứng dụng: "
+                            f"{schema_version} > {_SCHEMA_VERSION}"
+                        )
                     columns = {
                         str(row["name"])
                         for row in connection.execute("PRAGMA table_info(jobs)")
@@ -533,7 +540,7 @@ class StateStore:
                         "CREATE UNIQUE INDEX jobs_one_active_idx "
                         "ON jobs((1)) WHERE active_slot = 1"
                     )
-                    if schema_version < 6:
+                    if schema_version < _SCHEMA_VERSION:
                         now = _utc_now()
                         affected = connection.execute(
                             "SELECT id, error_code FROM jobs "
@@ -562,10 +569,11 @@ class StateStore:
                                 },
                                 now,
                             )
-                    connection.execute(
-                        "UPDATE schema_metadata SET value = '6' "
-                        "WHERE key = 'schema_version'"
-                    )
+                        connection.execute(
+                            "UPDATE schema_metadata SET value = ? "
+                            "WHERE key = 'schema_version'",
+                            (str(_SCHEMA_VERSION),),
+                        )
                     connection.commit()
                 except Exception:
                     connection.rollback()
