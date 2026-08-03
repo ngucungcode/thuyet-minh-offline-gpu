@@ -412,6 +412,8 @@ def test_upload_command_requires_language_for_manual_srt(tmp_path: Path) -> None
             str(tmp_path / "movie.srt"),
             "--i-have-rights",
         ],
+        color=False,
+        terminal_width=200,
     )
 
     assert result.exit_code == 2
