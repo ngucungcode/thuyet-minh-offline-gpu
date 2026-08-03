@@ -32,6 +32,21 @@ class Settings(BaseSettings):
     incoming_dir: Path = Path("/data/incoming")
     jobs_dir: Path = Path("/data/jobs")
     output_dir: Path = Path("/data/output")
+    upload_media_max_bytes: int = Field(
+        default=100 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=4 * 1024**4,
+    )
+    upload_subtitle_max_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1024,
+        le=256 * 1024**2,
+    )
+    upload_session_ttl_seconds: float = Field(
+        default=7 * 24 * 60 * 60,
+        ge=60.0,
+        le=90 * 24 * 60 * 60,
+    )
     gpu_report_path: Path = Path("/state/gpu-health.json")
     gpu_report_max_age_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
     default_asr_model_id: str = "asr-faster-whisper-large-v3-turbo"

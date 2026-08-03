@@ -146,7 +146,7 @@ select:focus-visible {
 .machine-label,
 .step-number,
 footer {
-  font-family: Consolas, "SFMono-Regular", monospace;
+  font-family: Consolas, SFMono-Regular, monospace;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
@@ -295,7 +295,7 @@ h1 {
 
 .source-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   padding: 4px;
   margin-bottom: 23px;
   background: #0d100f;
@@ -374,6 +374,128 @@ h1 {
 
 .release-input {
   max-width: 620px;
+}
+
+.source-tabs button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.upload-source {
+  display: grid;
+  gap: 12px;
+}
+
+.upload-file-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.file-picker {
+  position: relative;
+  min-width: 0;
+  min-height: 154px;
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  padding: 22px;
+  overflow: hidden;
+  border: 1px dashed #465148;
+  background: #0d100f;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.file-picker:hover,
+.file-picker:focus-within,
+.file-picker.selected {
+  border-color: var(--acid-dark);
+  background: #121712;
+}
+
+.file-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-picker-kicker {
+  color: var(--acid);
+  font-family: Consolas, SFMono-Regular, monospace;
+  font-size: 8px;
+  letter-spacing: 0.14em;
+}
+
+.file-picker strong,
+.file-picker small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-picker strong {
+  font-size: 13px;
+}
+
+.file-picker small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.file-picker-action {
+  width: fit-content;
+  margin-top: 4px;
+  padding-bottom: 2px;
+  color: #d4dccd;
+  border-bottom: 1px solid #66745f;
+  font-size: 10px;
+}
+
+.upload-file-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #272e29;
+  color: #abb2a8;
+  background: #101310;
+  font-family: Consolas, monospace;
+  font-size: 9px;
+}
+
+.upload-file-summary > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-file-summary button {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  color: var(--orange);
+  background: transparent;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.upload-file-summary button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.upload-helper {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
 }
 
 .primary {
@@ -488,6 +610,90 @@ h1 {
   gap: 14px;
 }
 
+.static-field {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border: 1px solid #303832;
+  color: var(--ink) !important;
+  background: #0d100f;
+  font-size: 12px !important;
+  font-weight: 400 !important;
+}
+
+.timing-profile {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 18px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.timing-profile legend {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+  color: #b9bfb5;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.timing-profile > label {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  min-height: 92px;
+  padding: 15px;
+  border: 1px solid #303832;
+  background: #0d100f;
+  cursor: pointer;
+}
+
+.timing-profile > label:hover,
+.timing-profile > label.selected {
+  border-color: #607052;
+  background: #121712;
+}
+
+.timing-profile input {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: var(--acid);
+}
+
+.timing-profile span,
+.timing-profile strong,
+.timing-profile small {
+  display: block;
+}
+
+.timing-profile strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.timing-profile small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.timing-profile em {
+  padding: 3px 6px;
+  color: #11160d;
+  background: var(--acid);
+  font-family: Consolas, monospace;
+  font-size: 7px;
+  font-style: normal;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .rights-check {
   display: grid;
   grid-template-columns: 18px 1fr;
@@ -521,6 +727,90 @@ h1 {
   color: #11160d;
   font-size: 12px;
   font-weight: 900;
+}
+
+.upload-progress {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #394438;
+  background: #0d110e;
+}
+
+.upload-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11px;
+}
+
+.upload-progress-heading span {
+  color: #c7d0c0;
+}
+
+.upload-progress-heading strong {
+  color: var(--acid);
+  font-family: Consolas, monospace;
+}
+
+.upload-progress-track {
+  height: 7px;
+  overflow: hidden;
+  background: #222923;
+}
+
+.upload-progress-track i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--acid-dark), var(--acid));
+  transition: width 120ms linear;
+}
+
+.upload-progress-metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) 1fr 0.8fr;
+  gap: 10px;
+}
+
+.upload-progress-metrics > span {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #262d28;
+  background: #111512;
+}
+
+.upload-progress-metrics small,
+.upload-progress-metrics strong {
+  display: block;
+}
+
+.upload-progress-metrics small {
+  color: var(--muted);
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.upload-progress-metrics strong {
+  margin-top: 5px;
+  overflow: hidden;
+  color: #cbd2c7;
+  font-family: Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-progress > code {
+  color: #707a70;
+  font-size: 8px;
+}
+
+.upload-progress .upload-cancel {
+  justify-self: start;
 }
 
 .notice {
@@ -949,7 +1239,7 @@ code {
 
 .detail-meta-grid {
   display: grid;
-  grid-template-columns: 1.5fr 0.8fr 1fr 0.7fr;
+  grid-template-columns: 1.5fr 0.8fr 1fr 0.7fr 0.8fr;
   gap: 1px;
   margin-top: 24px;
   background: var(--line);
@@ -1739,10 +2029,16 @@ footer {
 
   .settings-grid,
   .source-tabs,
+  .upload-file-grid,
+  .timing-profile,
   .model-select-grid,
   .voice-grid,
   .detail-meta-grid,
   .model-catalog {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-progress-metrics {
     grid-template-columns: 1fr;
   }
 

@@ -14,10 +14,14 @@ from dub_server.audio_separation import (
     AudioSeparationResult,
 )
 from dub_server.model_registry import VerifiedModel
-from dub_server.narration import NarrationError, SynthesizedNarration
+from dub_server.narration import (
+    NarrationError,
+    SynthesizedNarration,
+    TTS_SILENCE_TRIM_VERSION,
+)
 from dub_server.phase4_stage import Phase4Stage
 from dub_server.state import JobStage, JobStatus, StateStore
-from dub_server.timing import FittedNarrationBlock, TimingQuality
+from dub_server.timing import FittedNarrationBlock, TimingProfile, TimingQuality
 from dub_server.translation_artifact import (
     TranslationResult,
     TranslationSegment,
@@ -35,33 +39,40 @@ def _write_wav(
     sample_rate: int,
     frame_count: int,
     channels: int = 1,
+    sample_value: int = 0,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as stream:
         stream.setnchannels(channels)
         stream.setsampwidth(2)
         stream.setframerate(sample_rate)
-        stream.writeframes(b"\0" * frame_count * channels * 2)
+        sample = int(sample_value).to_bytes(2, "little", signed=True)
+        stream.writeframes(sample * frame_count * channels)
 
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _ready_job(tmp_path: Path) -> tuple[StateStore, str, Path]:
+def _ready_job(
+    tmp_path: Path, *, timing_profile: str | None = None
+) -> tuple[StateStore, str, Path]:
     store = StateStore(tmp_path / "state" / "jobs.sqlite3")
     source = tmp_path / "incoming" / "movie.mkv"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"local movie fixture")
+    spec: dict[str, Any] = {
+        "rights_confirmed": True,
+        "models": {
+            "separation": "separation-test",
+            "tts": "tts-test",
+        },
+    }
+    if timing_profile is not None:
+        spec["timing_profile"] = timing_profile
     job = store.create_job(
         "release-1",
-        {
-            "rights_confirmed": True,
-            "models": {
-                "separation": "separation-test",
-                "tts": "tts-test",
-            },
-        },
+        spec,
     )
     translation = write_translation_artifact(
         tmp_path / "jobs" / job.id / "translated-transcript.json",
@@ -129,8 +140,11 @@ class FakeSeparator:
 class FakeSynthesizer:
     backend = "fake-tts"
 
-    def __init__(self, *, fail_text: str | None = None) -> None:
+    def __init__(
+        self, *, fail_text: str | None = None, duration_us: int = 800_000
+    ) -> None:
         self.fail_text = fail_text
+        self.duration_us = duration_us
         self.calls: list[str] = []
         self.closed = False
 
@@ -149,8 +163,13 @@ class FakeSynthesizer:
                 "TTS fixture thất bại",
                 retryable=True,
             )
-        frame_count = round(19_200 / speed)
-        _write_wav(output_path, sample_rate=24_000, frame_count=frame_count)
+        frame_count = round(self.duration_us * 24_000 / 1_000_000 / speed)
+        _write_wav(
+            output_path,
+            sample_rate=24_000,
+            frame_count=frame_count,
+            sample_value=2_000,
+        )
         return SynthesizedNarration(
             path=output_path,
             text=text,
@@ -167,9 +186,52 @@ class FakeSynthesizer:
         self.closed = True
 
 
+class PaddedSilenceSynthesizer(FakeSynthesizer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.speeds: list[float] = []
+
+    async def synthesize(
+        self,
+        text: str,
+        output_path: Path,
+        *,
+        speed: float = 1.0,
+        **_kwargs: Any,
+    ) -> SynthesizedNarration:
+        self.calls.append(text)
+        self.speeds.append(speed)
+        sample_rate = 24_000
+        leading_frames = round(2_400 / speed)
+        speech_frames = round(19_200 / speed)
+        trailing_frames = round(2_400 / speed)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(sample_rate)
+            stream.writeframes(b"\0\0" * leading_frames)
+            stream.writeframes((2_000).to_bytes(2, "little", signed=True) * speech_frames)
+            stream.writeframes(b"\0\0" * trailing_frames)
+        frame_count = leading_frames + speech_frames + trailing_frames
+        return SynthesizedNarration(
+            path=output_path,
+            text=text,
+            sample_rate=sample_rate,
+            channels=1,
+            sample_width_bytes=2,
+            frame_count=frame_count,
+            duration_us=round(frame_count * 1_000_000 / sample_rate),
+            native_speed=speed,
+            backend=self.backend,
+        )
+
+
 class FakeTimingFitter:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.slots: list[tuple[int, int]] = []
+        self.maximum_speeds: list[float | None] = []
 
     async def fit(
         self,
@@ -180,9 +242,11 @@ class FakeTimingFitter:
         end_us: int,
         text: str,
         native_speed: float,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> FittedNarrationBlock:
         self.calls.append(text)
+        self.slots.append((start_us, end_us))
+        self.maximum_speeds.append(kwargs.get("maximum_total_speed"))
         frames = round(end_us * 48_000 / 1_000_000) - round(
             start_us * 48_000 / 1_000_000
         )
@@ -277,6 +341,25 @@ def _stage(
     )
 
 
+def test_phase4_checkpoint_identity_includes_timing_profile() -> None:
+    assert Phase4Stage._checkpoint_profile_matches({}, TimingProfile.STRICT)
+    assert not Phase4Stage._checkpoint_profile_matches({}, TimingProfile.NATURAL)
+    assert Phase4Stage._checkpoint_profile_matches(
+        {"timing_profile": "natural"}, TimingProfile.NATURAL
+    )
+    assert not Phase4Stage._checkpoint_profile_matches(
+        {"timing_profile": "strict"}, TimingProfile.NATURAL
+    )
+    assert Phase4Stage._checkpoint_trim_matches({}, TimingProfile.STRICT)
+    assert not Phase4Stage._checkpoint_trim_matches({}, TimingProfile.NATURAL)
+    assert Phase4Stage._checkpoint_trim_matches(
+        {"silence_trim_version": TTS_SILENCE_TRIM_VERSION}, TimingProfile.NATURAL
+    )
+    assert not Phase4Stage._checkpoint_trim_matches(
+        {"silence_trim_version": "obsolete-trim-v0"}, TimingProfile.STRICT
+    )
+
+
 @pytest.mark.asyncio
 async def test_phase4_completes_with_exact_artifacts_and_track_contract(tmp_path) -> None:
     store, job_id, _source = _ready_job(tmp_path)
@@ -307,13 +390,197 @@ async def test_phase4_completes_with_exact_artifacts_and_track_contract(tmp_path
         "1\n00:00:00,000 --> 00:00:01,000\nMột"
     )
     assert store.get_checkpoint(job_id, JobStage.SEPARATION).payload["completed"]
-    assert store.get_checkpoint(job_id, JobStage.TTS).payload["completed"]
-    assert store.get_checkpoint(job_id, JobStage.TIMING).payload["completed"]
+    tts_checkpoint = store.get_checkpoint(job_id, JobStage.TTS).payload
+    timing_checkpoint = store.get_checkpoint(job_id, JobStage.TIMING).payload
+    assert tts_checkpoint["completed"]
+    assert timing_checkpoint["completed"]
+    # A job created before natural timing remains strict and migrates its
+    # checkpoint identity without changing timestamps.
+    assert tts_checkpoint["timing_profile"] == "strict"
+    assert timing_checkpoint["timing_profile"] == "strict"
     assert store.get_checkpoint(job_id, JobStage.EXPORT).payload["audio_codec"] == "aac"
     assert separator.calls == 1
     assert synthesizer.closed is True
     assert fitter.calls == ["Một", "Hai"]
+    assert fitter.slots == [(0, 1_000_000), (1_000_000, 2_000_000)]
+    assert fitter.maximum_speeds == [None, None]
     assert exporter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_phase4_natural_profile_keeps_native_tts_and_adjusts_slots(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    synthesizer = FakeSynthesizer()
+    fitter = FakeTimingFitter()
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=synthesizer,
+        fitter=fitter,
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert result.status is JobStatus.COMPLETED
+    assert synthesizer.calls == ["Một", "Hai"]
+    assert fitter.slots == [(100_000, 900_000), (1_100_000, 1_900_000)]
+    assert fitter.maximum_speeds == [1.2, 1.2]
+    assert store.get_checkpoint(job_id, JobStage.TTS).payload[
+        "timing_profile"
+    ] == "natural"
+    assert store.get_checkpoint(job_id, JobStage.TIMING).payload[
+        "timing_profile"
+    ] == "natural"
+    assert result.result is not None
+    assert result.result["timing_profile"] == "natural"
+    assert Path(result.result["srt_path"]).read_text(encoding="utf-8").startswith(
+        "1\n00:00:00,100 --> 00:00:00,900\nMột"
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase4_strict_profile_computes_native_speed_after_silence_trim(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="strict")
+    synthesizer = PaddedSilenceSynthesizer()
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert result.status is JobStatus.COMPLETED
+    assert synthesizer.speeds == [1.0, 0.9, 1.0, 0.9]
+    tts_payload = store.get_checkpoint(job_id, JobStage.TTS).payload
+    assert tts_payload["silence_trim_version"] == TTS_SILENCE_TRIM_VERSION
+    assert [block["native_speed"] for block in tts_payload["blocks"]] == [0.9, 0.9]
+
+
+@pytest.mark.asyncio
+async def test_phase4_natural_profile_plans_from_trimmed_tts_duration(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    synthesizer = PaddedSilenceSynthesizer()
+    fitter = FakeTimingFitter()
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=synthesizer,
+        fitter=fitter,
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert result.status is JobStatus.COMPLETED
+    tts_payload = store.get_checkpoint(job_id, JobStage.TTS).payload
+    assert tts_payload["silence_trim_version"] == TTS_SILENCE_TRIM_VERSION
+    assert [block["frame_count"] for block in tts_payload["blocks"]] == [
+        20_640,
+        20_640,
+    ]
+    assert [block["duration_us"] for block in tts_payload["blocks"]] == [
+        860_000,
+        860_000,
+    ]
+    assert fitter.slots == [(70_000, 930_000), (1_070_000, 1_930_000)]
+    timing_payload = store.get_checkpoint(job_id, JobStage.TIMING).payload
+    assert timing_payload["silence_trim_version"] == TTS_SILENCE_TRIM_VERSION
+
+
+@pytest.mark.asyncio
+async def test_phase4_natural_profile_fails_with_actionable_rewrite_details(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    fitter = FakeTimingFitter()
+    exporter = FakeExporter()
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=FakeSynthesizer(duration_us=3_200_000),
+        fitter=fitter,
+        exporter=exporter,
+    ).run(job_id)
+
+    assert result.status is JobStatus.FAILED
+    assert result.error_code == "timing_rewrite_required"
+    assert result.retryable is False
+    assert result.error_message is not None and "rút gọn" in result.error_message
+    assert result.details["timing_failure"] == {
+        "profile": "natural",
+        "ordinal": 0,
+        "required_duration_us": 2_666_667,
+        "available_duration_us": 1_800_000,
+        "maximum_total_speed": 1.2,
+    }
+    assert fitter.calls == []
+    assert exporter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_phase4_migrates_legacy_strict_checkpoints_without_rebuilding(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path)
+    await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=FakeSynthesizer(),
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+    ).run(job_id)
+    for stage in (JobStage.TTS, JobStage.TIMING):
+        checkpoint = store.get_checkpoint(job_id, stage)
+        legacy_payload = dict(checkpoint.payload)
+        legacy_payload.pop("timing_profile")
+        legacy_payload.pop("silence_trim_version")
+        store.save_checkpoint(job_id, stage, legacy_payload)
+    store.update_status(
+        job_id,
+        JobStatus.VERIFYING,
+        stage=JobStage.VERIFY,
+        progress_permille=985,
+        force=True,
+    )
+    synthesizer = FakeSynthesizer()
+    fitter = FakeTimingFitter()
+    exporter = FakeExporter()
+
+    resumed = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=synthesizer,
+        fitter=fitter,
+        exporter=exporter,
+    ).run(job_id)
+
+    assert resumed.status is JobStatus.COMPLETED
+    assert synthesizer.calls == []
+    assert fitter.calls == []
+    assert exporter.calls == 0
+    assert store.get_checkpoint(job_id, JobStage.TTS).payload[
+        "timing_profile"
+    ] == "strict"
+    assert store.get_checkpoint(job_id, JobStage.TIMING).payload[
+        "timing_profile"
+    ] == "strict"
+    assert "silence_trim_version" not in store.get_checkpoint(
+        job_id, JobStage.TTS
+    ).payload
 
 
 @pytest.mark.asyncio

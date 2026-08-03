@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import gc
 import hashlib
 import json
+import os
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import httpx
 import pytest
@@ -14,7 +19,14 @@ import pytest
 import dub_server.api as api_module
 from dub_server.api import create_app
 from dub_server.config import Settings
-from dub_server.domain import DownloadTask, MediaKind, MediaQuery, ReleaseCandidate
+from dub_server.domain import (
+    DownloadTask,
+    MediaAsset,
+    MediaKind,
+    MediaQuery,
+    ReleaseCandidate,
+)
+from dub_server.media_probe import FfprobeMediaProbe
 from dub_server.state import ActiveJobExists, JobStage, JobStatus, StateStore
 
 
@@ -174,6 +186,63 @@ class FakeCoordinator:
         )
 
 
+@dataclass
+class FakeMediaProbe:
+    duration_us: int = 4_000_000
+
+    def __post_init__(self) -> None:
+        self.paths: list[Path] = []
+
+    async def probe(
+        self,
+        path: Path,
+        *,
+        source_language: str,
+        title: str | None = None,
+        media_kind: MediaKind = MediaKind.MOVIE,
+        year: int | None = None,
+        require_h264_passthrough: bool = False,
+    ) -> MediaAsset:
+        self.paths.append(path)
+        return MediaAsset(
+            path=path,
+            title=title or path.stem,
+            duration_us=self.duration_us,
+            source_language=source_language,
+            media_kind=media_kind,
+            year=year,
+            fps=24.0,
+            audio_stream_index=1,
+            video_stream_index=0,
+            video_codec="h264",
+        )
+
+
+def _codec_media_probe(codec_name: str) -> FfprobeMediaProbe:
+    async def runner(command):
+        payload = {
+            "format": {"duration": "4"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_name": codec_name,
+                    "codec_type": "video",
+                    "avg_frame_rate": "24/1",
+                    "disposition": {"attached_pic": 0},
+                },
+                {
+                    "index": 1,
+                    "codec_name": "aac",
+                    "codec_type": "audio",
+                    "disposition": {"default": 1},
+                },
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    return FfprobeMediaProbe(runner=runner)
+
+
 def _settings(tmp_path: Path) -> Settings:
     lock_path = tmp_path / "config" / "models.lock.json"
     lock_path.parent.mkdir(parents=True)
@@ -234,8 +303,14 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _client(tmp_path: Path, monkeypatch):
-    settings = _settings(tmp_path)
+def _client(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    media_probe=None,
+    settings: Settings | None = None,
+):
+    settings = settings or _settings(tmp_path)
     store = StateStore(settings.database_path)
     acquisition = FakeAcquisition()
     acquisition.coordinator = FakeCoordinator(store)
@@ -245,6 +320,7 @@ def _client(tmp_path: Path, monkeypatch):
         state_store=store,
         acquisition_service=acquisition,
         coordinator=acquisition.coordinator,
+        media_probe=media_probe,
     )
     return TestClient(application), store, acquisition
 
@@ -261,8 +337,846 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     assert health.json()["database"]["journal_mode"] == "wal"
     assert capabilities.json()["offline_inference"] is True
     assert capabilities.json()["drm_supported"] is False
+    assert capabilities.json()["local_upload"] == {
+        "enabled": True,
+        "media_extensions": [".mp4", ".mkv"],
+        "subtitle_extensions": [".srt"],
+        "media_max_bytes": 100 * 1024 * 1024 * 1024,
+        "subtitle_max_bytes": 16 * 1024 * 1024,
+        "session_ttl_seconds": 7 * 24 * 60 * 60,
+        "timing_profiles": ["natural", "strict"],
+    }
     assert models.json()["models"][0]["id"] == "asr-small"
     assert models.json()["models"][0]["valid"] is False
+
+
+def _upload_request(
+    *,
+    subtitle_filename: str | None = None,
+    source_language: str = "auto",
+) -> dict[str, object]:
+    return {
+        "media_filename": "fixture.mkv",
+        "subtitle_filename": subtitle_filename,
+        "rights_confirmed": True,
+        "source_language": source_language,
+        "timing_profile": "natural",
+        "models": {
+            "asr": None,
+            "translation": None,
+            "separation": None,
+            "tts": None,
+        },
+        "voice": None,
+        "voice_rights_confirmed": False,
+    }
+
+
+def test_local_upload_streams_media_and_atomically_creates_asr_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    probe = FakeMediaProbe()
+    client, store, acquisition = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=probe,
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        uploaded = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=(chunk for chunk in (b"video-", b"bytes")),
+        )
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+        repeated = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert created.status_code == 201
+    assert uploaded.status_code == 200
+    assert uploaded.json()["status"] == "ready"
+    assert uploaded.json()["media_size_bytes"] == len(b"video-bytes")
+    assert uploaded.json()["media_sha256"] == hashlib.sha256(
+        b"video-bytes"
+    ).hexdigest()
+    assert finalized.status_code == 202
+    assert repeated.status_code == 202
+    assert finalized.json()["id"] == upload_id
+    assert repeated.json()["id"] == upload_id
+    assert finalized.json()["status"] == "ready_offline"
+    assert finalized.json()["stage"] == "subtitle"
+    assert finalized.json()["spec"]["source_kind"] == "local_upload"
+    assert finalized.json()["spec"]["timing_profile"] == "natural"
+    assert finalized.json()["details"]["transcript_source"] == "asr"
+    assert acquisition.last_release_id is None
+    assert probe.paths == [tmp_path / "incoming" / upload_id / "source.mkv"]
+    assert store.get_checkpoint(upload_id, JobStage.ACQUISITION) is not None
+    assert store.get_checkpoint(upload_id, JobStage.SUBTITLE) is not None
+
+
+def test_local_mkv_upload_accepts_h264_passthrough_before_creating_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=_codec_media_probe("h264"),
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        client.put(f"/v1/uploads/{upload_id}/media", content=b"mkv bytes")
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert finalized.status_code == 202
+    assert finalized.json()["details"]["selected_media"]["video_codec"] == "h264"
+    assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
+
+
+@pytest.mark.parametrize("codec_name", ["vp8", "hevc", "ffv1"])
+def test_local_mkv_upload_rejects_non_h264_before_creating_job(
+    tmp_path: Path,
+    monkeypatch,
+    codec_name: str,
+) -> None:
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=_codec_media_probe(codec_name),
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        client.put(f"/v1/uploads/{upload_id}/media", content=b"mkv bytes")
+        rejected = client.post(f"/v1/uploads/{upload_id}/finalize")
+        retained = client.get(f"/v1/uploads/{upload_id}")
+
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == {
+        "code": "unsupported_media",
+        "message": (
+            "Luồng hình đầu tiên phải là video H.264/AVC (không phải ảnh bìa) "
+            "để xuất MP4 không mã hóa lại"
+        ),
+        "retryable": False,
+    }
+    assert retained.status_code == 200
+    assert retained.json()["status"] == "ready"
+    assert store.list_jobs() == []
+
+
+def test_local_upload_with_srt_bypasses_provider_and_asr_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, acquisition = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+    )
+    subtitle = (
+        b"1\n00:00:00,200 --> 00:00:01,500\nHello world.\n\n"
+        b"2\n00:00:02,000 --> 00:00:03,500\nSecond line.\n"
+    )
+    with client:
+        created = client.post(
+            "/v1/uploads",
+            json=_upload_request(
+                subtitle_filename="fixture.srt",
+                source_language="en",
+            ),
+        )
+        upload_id = created.json()["id"]
+        media_response = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=b"video bytes",
+        )
+        subtitle_response = client.put(
+            f"/v1/uploads/{upload_id}/subtitle",
+            content=subtitle,
+        )
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+        leftover = tmp_path / "incoming" / upload_id / "source.srt"
+        leftover.write_bytes(subtitle)
+        repeated = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert media_response.json()["status"] == "awaiting_subtitle"
+    assert subtitle_response.json()["status"] == "ready"
+    assert media_response.json()["media_sha256"] == hashlib.sha256(
+        b"video bytes"
+    ).hexdigest()
+    assert subtitle_response.json()["subtitle_sha256"] == hashlib.sha256(
+        subtitle
+    ).hexdigest()
+    assert finalized.status_code == 202
+    assert repeated.status_code == 202
+    payload = finalized.json()
+    assert payload["spec"]["subtitle_mode"] == "manual"
+    assert payload["details"]["transcript_source"] == "subtitle"
+    subtitle_path = Path(payload["details"]["source_subtitle_path"])
+    assert subtitle_path == tmp_path / "jobs" / upload_id / "source-subtitle.srt"
+    assert subtitle_path.read_bytes() == subtitle
+    assert not (tmp_path / "incoming" / upload_id / "source.srt").exists()
+    assert acquisition.coordinator.calls == []
+    checkpoint = store.get_checkpoint(upload_id, JobStage.SUBTITLE)
+    assert checkpoint is not None
+    assert checkpoint.payload["transcript_source"] == "subtitle"
+
+
+def test_local_upload_can_replace_invalid_srt_and_finalize_same_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+    )
+    valid_subtitle = (
+        b"1\n00:00:00,200 --> 00:00:01,500\nCorrected subtitle.\n"
+    )
+    with client:
+        created = client.post(
+            "/v1/uploads",
+            json=_upload_request(
+                subtitle_filename="fixture.srt",
+                source_language="en",
+            ),
+        )
+        upload_id = created.json()["id"]
+        client.put(f"/v1/uploads/{upload_id}/media", content=b"video bytes")
+        client.put(
+            f"/v1/uploads/{upload_id}/subtitle",
+            content=b"this is not a valid SRT",
+        )
+        rejected = client.post(f"/v1/uploads/{upload_id}/finalize")
+        retained = client.get(f"/v1/uploads/{upload_id}")
+        replaced = client.put(
+            f"/v1/uploads/{upload_id}/subtitle",
+            content=valid_subtitle,
+        )
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "uploaded_subtitle_invalid"
+    assert retained.status_code == 200
+    assert retained.json()["status"] == "ready"
+    assert replaced.status_code == 200
+    assert replaced.json()["status"] == "ready"
+    assert finalized.status_code == 202
+    assert finalized.json()["details"]["transcript_source"] == "subtitle"
+    assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
+    stored_subtitle = tmp_path / "jobs" / upload_id / "source-subtitle.srt"
+    assert stored_subtitle.read_bytes() == valid_subtitle
+
+
+def test_local_upload_rejects_empty_undeclared_and_incomplete_requests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        empty = client.put(f"/v1/uploads/{upload_id}/media", content=b"")
+        undeclared = client.put(
+            f"/v1/uploads/{upload_id}/subtitle",
+            content=b"subtitle",
+        )
+        incomplete = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert empty.status_code == 422
+    assert empty.json()["detail"]["code"] == "upload_empty"
+    assert undeclared.status_code == 409
+    assert undeclared.json()["detail"]["code"] == "subtitle_not_declared"
+    assert incomplete.status_code == 409
+    assert incomplete.json()["detail"]["code"] == "upload_incomplete"
+    assert not (tmp_path / "incoming" / upload_id / "source.mkv").exists()
+
+
+def test_local_upload_accepts_mp4_and_rejects_delete_after_finalize(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    probe = FakeMediaProbe()
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=probe)
+    request = {**_upload_request(), "media_filename": "fixture.MP4"}
+    with client:
+        created = client.post("/v1/uploads", json=request)
+        upload_id = created.json()["id"]
+        uploaded = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=b"mp4 bytes",
+        )
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+        rejected_delete = client.delete(f"/v1/uploads/{upload_id}")
+
+    assert uploaded.status_code == 200
+    assert finalized.status_code == 202
+    assert probe.paths == [tmp_path / "incoming" / upload_id / "source.mp4"]
+    assert rejected_delete.status_code == 409
+    assert rejected_delete.json()["detail"]["code"] == "upload_already_finalized"
+    assert (tmp_path / "incoming" / upload_id / "source.mp4").is_file()
+
+
+def test_atomic_metadata_write_fsyncs_file_and_parent_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fsynced_modes: list[int] = []
+    real_fsync = os.fsync
+
+    def capture_fsync(descriptor: int) -> None:
+        fsynced_modes.append(os.fstat(descriptor).st_mode)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(api_module.os, "fsync", capture_fsync)
+    destination = tmp_path / "checkpoint.json"
+    api_module._atomic_write_bytes(destination, b"{}")
+
+    assert destination.read_bytes() == b"{}"
+    assert api_module.stat_module.S_ISREG(fsynced_modes[0])
+    if os.name != "nt":
+        assert api_module.stat_module.S_ISDIR(fsynced_modes[-1])
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    sorted(api_module._UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS),
+)
+def test_directory_fsync_ignores_unsupported_filesystems_and_closes_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+    error_number: int,
+) -> None:
+    closed: list[int] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module.os, "open", lambda _path, _flags: 41)
+        patch.setattr(
+            api_module.os,
+            "fsync",
+            lambda _descriptor: (_ for _ in ()).throw(
+                OSError(error_number, "directory fsync is unsupported")
+            ),
+        )
+        patch.setattr(api_module.os, "close", closed.append)
+        api_module._fsync_directory(tmp_path)
+
+    assert closed == [41]
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    sorted(api_module._UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS),
+)
+def test_directory_fsync_ignores_unsupported_open_without_closing_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+    error_number: int,
+) -> None:
+    closed: list[int] = []
+
+    def unsupported_open(_path: Path, _flags: int) -> int:
+        raise OSError(error_number, "opening directories is unsupported")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module.os, "open", unsupported_open)
+        patch.setattr(
+            api_module.os,
+            "fsync",
+            lambda _descriptor: pytest.fail("fsync must not run when open failed"),
+        )
+        patch.setattr(api_module.os, "close", closed.append)
+        api_module._fsync_directory(tmp_path)
+
+    assert closed == []
+
+
+def test_directory_fsync_propagates_real_io_failure_and_closes_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    closed: list[int] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module.os, "open", lambda _path, _flags: 42)
+        patch.setattr(
+            api_module.os,
+            "fsync",
+            lambda _descriptor: (_ for _ in ()).throw(OSError(errno.EIO, "I/O error")),
+        )
+        patch.setattr(api_module.os, "close", closed.append)
+        with pytest.raises(OSError) as failure:
+            api_module._fsync_directory(tmp_path)
+
+    assert failure.value.errno == errno.EIO
+    assert closed == [42]
+
+
+def test_stream_upload_validates_malformed_and_mismatched_content_length(
+    tmp_path: Path,
+) -> None:
+    class StreamingRequest:
+        def __init__(self, length: str, chunks: tuple[bytes, ...]) -> None:
+            self.headers = {"content-length": length}
+            self._chunks = chunks
+
+        async def stream(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    destination = tmp_path / "source.mp4"
+    destination.write_bytes(b"published")
+
+    with pytest.raises(HTTPException) as malformed:
+        asyncio.run(
+            api_module._stream_upload_body(
+                StreamingRequest("invalid", (b"new",)),  # type: ignore[arg-type]
+                destination,
+                maximum=1024,
+            )
+        )
+    assert malformed.value.status_code == 400
+    assert malformed.value.detail["code"] == "content_length_invalid"
+
+    with pytest.raises(HTTPException) as mismatch:
+        asyncio.run(
+            api_module._stream_upload_body(
+                StreamingRequest("3", (b"ab",)),  # type: ignore[arg-type]
+                destination,
+                maximum=1024,
+            )
+        )
+    assert mismatch.value.status_code == 400
+    assert mismatch.value.detail["code"] == "upload_size_mismatch"
+    assert destination.read_bytes() == b"published"
+    assert list(tmp_path.glob("*.part")) == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        ({**_upload_request(), "rights_confirmed": False}, "rights_confirmation_required"),
+        ({**_upload_request(), "media_filename": "../escape.mkv"}, "unsupported_upload_media"),
+        ({**_upload_request(), "media_filename": "fixture.avi"}, "unsupported_upload_media"),
+        (
+            _upload_request(subtitle_filename="fixture.srt", source_language="auto"),
+            "subtitle_language_required",
+        ),
+    ],
+)
+def test_local_upload_rejects_unsafe_or_incomplete_declarations(
+    tmp_path: Path,
+    monkeypatch,
+    payload: dict[str, object],
+    code: str,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        response = client.post("/v1/uploads", json=payload)
+
+    assert response.status_code in {403, 422}
+    assert response.json()["detail"]["code"] == code
+
+
+def test_unknown_upload_uuid_does_not_leak_a_process_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    unknown = "00000000-0000-4000-8000-000000000099"
+
+    with client:
+        response = client.put(f"/v1/uploads/{unknown}/media", content=b"video")
+        gc.collect()
+        retained_locks = len(client.app.state.upload_session_locks)
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "upload_not_found"
+    assert retained_locks == 0
+
+
+def test_local_upload_limit_keeps_previous_atomic_artifact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_media_max_bytes = 1024 * 1024
+    client, _, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    original = b"first-version"
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        accepted = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=original,
+        )
+        rejected = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=(b"x" * (1024 * 1024 + 1)),
+        )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 413
+    assert rejected.json()["detail"]["code"] == "upload_too_large"
+    source = tmp_path / "incoming" / upload_id / "source.mkv"
+    assert source.read_bytes() == original
+    assert list(source.parent.glob("*.part")) == []
+
+
+def test_local_upload_finalize_rejects_same_size_content_tampering(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        uploaded = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=b"original",
+        )
+        source = tmp_path / "incoming" / upload_id / "source.mkv"
+        source.write_bytes(b"modified")
+        rejected = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert uploaded.json()["media_size_bytes"] == len(b"original")
+    assert len(b"original") == len(b"modified")
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == {
+        "code": "upload_artifact_changed",
+        "message": "File video đã thay đổi sau khi tải lên",
+        "retryable": True,
+    }
+    assert store.list_jobs() == []
+
+
+def test_local_upload_rejects_symlink_artifact_and_delete_cleans_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        session_directory = tmp_path / "incoming" / upload_id
+        outside = tmp_path / "outside.mkv"
+        outside.write_bytes(b"outside")
+        source = session_directory / "source.mkv"
+        try:
+            source.symlink_to(outside)
+        except OSError:
+            pytest.skip("Môi trường test không cho phép tạo symlink")
+        metadata_path = session_directory / ".upload-session.json"
+        state = json.loads(metadata_path.read_text(encoding="utf-8"))
+        state["status"] = "ready"
+        state["media_size_bytes"] = len(b"outside")
+        metadata_path.write_text(json.dumps(state), encoding="utf-8")
+        rejected = client.post(f"/v1/uploads/{upload_id}/finalize")
+        deleted = client.delete(f"/v1/uploads/{upload_id}")
+
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "upload_artifact_invalid"
+    assert deleted.status_code == 204
+    assert not session_directory.exists()
+    assert outside.read_bytes() == b"outside"
+
+
+def test_local_upload_finalize_respects_single_heavy_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        client.put(f"/v1/uploads/{upload_id}/media", content=b"video")
+        active = store.create_job("other-release", {"rights_confirmed": True})
+        blocked = client.post(f"/v1/uploads/{upload_id}/finalize")
+        session = client.get(f"/v1/uploads/{upload_id}")
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "active_job_exists"
+    assert blocked.json()["detail"]["active_job_id"] == active.id
+    assert session.json()["status"] == "ready"
+
+
+def test_delete_upload_returns_retryable_error_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+
+        def fail_cleanup(_path: Path) -> None:
+            raise OSError("filesystem is temporarily unavailable")
+
+        monkeypatch.setattr(api_module.shutil, "rmtree", fail_cleanup)
+        response = client.delete(f"/v1/uploads/{upload_id}")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "upload_cleanup_failed",
+        "message": "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+        "retryable": True,
+    }
+    assert (tmp_path / "incoming" / upload_id).is_dir()
+
+
+def test_delete_upload_rejects_unsafe_prepared_artifact_and_keeps_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+        prepared = tmp_path / "jobs" / upload_id
+        prepared.write_bytes(b"unsafe artifact")
+        response = client.delete(f"/v1/uploads/{upload_id}")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "upload_cleanup_failed",
+        "message": "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+        "retryable": True,
+    }
+    assert prepared.is_file()
+    assert (tmp_path / "incoming" / upload_id).is_dir()
+
+
+def test_expired_unfinalized_upload_is_cleaned_on_startup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_session_ttl_seconds = 60
+    client, _, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+    upload_id = created.json()["id"]
+    session_directory = tmp_path / "incoming" / upload_id
+    metadata = session_directory / ".upload-session.json"
+    old = time.time() - 120
+    metadata.touch()
+    os.utime(metadata, (old, old))
+
+    with client:
+        missing = client.get(f"/v1/uploads/{upload_id}")
+
+    assert missing.status_code == 404
+    assert not session_directory.exists()
+
+
+def test_expired_upload_cleanup_failure_does_not_block_startup(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_session_ttl_seconds = 60
+    client, _, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+    session_directory = tmp_path / "incoming" / upload_id
+    metadata = session_directory / ".upload-session.json"
+    old = time.time() - 120
+    os.utime(metadata, (old, old))
+
+    def fail_cleanup(_path: Path) -> None:
+        raise OSError("filesystem is temporarily unavailable")
+
+    monkeypatch.setattr(api_module.shutil, "rmtree", fail_cleanup)
+    with caplog.at_level("ERROR", logger=api_module.__name__):
+        with client:
+            health = client.get("/v1/health")
+            session = client.get(f"/v1/uploads/{upload_id}")
+
+    assert health.status_code == 200
+    assert session.status_code == 200
+    assert session_directory.is_dir()
+    assert "Could not remove expired upload session" in caplog.text
+
+
+def test_expired_upload_keeps_session_when_prepared_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_session_ttl_seconds = 60
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+    session_directory = tmp_path / "incoming" / upload_id
+    metadata = session_directory / ".upload-session.json"
+    old = time.time() - 120
+    os.utime(metadata, (old, old))
+    prepared = tmp_path / "jobs" / upload_id
+    prepared.mkdir(parents=True)
+    (prepared / "artifact.part").write_bytes(b"partial")
+    removed: list[Path] = []
+    real_rmtree = api_module.shutil.rmtree
+
+    def fail_prepared(path: Path) -> None:
+        candidate = Path(path)
+        removed.append(candidate)
+        if candidate == prepared:
+            raise OSError("filesystem is temporarily unavailable")
+        real_rmtree(candidate)
+
+    monkeypatch.setattr(api_module.shutil, "rmtree", fail_prepared)
+    api_module._cleanup_stale_upload_sessions(
+        settings,
+        store,
+        identifiers=(upload_id,),
+    )
+
+    assert removed == [prepared]
+    assert prepared.is_dir()
+    assert session_directory.is_dir()
+    assert metadata.is_file()
+
+
+@pytest.mark.asyncio
+async def test_expired_upload_cleanup_runs_periodically(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    store = StateStore(settings.database_path)
+    upload_id = "00000000-0000-4000-8000-000000000001"
+    calls: list[tuple[Settings, StateStore, tuple[str, ...] | None]] = []
+
+    def fake_cleanup(
+        selected_settings: Settings,
+        selected_store: StateStore,
+        *,
+        identifiers: tuple[str, ...] | None = None,
+    ) -> None:
+        calls.append((selected_settings, selected_store, identifiers))
+
+    monkeypatch.setattr(
+        api_module,
+        "_expired_upload_session_identifiers",
+        lambda _settings: (upload_id,),
+    )
+    monkeypatch.setattr(api_module, "_cleanup_stale_upload_sessions", fake_cleanup)
+    stop = asyncio.Event()
+    session_lock = asyncio.Lock()
+    await session_lock.acquire()
+    task = asyncio.create_task(
+        api_module._monitor_stale_upload_sessions(
+            settings,
+            store,
+            stop,
+            interval_seconds=0.01,
+            session_locks={upload_id: session_lock},
+        )
+    )
+    try:
+        await asyncio.sleep(0.03)
+        assert calls == []
+        session_lock.release()
+        for _ in range(100):
+            if calls:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        if session_lock.locked():
+            session_lock.release()
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert calls
+    assert calls[0] == (settings, store, (upload_id,))
+
+
+@pytest.mark.asyncio
+async def test_periodic_cleanup_rechecks_ttl_after_waiting_for_upload_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_session_ttl_seconds = 60
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+
+    session_directory = tmp_path / "incoming" / upload_id
+    metadata = session_directory / ".upload-session.json"
+    old = time.time() - 120
+    os.utime(metadata, (old, old))
+    scans: list[str] = []
+
+    def fake_expired(_settings: Settings) -> tuple[str, ...]:
+        scans.append(upload_id)
+        return (upload_id,)
+
+    monkeypatch.setattr(
+        api_module,
+        "_expired_upload_session_identifiers",
+        fake_expired,
+    )
+    stop = asyncio.Event()
+    session_lock = asyncio.Lock()
+    await session_lock.acquire()
+    task = asyncio.create_task(
+        api_module._monitor_stale_upload_sessions(
+            settings,
+            store,
+            stop,
+            interval_seconds=0.01,
+            session_locks={upload_id: session_lock},
+        )
+    )
+    try:
+        for _ in range(100):
+            if scans:
+                break
+            await asyncio.sleep(0.01)
+        assert scans
+        assert session_lock.locked()
+        fresh = time.time()
+        os.utime(metadata, (fresh, fresh))
+        session_lock.release()
+        await asyncio.sleep(0.03)
+    finally:
+        if session_lock.locked():
+            session_lock.release()
+        stop.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert session_directory.is_dir()
+    assert metadata.is_file()
 
 
 def test_embedded_dashboard_shares_the_api_origin(tmp_path: Path, monkeypatch) -> None:
@@ -1332,6 +2246,31 @@ def test_create_freezes_default_asr_model_into_job_spec(
 
     assert created.status_code == 202
     assert created.json()["spec"]["models"]["asr"] == "asr-small"
+
+
+@pytest.mark.parametrize(
+    ("timing_payload", "expected"),
+    [({}, "natural"), ({"timing_profile": "strict"}, "strict")],
+)
+def test_create_freezes_timing_profile_into_job_spec(
+    tmp_path: Path,
+    monkeypatch,
+    timing_payload: dict[str, str],
+    expected: str,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    with client:
+        created = client.post(
+            "/v1/jobs",
+            json={
+                "release_id": "release-1",
+                "rights_confirmed": True,
+                **timing_payload,
+            },
+        )
+
+    assert created.status_code == 202
+    assert created.json()["spec"]["timing_profile"] == expected
 
 
 def test_user_can_select_language_after_uncertain_asr_detection(

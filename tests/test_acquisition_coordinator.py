@@ -449,7 +449,12 @@ def test_ffprobe_media_probe_parses_duration_language_and_fps(tmp_path: Path) ->
         payload = {
             "format": {"duration": "12.345678", "tags": {"title": "Embedded title"}},
             "streams": [
-                {"index": 0, "codec_type": "video", "avg_frame_rate": "24000/1001"},
+                {
+                    "index": 0,
+                    "codec_name": "h264",
+                    "codec_type": "video",
+                    "avg_frame_rate": "24000/1001",
+                },
                 {
                     "index": 2,
                     "codec_type": "audio",
@@ -471,6 +476,8 @@ def test_ffprobe_media_probe_parses_duration_language_and_fps(tmp_path: Path) ->
     assert asset.fps == pytest.approx(23.976, rel=1e-4)
     assert asset.audio_stream_index == 2
     assert asset.audio_start_us == 125_000
+    assert asset.video_stream_index == 0
+    assert asset.video_codec == "h264"
     assert commands[0][0] == "ffprobe"
     assert commands[0][1:4] == ("-v", "error", "-protocol_whitelist")
     assert commands[0][4] == "file"
@@ -526,3 +533,126 @@ def test_ffprobe_media_probe_rejects_audio_only_input(tmp_path: Path) -> None:
 
     with pytest.raises(MediaProbeError, match="luồng video"):
         asyncio.run(FfprobeMediaProbe(runner=runner).probe(media, source_language="en"))
+
+
+def test_ffprobe_media_probe_accepts_h264_mkv_for_mp4_passthrough(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "feature.mkv"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_name": "h264",
+                    "codec_type": "video",
+                    "avg_frame_rate": "24/1",
+                    "disposition": {"attached_pic": 0},
+                },
+                {"index": 1, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    asset = asyncio.run(
+        FfprobeMediaProbe(runner=runner).probe(
+            media,
+            source_language="en",
+            require_h264_passthrough=True,
+        )
+    )
+
+    assert asset.video_codec == "h264"
+    assert asset.video_stream_index == 0
+
+
+@pytest.mark.parametrize("codec_name", ["vp8", "hevc", "ffv1"])
+def test_ffprobe_media_probe_rejects_non_h264_mp4_passthrough(
+    tmp_path: Path,
+    codec_name: str,
+) -> None:
+    media = tmp_path / f"feature-{codec_name}.mkv"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {"index": 0, "codec_name": codec_name, "codec_type": "video"},
+                {"index": 1, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    with pytest.raises(MediaProbeError) as raised:
+        asyncio.run(
+            FfprobeMediaProbe(runner=runner).probe(
+                media,
+                source_language="en",
+                require_h264_passthrough=True,
+            )
+        )
+
+    assert raised.value.code == "unsupported_media"
+    assert raised.value.retryable is False
+
+
+def test_ffprobe_media_probe_keeps_legacy_non_h264_acquisition_compatible(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "legacy-vp8.mkv"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {"index": 0, "codec_name": "vp8", "codec_type": "video"},
+                {"index": 1, "codec_name": "opus", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    asset = asyncio.run(
+        FfprobeMediaProbe(runner=runner).probe(media, source_language="en")
+    )
+
+    assert asset.video_codec == "vp8"
+
+
+def test_ffprobe_media_probe_rejects_attached_picture_selected_as_video(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "cover-first.mkv"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_name": "h264",
+                    "codec_type": "video",
+                    "disposition": {"attached_pic": 1},
+                },
+                {"index": 1, "codec_name": "h264", "codec_type": "video"},
+                {"index": 2, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    with pytest.raises(MediaProbeError) as raised:
+        asyncio.run(
+            FfprobeMediaProbe(runner=runner).probe(
+                media,
+                source_language="en",
+                require_h264_passthrough=True,
+            )
+        )
+
+    assert raised.value.code == "unsupported_media"
+    assert raised.value.retryable is False

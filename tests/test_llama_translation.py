@@ -260,6 +260,84 @@ def test_translate_batch_is_deterministic_and_reports_progress(tmp_path: Path) -
     translator.close()
 
 
+def test_duration_aware_translation_adds_concise_spoken_constraint(
+    tmp_path: Path,
+) -> None:
+    source = 'Keep the name An and the number 42" safely'
+    transport = FakeTransport(
+        [_health_ok(), _tokens(7), _completion("Giữ tên An và số 42")]
+    )
+    translator, _, _ = _translator(tmp_path, transport)
+
+    result = translator.translate_batch_for_durations(
+        [source],
+        [2_500_000],
+        source_language="en",
+    )
+
+    assert result == ("Giữ tên An và số 42",)
+    request = transport.requests[-1][2]
+    assert request is not None
+    messages = request["messages"]
+    assert isinstance(messages, list)
+    system_prompt = messages[0]["content"]
+    assert "about 2.50 seconds" in system_prompt
+    assert "concise, idiomatic spoken Vietnamese" in system_prompt
+    assert "preserve every essential fact, name, number" in system_prompt
+    assert json_source(messages[1]["content"]) == source
+    translator.close()
+
+
+def test_default_translation_does_not_add_duration_constraint(tmp_path: Path) -> None:
+    transport = FakeTransport([_health_ok(), _tokens(1), _completion("Chào")])
+    translator, _, _ = _translator(tmp_path, transport)
+
+    assert translator.translate_batch(["Hello"], "en") == ("Chào",)
+
+    request = transport.requests[-1][2]
+    assert request is not None
+    messages = request["messages"]
+    assert isinstance(messages, list)
+    assert "about " not in messages[0]["content"]
+    assert "concise, idiomatic spoken Vietnamese" not in messages[0]["content"]
+    translator.close()
+
+
+@pytest.mark.parametrize(
+    ("texts", "durations"),
+    [
+        (["One", "Two"], [1_000_000]),
+        (["One"], []),
+        ([], [1_000_000]),
+        (["One"], [0]),
+        (["One"], [-1]),
+        (["One"], [True]),
+        (["One"], [1.5]),
+    ],
+)
+def test_duration_aware_translation_rejects_invalid_slots(
+    tmp_path: Path,
+    texts: list[str],
+    durations: list[object],
+) -> None:
+    translator, _, commands = _translator(tmp_path, FakeTransport([]))
+
+    with pytest.raises(LlamaTranslationError) as caught:
+        translator.translate_batch_for_durations(texts, durations, "en")  # type: ignore[arg-type]
+
+    assert caught.value.code == "invalid_input"
+    assert commands == []
+    translator.close()
+
+
+def test_empty_duration_aware_batch_is_a_noop(tmp_path: Path) -> None:
+    translator, _, commands = _translator(tmp_path, FakeTransport([]))
+
+    assert translator.translate_batch_for_durations([], [], "en") == ()
+    assert commands == []
+    translator.close()
+
+
 def json_source(value: object) -> str:
     import json
 

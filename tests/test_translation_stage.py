@@ -28,14 +28,18 @@ def _ready_translation_job(
     language: str = "en",
     texts: tuple[str, ...] = ("Hello offline world", "How are you today?"),
     selected_model: str | None = SELECTED_MODEL_ID,
+    timing_profile: str | None = None,
 ) -> tuple[StateStore, str]:
     store = StateStore(tmp_path / "state" / "jobs.sqlite3")
+    spec: dict[str, Any] = {
+        "source_language": language,
+        "models": {"translation": selected_model},
+    }
+    if timing_profile is not None:
+        spec["timing_profile"] = timing_profile
     created = store.create_job(
         "release-1",
-        {
-            "source_language": language,
-            "models": {"translation": selected_model},
-        },
+        spec,
     )
     downloading = store.update_status(created.id, JobStatus.DOWNLOADING)
     ready = store.update_status(
@@ -139,6 +143,37 @@ class FakeTranslator:
         self.closed = True
 
 
+class DurationAwareFakeTranslator(FakeTranslator):
+    def __init__(self, outcomes: Sequence[Sequence[str] | BaseException]) -> None:
+        super().__init__(outcomes)
+        self.duration_calls: list[dict[str, Any]] = []
+
+    def translate_batch_for_durations(
+        self,
+        texts: Sequence[str],
+        target_durations_us: Sequence[int],
+        *,
+        source_language: str,
+        target_language: str = "vi",
+        on_progress=None,
+    ) -> list[str]:
+        self.duration_calls.append(
+            {
+                "texts": list(texts),
+                "target_durations_us": list(target_durations_us),
+                "source_language": source_language,
+                "target_language": target_language,
+                "on_progress": on_progress,
+            }
+        )
+        if not self._outcomes:
+            raise AssertionError("Unexpected duration-aware translation call")
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return list(outcome)
+
+
 def _stage(
     tmp_path: Path,
     store: StateStore,
@@ -224,6 +259,92 @@ async def test_selected_local_model_translates_to_vietnamese_and_commits_artifac
     assert checkpoint is not None
     assert checkpoint.payload["completed"] is True
     assert checkpoint.payload["completed_blocks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_natural_profile_translates_each_block_for_its_spoken_duration(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _ready_translation_job(tmp_path, timing_profile="natural")
+    verified = _verified_model(tmp_path, SELECTED_MODEL_ID)
+    translator = DurationAwareFakeTranslator(
+        [["Bản dịch ngắn một"], ["Bản dịch ngắn hai"]]
+    )
+
+    result = await _stage(
+        tmp_path,
+        store,
+        translator_factory=lambda _verified: translator,
+        model_resolver=lambda *_args: verified,
+    ).run(job_id)
+
+    assert result.status is JobStatus.READY_TTS
+    assert translator.calls == []
+    assert [call["texts"] for call in translator.duration_calls] == [
+        ["Hello offline world"],
+        ["How are you today?"],
+    ]
+    assert [call["target_durations_us"] for call in translator.duration_calls] == [
+        [1_500_000],
+        [1_500_000],
+    ]
+    checkpoint = store.get_checkpoint(job_id, JobStage.TRANSLATION)
+    assert checkpoint is not None
+    assert checkpoint.payload["prompt_template_id"] == (
+        "gemma4-translation-v1+natural-duration-v1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_job_without_profile_keeps_strict_translation_prompt(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _ready_translation_job(tmp_path)
+    verified = _verified_model(tmp_path, SELECTED_MODEL_ID)
+    translator = DurationAwareFakeTranslator([["Một"], ["Hai"]])
+
+    result = await _stage(
+        tmp_path,
+        store,
+        translator_factory=lambda _verified: translator,
+        model_resolver=lambda *_args: verified,
+    ).run(job_id)
+
+    assert result.status is JobStatus.READY_TTS
+    assert translator.duration_calls == []
+    assert [call["texts"] for call in translator.calls] == [
+        ["Hello offline world"],
+        ["How are you today?"],
+    ]
+    checkpoint = store.get_checkpoint(job_id, JobStage.TRANSLATION)
+    assert checkpoint is not None
+    assert checkpoint.payload["prompt_template_id"] == "gemma4-translation-v1"
+
+
+@pytest.mark.asyncio
+async def test_invalid_timing_profile_fails_with_shared_error_code(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _ready_translation_job(
+        tmp_path,
+        timing_profile="cinematic",
+    )
+    verified = _verified_model(tmp_path, SELECTED_MODEL_ID)
+    translator = DurationAwareFakeTranslator([])
+
+    result = await _stage(
+        tmp_path,
+        store,
+        translator_factory=lambda _verified: translator,
+        model_resolver=lambda *_args: verified,
+    ).run(job_id)
+
+    assert result.status is JobStatus.FAILED
+    assert result.error_code == "timing_profile_invalid"
+    assert result.retryable is False
+    assert translator.calls == []
+    assert translator.duration_calls == []
+    assert translator.closed is True
 
 
 @pytest.mark.asyncio
@@ -372,6 +493,45 @@ async def test_process_restart_resumes_only_unfinished_blocks(
         "Khối đầu đã xong",
         "Khối thứ hai hoàn tất",
     ]
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_a_changed_natural_translation_prompt(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _ready_translation_job(tmp_path, timing_profile="natural")
+    verified = _verified_model(tmp_path, SELECTED_MODEL_ID)
+    interrupted = DurationAwareFakeTranslator(
+        [["Khối đầu đã xong"], asyncio.CancelledError()]
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await _stage(
+            tmp_path,
+            store,
+            translator_factory=lambda _verified: interrupted,
+            model_resolver=lambda *_args: verified,
+        ).run(job_id)
+
+    checkpoint = store.get_checkpoint(job_id, JobStage.TRANSLATION)
+    assert checkpoint is not None
+    stale_payload = dict(checkpoint.payload)
+    stale_payload["prompt_template_id"] = "gemma4-translation-v1"
+    store.save_checkpoint(job_id, JobStage.TRANSLATION, stale_payload)
+    resumed = DurationAwareFakeTranslator([["must not run"]])
+
+    result = await _stage(
+        tmp_path,
+        store,
+        translator_factory=lambda _verified: resumed,
+        model_resolver=lambda *_args: verified,
+    ).run(job_id)
+
+    assert result.status is JobStatus.FAILED
+    assert result.error_code == "translation_checkpoint_invalid"
+    assert result.retryable is False
+    assert resumed.duration_calls == []
+    assert resumed.closed is True
 
 
 @pytest.mark.asyncio

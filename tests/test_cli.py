@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 import httpx
+from click import unstyle
 from typer.testing import CliRunner
 
 import dub_server.cli as cli
@@ -20,6 +22,7 @@ def test_help_exposes_complete_command_tree() -> None:
     assert result.exit_code == 0
     for command in (
         "submit",
+        "upload",
         "watch",
         "events",
         "models",
@@ -68,12 +71,38 @@ def test_run_builds_frozen_model_payload(monkeypatch) -> None:
     assert payload is not None
     assert payload["rights_confirmed"] is True
     assert payload["source_language"] == "ja"
+    assert payload["timing_profile"] == "natural"
     assert payload["models"] == {
         "asr": "asr-small",
         "translation": "mt-fast",
         "separation": "separation",
         "tts": "tts-fast",
     }
+
+
+def test_run_forwards_strict_timing_profile(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def request(method, path, *, api_url, payload=None, **kwargs):
+        del method, path, api_url, kwargs
+        captured.update(payload or {})
+        return {"id": "job-1", "status": "downloading"}
+
+    monkeypatch.setattr(cli, "_request", request)
+    result = runner.invoke(
+        cli.app,
+        [
+            "run",
+            "--release-id",
+            "release-1",
+            "--i-have-rights",
+            "--timing-profile",
+            "strict",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["timing_profile"] == "strict"
 
 
 def test_run_requires_rights_before_calling_api(monkeypatch) -> None:
@@ -87,6 +116,387 @@ def test_run_requires_rights_before_calling_api(monkeypatch) -> None:
 
     assert result.exit_code == 2
     assert not isinstance(result.exception, AssertionError)
+
+
+def test_upload_command_streams_media_srt_and_finalizes_job(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "movie.mkv"
+    subtitle = tmp_path / "movie.srt"
+    media.write_bytes(b"video")
+    subtitle.write_text("fixture", encoding="utf-8")
+    requests: list[tuple[str, str, dict[str, Any] | None]] = []
+    uploads: list[tuple[str, Path]] = []
+
+    def request(method, path, *, api_url, payload=None, **kwargs):
+        del api_url, kwargs
+        requests.append((method, path, payload))
+        if path == "/v1/uploads":
+            return {
+                "id": "upload-1",
+                "status": "awaiting_media",
+                "subtitle_filename": "movie.srt",
+            }
+        return {"id": "upload-1", "status": "ready_offline"}
+
+    def upload(path, source, *, api_url):
+        del api_url
+        uploads.append((path, source))
+        return {
+            "id": "upload-1",
+            "status": "ready",
+            "subtitle_filename": "movie.srt",
+        }
+
+    monkeypatch.setattr(cli, "_request", request)
+    monkeypatch.setattr(cli, "_upload_artifact", upload)
+    result = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(media),
+            "--subtitle",
+            str(subtitle),
+            "--source-language",
+            "en",
+            "--timing-profile",
+            "natural",
+            "--i-have-rights",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert requests[0][:2] == ("POST", "/v1/uploads")
+    payload = requests[0][2]
+    assert payload is not None
+    assert payload["media_filename"] == "movie.mkv"
+    assert payload["subtitle_filename"] == "movie.srt"
+    assert payload["source_language"] == "en"
+    assert payload["timing_profile"] == "natural"
+    assert payload["models"] == {
+        "asr": None,
+        "translation": None,
+        "separation": None,
+        "tts": None,
+    }
+    assert uploads == [
+        ("/v1/uploads/upload-1/media", media),
+        ("/v1/uploads/upload-1/subtitle", subtitle),
+    ]
+    assert requests[-1][:2] == ("POST", "/v1/uploads/upload-1/finalize")
+
+
+def test_upload_resume_only_streams_missing_subtitle(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "movie.mkv"
+    subtitle = tmp_path / "movie.srt"
+    media.write_bytes(b"video")
+    subtitle.write_bytes(b"subtitle")
+    uploads: list[tuple[str, Path]] = []
+    requests: list[tuple[str, str]] = []
+
+    def request(method, path, *, api_url, payload=None, **kwargs):
+        del api_url, payload, kwargs
+        requests.append((method, path))
+        if method == "GET":
+            return {
+                "id": "upload-1",
+                "status": "awaiting_subtitle",
+                "media_filename": "movie.mkv",
+                "subtitle_filename": "movie.srt",
+                "media_size_bytes": media.stat().st_size,
+                "subtitle_size_bytes": None,
+                "media_sha256": hashlib.sha256(media.read_bytes()).hexdigest(),
+                "subtitle_sha256": None,
+                "job_id": None,
+            }
+        return {"id": "upload-1", "status": "ready_offline"}
+
+    def upload(path, source, *, api_url):
+        del api_url
+        uploads.append((path, source))
+        return {
+            "id": "upload-1",
+            "status": "ready",
+            "media_filename": "movie.mkv",
+            "subtitle_filename": "movie.srt",
+            "media_size_bytes": media.stat().st_size,
+            "subtitle_size_bytes": subtitle.stat().st_size,
+            "media_sha256": hashlib.sha256(media.read_bytes()).hexdigest(),
+            "subtitle_sha256": hashlib.sha256(subtitle.read_bytes()).hexdigest(),
+            "job_id": None,
+        }
+
+    monkeypatch.setattr(cli, "_request", request)
+    monkeypatch.setattr(cli, "_upload_artifact", upload)
+    result = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(media),
+            "--subtitle",
+            str(subtitle),
+            "--upload-id",
+            "upload-1",
+            "--i-have-rights",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert uploads == [("/v1/uploads/upload-1/subtitle", subtitle)]
+    assert requests == [
+        ("GET", "/v1/uploads/upload-1"),
+        ("POST", "/v1/uploads/upload-1/finalize"),
+    ]
+
+
+def test_upload_resume_reuploads_same_size_media_when_content_changed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"new!!")
+    uploads: list[tuple[str, Path]] = []
+
+    def request(method, path, *, api_url, payload=None, **kwargs):
+        del api_url, payload, kwargs
+        if method == "GET":
+            return {
+                "id": "upload-1",
+                "status": "ready",
+                "media_filename": "movie.mkv",
+                "subtitle_filename": None,
+                "media_size_bytes": media.stat().st_size,
+                "subtitle_size_bytes": None,
+                "media_sha256": hashlib.sha256(b"old!!").hexdigest(),
+                "subtitle_sha256": None,
+                "job_id": None,
+            }
+        return {"id": "upload-1", "status": "ready_offline"}
+
+    def upload(path, source, *, api_url):
+        del api_url
+        uploads.append((path, source))
+        return {
+            "id": "upload-1",
+            "status": "ready",
+            "media_filename": "movie.mkv",
+            "subtitle_filename": None,
+            "media_size_bytes": media.stat().st_size,
+            "subtitle_size_bytes": None,
+            "media_sha256": hashlib.sha256(media.read_bytes()).hexdigest(),
+            "subtitle_sha256": None,
+            "job_id": None,
+        }
+
+    monkeypatch.setattr(cli, "_request", request)
+    monkeypatch.setattr(cli, "_upload_artifact", upload)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(media),
+            "--upload-id",
+            "upload-1",
+            "--i-have-rights",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert uploads == [("/v1/uploads/upload-1/media", media)]
+
+
+def test_upload_resume_reuploads_legacy_session_without_digest(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"video")
+    uploads: list[tuple[str, Path]] = []
+
+    def request(method, path, *, api_url, payload=None, **kwargs):
+        del api_url, payload, kwargs
+        if method == "GET":
+            return {
+                "id": "upload-1",
+                "status": "ready",
+                "media_filename": "movie.mkv",
+                "subtitle_filename": None,
+                "media_size_bytes": media.stat().st_size,
+                "subtitle_size_bytes": None,
+                "job_id": None,
+            }
+        return {"id": "upload-1", "status": "ready_offline"}
+
+    def upload(path, source, *, api_url):
+        del api_url
+        uploads.append((path, source))
+        return {"id": "upload-1", "status": "ready"}
+
+    monkeypatch.setattr(cli, "_request", request)
+    monkeypatch.setattr(cli, "_upload_artifact", upload)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(media),
+            "--upload-id",
+            "upload-1",
+            "--i-have-rights",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert uploads == [("/v1/uploads/upload-1/media", media)]
+
+
+def test_upload_resume_finalized_session_is_idempotent_without_local_read(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def request(method, path, *, api_url, **kwargs):
+        del api_url, kwargs
+        requests.append((method, path))
+        if method == "GET":
+            return {
+                "id": "upload-1",
+                "status": "finalized",
+                "media_filename": "movie.mkv",
+                "subtitle_filename": None,
+                "media_size_bytes": 123,
+                "subtitle_size_bytes": None,
+                "job_id": "upload-1",
+            }
+        return {"id": "upload-1", "status": "ready_offline"}
+
+    monkeypatch.setattr(cli, "_request", request)
+    monkeypatch.setattr(
+        cli,
+        "_upload_artifact",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("artifact uploaded")
+        ),
+    )
+    result = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(tmp_path / "file-does-not-need-to-exist.mkv"),
+            "--upload-id",
+            "upload-1",
+            "--i-have-rights",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert not isinstance(result.exception, AssertionError)
+    assert requests == [
+        ("GET", "/v1/uploads/upload-1"),
+        ("POST", "/v1/uploads/upload-1/finalize"),
+    ]
+
+
+def test_upload_command_requires_language_for_manual_srt(tmp_path: Path) -> None:
+    result = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(tmp_path / "movie.mp4"),
+            "--subtitle",
+            str(tmp_path / "movie.srt"),
+            "--i-have-rights",
+        ],
+        color=False,
+        terminal_width=200,
+    )
+
+    assert result.exit_code == 2
+    plain_output = unstyle(result.output)
+    assert "Phải chọn" in plain_output
+    assert "source-language" in plain_output
+
+
+def test_upload_rejects_missing_or_empty_media_before_creating_session(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def request(*args, **kwargs):
+        del args, kwargs
+        calls.append("api")
+        raise AssertionError("API must not be called")
+
+    monkeypatch.setattr(cli, "_request", request)
+    missing = runner.invoke(
+        cli.app,
+        [
+            "upload",
+            str(tmp_path / "missing.mp4"),
+            "--i-have-rights",
+        ],
+    )
+    empty_path = tmp_path / "empty.mkv"
+    empty_path.touch()
+    empty = runner.invoke(
+        cli.app,
+        ["upload", str(empty_path), "--i-have-rights"],
+    )
+
+    assert missing.exit_code == 1
+    assert empty.exit_code == 1
+    assert calls == []
+    assert not isinstance(missing.exception, AssertionError)
+    assert not isinstance(empty.exception, AssertionError)
+
+
+def test_raw_upload_helper_sets_length_and_streams_chunks(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "movie.mp4"
+    source.write_bytes(b"a" * (1024 * 1024 + 7))
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def put(self, url, *, content, headers):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["chunks"] = list(content)
+            return httpx.Response(
+                200,
+                request=httpx.Request("PUT", url),
+                json={"id": "upload-1", "status": "ready"},
+            )
+
+    monkeypatch.setattr(cli.httpx, "Client", FakeClient)
+
+    response = cli._upload_artifact(
+        "/v1/uploads/upload-1/media",
+        source,
+        api_url="http://local",
+    )
+
+    assert response["status"] == "ready"
+    assert captured["url"] == "http://local/v1/uploads/upload-1/media"
+    assert captured["headers"]["Content-Length"] == str(source.stat().st_size)
+    assert [len(chunk) for chunk in captured["chunks"]] == [1024 * 1024, 7]
 
 
 def test_submit_waits_and_downloads_completed_video(monkeypatch, tmp_path: Path) -> None:

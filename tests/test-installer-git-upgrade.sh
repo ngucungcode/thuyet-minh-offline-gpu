@@ -157,9 +157,9 @@ prepare_installed_release() {
 upgrade_root="${TEST_ROOT}/upgrade-current"
 upgrade_stage="${TEST_ROOT}/upgrade-stage"
 create_git_project "${upgrade_root}" 0.2.2 old
-create_git_project "${upgrade_stage}" 0.2.4 new
-# The target release changes only provider stack control around the persistent
-# runtime.
+create_git_project "${upgrade_stage}" 0.3.0 new
+# The target release changes application behavior around the persistent
+# runtime without changing its locked dependencies.
 # This must not force an in-place venv rebuild, but the full fingerprint still
 # needs to record that the release contents changed.
 printf '\n# provider stack control changed in the target release\n' \
@@ -196,7 +196,7 @@ touch "${MIGRATION_TEST_STACK_STATE}"
 
 migrate_git_release_upgrade \
   "${upgrade_root}" "${upgrade_stage}" "${upgrade_root}/var" false \
-  0.2.4 "0.2.0 0.2.1 0.2.2 0.2.3"
+  0.3.0 "0.2.0 0.2.1 0.2.2 0.2.3 0.2.4"
 
 [[ "$(<"${upgrade_root}/SOURCE_MARKER")" == new ]] \
   || fail "Source release mới chưa active"

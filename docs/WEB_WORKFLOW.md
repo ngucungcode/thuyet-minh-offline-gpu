@@ -1,12 +1,53 @@
 # Workflow web và tích hợp nguồn
 
-## Luồng làm một bản thuyết minh
+## Luồng tải trực tiếp MP4/MKV + SRT
+
+1. Mở `http://127.0.0.1:8080/` qua SSH tunnel, chọn tab **Tải file lên**.
+2. Chọn video `.mp4` hoặc `.mkv`. Phụ đề `.srt` là tùy chọn; khi có SRT phải
+   chọn một ngôn ngữ nguồn cụ thể thay vì **Tự động**.
+   Đuôi file chỉ là bước kiểm tra đầu tiên: luồng hình đầu tiên phải là H.264/AVC
+   để passthrough sang MP4. Server trả `unsupported_media` khi finalize đối với
+   HEVC, VP8, FFV1 hoặc cover-art được đặt làm luồng hình đầu tiên.
+3. Chọn model/giọng và chế độ căn thời gian. **Nhịp tự nhiên** là mặc định: bản
+   dịch được viết gọn theo thời lượng, giọng được giữ gần 1,0×, có thể mượn tối
+   đa 0,8 giây khoảng lặng lân cận và không tăng quá 1,20×. **Khớp nghiêm ngặt**
+   giữ timestamp phụ đề cũ và có thể phải thay đổi tốc độ nhiều hơn.
+4. Xác nhận quyền rồi bắt đầu. Dashboard hiển thị riêng tiến độ gửi video, gửi
+   phụ đề và bước xác minh/finalize.
+5. Server ghi từng file vào `.part`, kiểm tra loại media và chỉ đổi tên atomic
+   sau khi nhận đủ. Finalize tạo checkpoint acquisition/subtitle; từ thời điểm
+   đó có thể đóng trang mà không mất job.
+6. Không có SRT thì pipeline chạy ASR offline. Có SRT hợp lệ thì bỏ qua ASR và
+   dùng chính timestamp/text trong file.
+
+API dùng session ba bước để không giữ phim trong RAM:
+
+```text
+POST /v1/uploads
+PUT  /v1/uploads/{id}/media
+PUT  /v1/uploads/{id}/subtitle   # chỉ khi đã khai báo SRT
+POST /v1/uploads/{id}/finalize
+```
+
+Có thể xem lại session bằng `GET /v1/uploads/{id}` hoặc hủy và dọn file dở bằng
+`DELETE /v1/uploads/{id}`. Mặc định server nhận video tối đa 100 GiB, SRT tối đa
+16 MiB và tự dọn định kỳ session chưa finalize theo TTL máy chủ, mặc định 7 ngày
+(đồng thời quét ngay khi API khởi động). Mọi lỗi upload/finalize đều giữ nguyên
+session để người dùng có thể sửa SRT hoặc thử lại; dashboard đọc lại checkpoint
+và bỏ qua media/SRT đã có đúng
+kích thước; CLI còn đối chiếu SHA-256 trước khi bỏ qua file. Server kiểm lại checksum
+trước khi finalize. Chỉ thao tác hủy/xóa rõ ràng hoặc TTL mới dọn session. Có thể đổi giới hạn bằng
+`DUB_UPLOAD_MEDIA_MAX_BYTES`, `DUB_UPLOAD_SUBTITLE_MAX_BYTES` và
+`DUB_UPLOAD_SESSION_TTL_SECONDS`.
+
+## Luồng tìm nguồn qua Prowlarr
 
 1. Mở `http://127.0.0.1:8080/` qua SSH tunnel và kiểm tra thẻ GPU/acquisition.
 2. Tìm tên phim, có thể thêm năm; chọn đúng release hoặc dán `Release ID` từ kết
    quả tìm kiếm.
-3. Chọn ngôn ngữ nguồn, chế độ phụ đề và các model đã cài/verify. Nếu dùng giọng
-   tham chiếu, chỉ chọn tệp giọng mà bạn có quyền sử dụng và xác nhận quyền giọng.
+3. Chọn ngôn ngữ nguồn, chế độ phụ đề, chế độ căn thời gian và các model đã
+   cài/verify. Nếu dùng giọng tham chiếu, chỉ chọn tệp giọng mà bạn có quyền sử
+   dụng và xác nhận quyền giọng.
 4. Xác nhận quyền đối với nội dung rồi tạo job.
 5. Nếu job dừng ở `needs_subtitle_selection`, chọn một ứng viên hoặc chọn dùng
    ASR. Nếu dừng ở `needs_language`, chọn ngôn ngữ đúng để pipeline tiếp tục.

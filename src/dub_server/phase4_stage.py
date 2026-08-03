@@ -48,6 +48,8 @@ from .narration import (
     PersistentVieNeuNarrationSynthesizer,
     PiperNarrationSynthesizer,
     SynthesizedNarration,
+    TTS_SILENCE_TRIM_VERSION,
+    trim_synthesized_narration_silence,
 )
 from .narration_artifact import (
     NarrationArtifactError,
@@ -60,9 +62,13 @@ from .state import InvalidTransition, JobRecord, JobStage, JobStatus, StateStore
 from .timing import (
     FfmpegTimingFitter,
     FittedNarrationBlock,
+    NATURAL_MAX_TOTAL_SPEED,
+    NarrationTimingInput,
     TimingError,
+    TimingProfile,
     TimingQuality,
     build_timeline_wav,
+    plan_narration_slots,
 )
 from .translation_artifact import (
     TranslationArtifact,
@@ -292,6 +298,7 @@ class Phase4Stage:
             )
             tts_model = await self._resolve_model(self._tts_model_id(job), "tts")
             tts_support = await self._resolve_tts_support(tts_model)
+            timing_profile = self._timing_profile(job)
             self._raise_if_cancelled(job.id)
 
             separation = await self._ensure_separation(
@@ -324,12 +331,14 @@ class Phase4Stage:
                 translation=translation,
                 model=tts_model,
                 support_model=tts_support,
+                timing_profile=timing_profile,
             )
             fitted_blocks = await self._ensure_timing(
                 job.id,
                 translation=translation,
                 model=tts_model,
                 raw_blocks=raw_blocks,
+                timing_profile=timing_profile,
             )
             return await self._export(
                 job.id,
@@ -352,6 +361,12 @@ class Phase4Stage:
         except TimingError as error:
             if error.code == "timing_cancelled":
                 return self._store.get_job(job_id)
+            if error.details:
+                self._update_progress(
+                    job_id,
+                    self._store.get_job(job_id).progress_permille,
+                    {"timing_failure": error.details},
+                )
             return self._fail(job_id, error.code, error.message_vi, error.retryable)
         except NarrationArtifactError as error:
             if error.code == "artifact_cancelled":
@@ -604,6 +619,7 @@ class Phase4Stage:
         translation: TranslationArtifact,
         model: VerifiedModel,
         support_model: VerifiedModel | None,
+        timing_profile: TimingProfile,
     ) -> list[dict[str, Any]]:
         checkpoint = self._store.get_checkpoint(job_id, JobStage.TTS)
         payload = self._valid_tts_checkpoint(
@@ -611,6 +627,7 @@ class Phase4Stage:
             translation=translation,
             model=model,
             support_model=support_model,
+            timing_profile=timing_profile,
         )
         if payload is None:
             payload = {
@@ -626,9 +643,14 @@ class Phase4Stage:
                 "support_model_tree_sha256": (
                     support_model.tree_sha256 if support_model is not None else None
                 ),
+                "timing_profile": timing_profile.value,
+                "silence_trim_version": TTS_SILENCE_TRIM_VERSION,
                 "block_count": len(translation.result.segments),
                 "blocks": [],
             }
+            self._store.save_checkpoint(job_id, JobStage.TTS, payload)
+        elif "timing_profile" not in payload:
+            payload["timing_profile"] = timing_profile.value
             self._store.save_checkpoint(job_id, JobStage.TTS, payload)
 
         self._set_status(
@@ -640,6 +662,7 @@ class Phase4Stage:
             detail_updates={
                 "phase4_step": "tts",
                 "tts_model_id": model.model_id,
+                "timing_profile": timing_profile.value,
                 "tts_completed_blocks": len(payload["blocks"]),
                 "tts_block_count": len(translation.result.segments),
             },
@@ -678,6 +701,7 @@ class Phase4Stage:
                     text=segment.translated_text,
                     start_us=segment.start_us,
                     end_us=segment.end_us,
+                    timing_profile=timing_profile,
                 )
                 blocks_by_ordinal[ordinal] = record
                 payload["blocks"] = [
@@ -732,6 +756,7 @@ class Phase4Stage:
         text: str,
         start_us: int,
         end_us: int,
+        timing_profile: TimingProfile,
     ) -> dict[str, Any]:
         block_dir = self._job_dir(job_id) / "tts"
         probe_path = block_dir / f"block-{ordinal:05d}.probe.wav"
@@ -744,8 +769,14 @@ class Phase4Stage:
             speed=1.0,
             cancellation=lambda: self._is_cancel_requested(job_id),
         )
+        self._raise_if_cancelled(job_id)
+        probe = await asyncio.to_thread(trim_synthesized_narration_silence, probe)
         target_us = end_us - start_us
-        native_speed = min(1.20, max(0.90, probe.duration_us / target_us))
+        native_speed = (
+            min(1.20, max(0.90, probe.duration_us / target_us))
+            if timing_profile is TimingProfile.STRICT
+            else 1.0
+        )
         final: SynthesizedNarration
         if abs(native_speed - 1.0) > 0.001:
             final = await synthesizer.synthesize(
@@ -754,6 +785,8 @@ class Phase4Stage:
                 speed=native_speed,
                 cancellation=lambda: self._is_cancel_requested(job_id),
             )
+            self._raise_if_cancelled(job_id)
+            final = await asyncio.to_thread(trim_synthesized_narration_silence, final)
             with suppress(OSError):
                 probe_path.unlink(missing_ok=True)
         else:
@@ -801,6 +834,7 @@ class Phase4Stage:
         translation: TranslationArtifact,
         model: VerifiedModel,
         support_model: VerifiedModel | None,
+        timing_profile: TimingProfile,
     ) -> dict[str, Any] | None:
         if not isinstance(payload, Mapping):
             return None
@@ -816,6 +850,8 @@ class Phase4Stage:
             or payload.get("support_model_tree_sha256") != expected_support_sha
             or payload.get("block_count") != len(translation.result.segments)
             or not isinstance(payload.get("blocks"), list)
+            or not self._checkpoint_profile_matches(payload, timing_profile)
+            or not self._checkpoint_trim_matches(payload, timing_profile)
         ):
             return None
         return dict(payload)
@@ -855,13 +891,34 @@ class Phase4Stage:
         translation: TranslationArtifact,
         model: VerifiedModel,
         raw_blocks: Sequence[Mapping[str, Any]],
+        timing_profile: TimingProfile,
     ) -> list[FittedNarrationBlock]:
+        planning_inputs = tuple(
+            NarrationTimingInput(
+                start_us=segment.start_us,
+                end_us=segment.end_us,
+                source_duration_us=int(raw["duration_us"]),
+                native_speed=float(raw["native_speed"]),
+                source_frame_count=int(raw["frame_count"]),
+                source_sample_rate=int(raw["sample_rate"]),
+            )
+            for segment, raw in zip(
+                translation.result.segments, raw_blocks, strict=True
+            )
+        )
+        planned_slots = await asyncio.to_thread(
+            plan_narration_slots,
+            planning_inputs,
+            duration_us=translation.result.duration_us,
+            profile=timing_profile,
+        )
         checkpoint = self._store.get_checkpoint(job_id, JobStage.TIMING)
         payload = self._valid_timing_checkpoint(
             checkpoint.payload if checkpoint is not None else None,
             translation=translation,
             model=model,
             block_count=len(raw_blocks),
+            timing_profile=timing_profile,
         )
         if payload is None:
             payload = {
@@ -870,9 +927,14 @@ class Phase4Stage:
                 "translation_sha256": translation.sha256,
                 "tts_model_id": model.model_id,
                 "tts_model_tree_sha256": model.tree_sha256,
+                "timing_profile": timing_profile.value,
+                "silence_trim_version": TTS_SILENCE_TRIM_VERSION,
                 "block_count": len(raw_blocks),
                 "blocks": [],
             }
+        elif "timing_profile" not in payload:
+            payload["timing_profile"] = timing_profile.value
+            self._store.save_checkpoint(job_id, JobStage.TIMING, payload)
         self._set_status(
             job_id,
             JobStatus.TIMING,
@@ -896,9 +958,10 @@ class Phase4Stage:
             )
             if block is not None:
                 segment = translation.result.segments[ordinal]
+                planned = planned_slots[ordinal]
                 if (
-                    block.start_us != segment.start_us
-                    or block.end_us != segment.end_us
+                    block.start_us != planned.start_us
+                    or block.end_us != planned.end_us
                     or block.text != segment.translated_text
                 ):
                     continue
@@ -906,8 +969,13 @@ class Phase4Stage:
                 records_by_ordinal[ordinal] = dict(raw)
 
         fitter = self._timing_fitter_factory()
-        for ordinal, (segment, raw) in enumerate(
-            zip(translation.result.segments, raw_blocks, strict=True)
+        for ordinal, (segment, raw, planned) in enumerate(
+            zip(
+                translation.result.segments,
+                raw_blocks,
+                planned_slots,
+                strict=True,
+            )
         ):
             self._raise_if_cancelled(job_id)
             if ordinal in fitted_by_ordinal:
@@ -915,10 +983,15 @@ class Phase4Stage:
             fitted = await fitter.fit(
                 Path(str(raw["path"])),
                 self._job_dir(job_id) / "timing" / f"block-{ordinal:05d}.wav",
-                start_us=segment.start_us,
-                end_us=segment.end_us,
+                start_us=planned.start_us,
+                end_us=planned.end_us,
                 text=segment.translated_text,
                 native_speed=float(raw["native_speed"]),
+                maximum_total_speed=(
+                    NATURAL_MAX_TOTAL_SPEED
+                    if timing_profile is TimingProfile.NATURAL
+                    else None
+                ),
                 cancellation=lambda: self._is_cancel_requested(job_id),
             )
             fitted_by_ordinal[ordinal] = fitted
@@ -948,6 +1021,7 @@ class Phase4Stage:
                     "phase4_step": "timing",
                     "timing_completed_blocks": len(fitted_by_ordinal),
                     "timing_block_count": len(raw_blocks),
+                    "timing_profile": timing_profile.value,
                 },
             )
 
@@ -1009,6 +1083,7 @@ class Phase4Stage:
                 "narration_timeline_path": payload["timeline_path"],
                 "timing_report_path": payload["timing_report_path"],
                 "vietnamese_srt_path": payload["srt_path"],
+                "timing_profile": timing_profile.value,
                 "timing_quality": quality_counts,
             },
         )
@@ -1021,6 +1096,7 @@ class Phase4Stage:
         translation: TranslationArtifact,
         model: VerifiedModel,
         block_count: int,
+        timing_profile: TimingProfile,
     ) -> dict[str, Any] | None:
         if not isinstance(payload, Mapping):
             return None
@@ -1030,6 +1106,8 @@ class Phase4Stage:
             or payload.get("tts_model_tree_sha256") != model.tree_sha256
             or payload.get("block_count") != block_count
             or not isinstance(payload.get("blocks"), list)
+            or not self._checkpoint_profile_matches(payload, timing_profile)
+            or not self._checkpoint_trim_matches(payload, timing_profile)
         ):
             return None
         return dict(payload)
@@ -1367,6 +1445,7 @@ class Phase4Stage:
             "separation_model_tree_sha256": separation.model_tree_sha256,
             "tts_model_id": tts_model.model_id,
             "tts_model_tree_sha256": tts_model.tree_sha256,
+            "timing_profile": str(timing_payload["timing_profile"]),
             "timing_quality": quality_counts,
             "original_dialogue_removed": True,
             "music_and_effects_preserved": True,
@@ -1487,6 +1566,41 @@ class Phase4Stage:
 
     def _tts_model_id(self, job: JobRecord) -> str:
         return self._selected_model(job, "tts", self._default_tts_model_id)
+
+    @staticmethod
+    def _timing_profile(job: JobRecord) -> TimingProfile:
+        raw = job.spec.get("timing_profile")
+        # Jobs created before natural timing existed had strict per-subtitle
+        # semantics.  Treating a missing field as strict preserves their sealed
+        # checkpoints and makes upgrades safe.
+        if raw is None:
+            return TimingProfile.STRICT
+        try:
+            return TimingProfile(raw)
+        except (TypeError, ValueError) as error:
+            raise TimingError(
+                "timing_profile_invalid",
+                "Chế độ khớp thời lượng của job không hợp lệ",
+                retryable=False,
+            ) from error
+
+    @staticmethod
+    def _checkpoint_profile_matches(
+        payload: Mapping[str, Any], timing_profile: TimingProfile
+    ) -> bool:
+        stored = payload.get("timing_profile")
+        return stored == timing_profile.value or (
+            stored is None and timing_profile is TimingProfile.STRICT
+        )
+
+    @staticmethod
+    def _checkpoint_trim_matches(
+        payload: Mapping[str, Any], timing_profile: TimingProfile
+    ) -> bool:
+        stored = payload.get("silence_trim_version")
+        return stored == TTS_SILENCE_TRIM_VERSION or (
+            stored is None and timing_profile is TimingProfile.STRICT
+        )
 
     @staticmethod
     def _selected_model(job: JobRecord, stage: str, default: str) -> str:

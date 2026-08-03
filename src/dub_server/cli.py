@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import time
@@ -280,6 +282,153 @@ def _download_artifact(
             typer.echo(f"Đã giữ phần tải dở để tiếp tục: {temporary}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(str(resolved))
+
+
+def _upload_artifact(
+    path: str,
+    source: Path,
+    *,
+    api_url: str | None,
+) -> dict[str, Any]:
+    """Stream one local file as a raw request body without multipart buffering."""
+
+    candidate = source.expanduser().absolute()
+    try:
+        metadata = candidate.lstat()
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        typer.echo(f"Không thể đọc file tải lên: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not candidate.is_file() or candidate.is_symlink() or metadata.st_size <= 0:
+        typer.echo(f"File tải lên không hợp lệ: {candidate}", err=True)
+        raise typer.Exit(code=1)
+
+    sent = 0
+
+    def chunks() -> Iterator[bytes]:
+        nonlocal sent
+        with resolved.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                sent += len(chunk)
+                if sys.stderr.isatty():
+                    fraction = min(1.0, sent / metadata.st_size)
+                    width = 28
+                    filled = round(width * fraction)
+                    bar = "#" * filled + "-" * (width - filled)
+                    typer.echo(
+                        f"\r[{bar}] {fraction * 100:5.1f}% "
+                        f"({_human_bytes(sent)}/{_human_bytes(metadata.st_size)})",
+                        err=True,
+                        nl=False,
+                    )
+                yield chunk
+
+    try:
+        timeout = httpx.Timeout(None, connect=30.0)
+        with httpx.Client(timeout=timeout) as client:
+            response = client.put(
+                f"{_base_url(api_url)}{path}",
+                content=chunks(),
+                headers={
+                    "Content-Length": str(metadata.st_size),
+                    "Content-Type": "application/octet-stream",
+                },
+            )
+    except (OSError, httpx.HTTPError) as exc:
+        if sys.stderr.isatty() and sent:
+            typer.echo(err=True)
+        typer.echo(f"Không thể tải file lên API cục bộ: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if sys.stderr.isatty() and sent:
+        typer.echo(err=True)
+    if response.is_error:
+        typer.echo(_error_message(response), err=True)
+        raise typer.Exit(code=1)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        typer.echo("API trả về dữ liệu phiên tải file không hợp lệ", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(payload, dict):
+        typer.echo("API trả về dữ liệu phiên tải file không hợp lệ", err=True)
+        raise typer.Exit(code=1)
+    return payload
+
+
+def _local_regular_size(path: Path) -> int:
+    candidate = path.expanduser().absolute()
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        typer.echo(f"Không thể đọc file tải lên: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not candidate.is_file() or candidate.is_symlink() or metadata.st_size <= 0:
+        typer.echo(f"File tải lên không hợp lệ: {candidate}", err=True)
+        raise typer.Exit(code=1)
+    return metadata.st_size
+
+
+def _local_regular_sha256(path: Path) -> tuple[int, str]:
+    """Hash a stable local regular file without following a final symlink."""
+
+    candidate = path.expanduser().absolute()
+    descriptor: int | None = None
+    try:
+        initial = candidate.lstat()
+        if (
+            not stat_module.S_ISREG(initial.st_mode)
+            or candidate.is_symlink()
+            or initial.st_size <= 0
+        ):
+            raise OSError("not a non-empty regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        opened = os.fstat(descriptor)
+        initial_identity = (
+            initial.st_dev,
+            initial.st_ino,
+            initial.st_size,
+            initial.st_mtime_ns,
+        )
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        if not stat_module.S_ISREG(opened.st_mode) or opened_identity != initial_identity:
+            raise OSError("file changed before hashing")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        final = os.fstat(descriptor)
+        current = candidate.lstat()
+        final_identity = (
+            final.st_dev,
+            final.st_ino,
+            final.st_size,
+            final.st_mtime_ns,
+        )
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        )
+        if (
+            candidate.is_symlink()
+            or final_identity != initial_identity
+            or current_identity != initial_identity
+        ):
+            raise OSError("file changed while hashing")
+        return initial.st_size, digest.hexdigest()
+    except OSError as exc:
+        typer.echo(f"Không thể xác minh file tải lên: {candidate}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _iter_sse(response: httpx.Response) -> Iterator[dict[str, str]]:
@@ -842,6 +991,248 @@ def search(
     )
 
 
+@app.command("upload")
+def upload_local_media(
+    media: Path = typer.Argument(..., help="File video MP4 hoặc MKV cục bộ."),
+    subtitle: Path | None = typer.Option(
+        None,
+        "--subtitle",
+        help="File phụ đề SRT thủ công (không bắt buộc).",
+    ),
+    upload_id: str | None = typer.Option(
+        None,
+        "--upload-id",
+        help="Thử lại một phiên upload dở dang thay vì tạo phiên mới.",
+    ),
+    rights_confirmed: bool = typer.Option(
+        False,
+        "--i-have-rights",
+        help="Xác nhận bạn có quyền tải lên và xử lý nội dung.",
+    ),
+    source_language: str = typer.Option("auto", "--source-language"),
+    timing_profile: str = typer.Option(
+        "natural",
+        "--timing-profile",
+        help="natural ưu tiên nhịp nói; strict ưu tiên timestamp gốc.",
+    ),
+    asr_model: str | None = typer.Option(None, "--asr-model"),
+    translation_model: str | None = typer.Option(None, "--translation-model"),
+    separation_model: str | None = typer.Option(None, "--separation-model"),
+    tts_model: str | None = typer.Option(None, "--tts-model"),
+    voice_id: str | None = typer.Option(None, "--voice-id"),
+    voice_reference: str | None = typer.Option(None, "--voice-reference"),
+    voice_rights_confirmed: bool = typer.Option(
+        False,
+        "--i-have-voice-rights",
+    ),
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        help="Theo dõi đến khi hoàn tất hoặc cần người dùng xử lý.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Tự tải MP4 khi dùng --wait và job hoàn tất.",
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    api_url: str | None = typer.Option(None, envvar="DUB_API_URL"),
+) -> None:
+    """Tải trực tiếp MP4/MKV và SRT lên pipeline thuyết minh."""
+
+    if not rights_confirmed:
+        raise typer.BadParameter(
+            "Phải dùng --i-have-rights để xác nhận quyền xử lý nội dung",
+            param_hint="--i-have-rights",
+        )
+    media_extension = media.suffix.lower()
+    if media_extension not in {".mp4", ".mkv"}:
+        raise typer.BadParameter("File video phải có đuôi .mp4 hoặc .mkv")
+    if subtitle is not None and subtitle.suffix.lower() != ".srt":
+        raise typer.BadParameter("File phụ đề phải có đuôi .srt")
+    normalized_language = source_language.strip().lower().replace("_", "-")
+    if subtitle is not None and upload_id is None and normalized_language in {
+        "",
+        "auto",
+        "und",
+        "unknown",
+        "mul",
+        "zxx",
+    }:
+        raise typer.BadParameter(
+            "Phải chọn --source-language cụ thể khi dùng --subtitle",
+            param_hint="--source-language",
+        )
+    if timing_profile not in {"natural", "strict"}:
+        raise typer.BadParameter("--timing-profile phải là natural hoặc strict")
+    if output is not None and not wait:
+        raise typer.BadParameter("--output chỉ dùng cùng --wait", param_hint="--output")
+    voice = None
+    if voice_id or voice_reference:
+        if not voice_rights_confirmed:
+            raise typer.BadParameter(
+                "Phải dùng --i-have-voice-rights khi chọn giọng tham chiếu",
+                param_hint="--i-have-voice-rights",
+            )
+        voice = {"voice_id": voice_id, "reference_path": voice_reference}
+
+    media_size: int | None = None
+    subtitle_size: int | None = None
+    if upload_id is None:
+        # Validate before creating a durable server session, otherwise a typo
+        # or empty local file would leave an unnecessary orphan to clean up.
+        media_size = _local_regular_size(media)
+        if subtitle is not None:
+            subtitle_size = _local_regular_size(subtitle)
+
+    if upload_id is None:
+        session = _request(
+            "POST",
+            "/v1/uploads",
+            api_url=api_url,
+            payload={
+                "media_filename": media.name,
+                "subtitle_filename": subtitle.name if subtitle is not None else None,
+                "rights_confirmed": True,
+                "source_language": normalized_language or "auto",
+                "timing_profile": timing_profile,
+                "models": {
+                    "asr": asr_model,
+                    "translation": translation_model,
+                    "separation": separation_model,
+                    "tts": tts_model,
+                },
+                "voice": voice,
+                "voice_rights_confirmed": voice_rights_confirmed,
+            },
+        )
+        identifier = str(session["id"])
+        typer.echo(f"Đã tạo phiên upload {identifier}", err=True)
+    else:
+        identifier = upload_id
+        session = _request(
+            "GET",
+            f"/v1/uploads/{identifier}",
+            api_url=api_url,
+        )
+        typer.echo(f"Đang thử lại phiên upload {identifier}", err=True)
+
+    try:
+        if str(session.get("status")) == "finalized":
+            created = _request(
+                "POST",
+                f"/v1/uploads/{identifier}/finalize",
+                api_url=api_url,
+            )
+        else:
+            declared_media = session.get("media_filename")
+            declared_subtitle = session.get("subtitle_filename")
+            if upload_id is not None and declared_media != media.name:
+                raise typer.BadParameter(
+                    "Tên file video không khớp phiên upload đã tạo",
+                    param_hint="media",
+                )
+            if upload_id is not None:
+                if declared_subtitle is None and subtitle is not None:
+                    raise typer.BadParameter(
+                        "Phiên upload này không khai báo phụ đề SRT",
+                        param_hint="--subtitle",
+                    )
+                if (
+                    declared_subtitle is not None
+                    and subtitle is not None
+                    and declared_subtitle != subtitle.name
+                ):
+                    raise typer.BadParameter(
+                        "Tên file SRT không khớp phiên upload đã tạo",
+                        param_hint="--subtitle",
+                    )
+                if (
+                    declared_subtitle is not None
+                    and subtitle is None
+                    and session.get("subtitle_size_bytes") is None
+                ):
+                    typer.echo(
+                        "Phiên upload đang chờ SRT; hãy chạy lại với --subtitle và "
+                        f"--upload-id {identifier}",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
+
+            if media_size is None:
+                media_size = _local_regular_size(media)
+            media_matches = False
+            if session.get("media_size_bytes") == media_size:
+                typer.echo("Đang xác minh SHA-256 của video để tiếp tục...", err=True)
+                _, local_media_digest = _local_regular_sha256(media)
+                media_matches = session.get("media_sha256") == local_media_digest
+            if not media_matches:
+                session = _upload_artifact(
+                    f"/v1/uploads/{identifier}/media",
+                    media,
+                    api_url=api_url,
+                )
+            else:
+                typer.echo("Video đã có trên máy chủ, bỏ qua tải lại.", err=True)
+
+            if subtitle is not None:
+                if subtitle_size is None:
+                    subtitle_size = _local_regular_size(subtitle)
+                subtitle_matches = False
+                if session.get("subtitle_size_bytes") == subtitle_size:
+                    typer.echo("Đang xác minh SHA-256 của SRT để tiếp tục...", err=True)
+                    _, local_subtitle_digest = _local_regular_sha256(subtitle)
+                    subtitle_matches = (
+                        session.get("subtitle_sha256") == local_subtitle_digest
+                    )
+                if not subtitle_matches:
+                    session = _upload_artifact(
+                        f"/v1/uploads/{identifier}/subtitle",
+                        subtitle,
+                        api_url=api_url,
+                    )
+                else:
+                    typer.echo("SRT đã có trên máy chủ, bỏ qua tải lại.", err=True)
+            created = _request(
+                "POST",
+                f"/v1/uploads/{identifier}/finalize",
+                api_url=api_url,
+            )
+    except typer.Exit:
+        typer.echo(
+            "Phiên upload được giữ lại. Thử lại bằng "
+            f"--upload-id {identifier}.",
+            err=True,
+        )
+        raise
+
+    _print_json(created)
+    if not wait:
+        return
+    final = _watch_job(str(created["id"]), api_url=api_url)
+    final_status = str(final.get("status"))
+    if final_status == "completed":
+        if output is not None:
+            _download_artifact(
+                f"/v1/jobs/{created['id']}/artifacts/video",
+                output,
+                api_url=api_url,
+                overwrite=overwrite,
+            )
+        return
+    if final_status in _ACTION_REQUIRED_STATUSES:
+        typer.echo(
+            "Job đang chờ thao tác. Dùng dub status hoặc language-select.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    error = final.get("error")
+    if isinstance(error, dict) and error.get("message"):
+        typer.echo(str(error["message"]), err=True)
+    raise typer.Exit(code=1)
+
+
 @jobs_app.command("create")
 @app.command("submit")
 @app.command("run")
@@ -854,6 +1245,11 @@ def run_job(
     ),
     source_language: str = typer.Option("auto", "--source-language"),
     subtitle_mode: str = typer.Option("prefer", "--subtitle-mode"),
+    timing_profile: str = typer.Option(
+        "natural",
+        "--timing-profile",
+        help="natural ưu tiên nhịp nói; strict ưu tiên timestamp gốc.",
+    ),
     asr_model: str | None = typer.Option(None, "--asr-model"),
     translation_model: str | None = typer.Option(None, "--translation-model"),
     separation_model: str | None = typer.Option(None, "--separation-model"),
@@ -887,6 +1283,8 @@ def run_job(
         )
     if subtitle_mode not in {"prefer", "manual", "asr"}:
         raise typer.BadParameter("Chế độ phụ đề phải là prefer, manual hoặc asr")
+    if timing_profile not in {"natural", "strict"}:
+        raise typer.BadParameter("--timing-profile phải là natural hoặc strict")
     voice = None
     if voice_id or voice_reference:
         if not voice_rights_confirmed:
@@ -900,6 +1298,7 @@ def run_job(
         "rights_confirmed": True,
         "source_language": source_language,
         "subtitle_mode": subtitle_mode,
+        "timing_profile": timing_profile,
         "models": {
             "asr": asr_model,
             "translation": translation_model,

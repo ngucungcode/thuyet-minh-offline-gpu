@@ -12,13 +12,15 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Tính năng
 
-- Dashboard tiếng Việt cho tìm nguồn, chọn model, tạo và theo dõi job.
+- Dashboard tiếng Việt cho tải MP4/MKV + SRT, tìm nguồn, chọn model, tạo và theo dõi job.
 - Prowlarr và qBittorrent cho nguồn do người vận hành tự cấu hình hợp pháp.
 - Ưu tiên phụ đề nhúng, sidecar hoặc OpenSubtitles; fallback ASR CUDA offline.
 - Dịch sang tiếng Việt bằng Gemma 4 qua `llama.cpp` CUDA.
 - TIGER-DnR loại thoại diễn viên nhưng giữ nhạc và hiệu ứng.
 - VieNeu v2 hoặc Piper tạo lời thuyết minh tiếng Việt.
-- Khớp từng slot thoại, ducking, mix và xuất H.264 passthrough + AAC.
+- Chế độ nhịp tự nhiên dịch gọn theo thời lượng, mượn khoảng lặng lân cận và giới hạn
+  tốc độ toàn câu ở 1,20×; vẫn có chế độ khớp timestamp nghiêm ngặt khi cần.
+- Ducking, mix và xuất H.264 passthrough + AAC mà không làm thay đổi nhịp luồng hình.
 - Checkpoint atomic, hủy, retry và tiếp tục sau khi tiến trình khởi động lại.
 - Tiến độ realtime theo stage, tốc độ tải, ETA, segment và số block.
 - Xuất MP4, phụ đề tiếng Việt SRT và timing report JSON.
@@ -26,7 +28,7 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Trình cài production `v0.2.4` hỗ trợ đường triển khai native sau:
+Trình cài production `v0.3.0` hỗ trợ đường triển khai native sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
@@ -97,6 +99,43 @@ Giữ phiên SSH này mở, sau đó truy cập:
 
 ## Tạo bản thuyết minh đầu tiên
 
+### Tải file có sẵn — cách nhanh nhất
+
+Trong dashboard, chọn **Tải file lên**, rồi:
+
+1. Chọn một file video `.mp4` hoặc `.mkv` trên máy của bạn.
+   Luồng hình đầu tiên phải là H.264/AVC để có thể passthrough sang MP4; HEVC,
+   VP8 và FFV1 bị từ chối ngay khi finalize thay vì đợi đến công đoạn xuất.
+2. Có thể chọn thêm file phụ đề `.srt`; nếu có SRT, hãy chọn đúng ngôn ngữ nguồn.
+3. Giữ **Nhịp tự nhiên** để ưu tiên giọng đều, hoặc chọn **Khớp nghiêm ngặt** nếu
+   timestamp gốc quan trọng hơn độ tự nhiên.
+4. Chọn model/giọng, xác nhận quyền sử dụng và bắt đầu tải lên.
+5. Không đóng trang trong lúc upload; khi server đã nhận đủ file, job có checkpoint
+   và có thể tiếp tục độc lập trên máy chủ.
+
+Nếu finalize tạm bị chặn bởi một job khác, SRT chưa hợp lệ hoặc kết nối gián đoạn,
+dashboard giữ mã session và lần bấm **Bắt đầu** kế tiếp chỉ gửi artifact còn thiếu;
+video/SRT đã nhận đủ và khớp SHA-256 không bị tải lại. Session chỉ bị xóa khi người dùng chủ động hủy,
+bấm **Xóa phiên tạm**, hoặc khi server dọn session chưa finalize đã hết TTL. TTL mặc
+định là 7 ngày (`604800` giây), cấu hình bằng `DUB_UPLOAD_SESSION_TTL_SECONDS` và
+không được vượt quá 90 ngày.
+
+CLI tương đương:
+
+```bash
+dub upload ./phim.mkv --subtitle ./phim.en.srt \
+  --source-language en --timing-profile natural \
+  --i-have-rights --wait -o result.mp4
+```
+
+Nếu không có SRT, bỏ `--subtitle`; pipeline sẽ chạy ASR offline từ âm thanh video.
+File được truyền theo luồng và ghi vào `.part` trước khi đổi tên atomic, nên API không
+nạp cả phim vào RAM. Giới hạn mặc định là 100 GiB cho video và 16 MiB cho SRT;
+session chưa hoàn tất được kiểm tra định kỳ và tự dọn theo TTL cấu hình bằng
+`DUB_UPLOAD_SESSION_TTL_SECONDS` (mặc định 7 ngày).
+
+### Tìm nguồn qua Prowlarr
+
 1. Mở Prowlarr và thêm indexer mà bạn được phép sử dụng; dự án không cài sẵn indexer.
 2. Trong dashboard, kiểm thử Prowlarr/qBittorrent và đăng nhập OpenSubtitles nếu cần.
 3. Tìm tên phim và năm, rồi chọn đúng release từ kết quả.
@@ -110,11 +149,12 @@ CLI tương đương:
 ```bash
 dub search "Tên phim" --year 2024
 dub submit --release-id RELEASE_ID --i-have-rights \
-  --subtitle-mode prefer --wait -o result.mp4
+  --subtitle-mode prefer --timing-profile natural --wait -o result.mp4
 ```
 
 `RELEASE_ID` phải lấy từ một kết quả tìm kiếm hợp lệ. V1 chỉ nhận loại nội dung
-`movie`; hệ thống không nhận URL tải tùy ý từ client.
+`movie`; hệ thống không nhận URL tải từ xa tùy ý. File cục bộ phải đi qua luồng upload
+MP4/MKV có kiểm tra định dạng ở trên.
 
 ## Vận hành
 
@@ -146,16 +186,18 @@ dub maintenance cleanup --apply --yes
 dub maintenance sbom
 ```
 
-Job đã hoàn tất và toàn bộ thư mục nguồn `incoming` nằm ngoài phạm vi cleanup tự
-động. Luôn đọc dry-run trước khi dùng `--apply`.
+Nguồn của job đã finalize trong `incoming` nằm ngoài lệnh maintenance cleanup;
+chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu hình bằng
+`DUB_UPLOAD_SESSION_TTL_SECONDS`) được tự dọn. Luôn đọc dry-run trước khi dùng
+`--apply`.
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0`, `v0.2.1`, `v0.2.2` hoặc `v0.2.3`
-lên `v0.2.4`, chạy một lệnh:
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.2.4` lên `v0.3.0`, chạy
+một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.4/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.0/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -171,13 +213,13 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.4/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.0/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
-song. `v0.2.4` đóng descriptor khóa trước khi tạo daemon và cho phép source mới thay
-script điều khiển stack mà không coi đó là thay đổi runtime ML; thao tác dừng stack này
-chỉ cần thực hiện một lần khi nâng cấp từ deployment bị ảnh hưởng.
+song. Từ `v0.2.4`, installer đóng descriptor khóa trước khi tạo daemon và cho phép source
+mới thay script điều khiển stack mà không coi đó là thay đổi runtime ML; thao tác dừng
+stack này chỉ cần thực hiện một lần khi nâng cấp từ deployment bị ảnh hưởng.
 
 Trình cài chỉ chấp nhận đường nâng cấp đã khai báo, từ chối worktree bẩn, origin sai
 hoặc còn job đang hoạt động. Source mới được kích hoạt bằng transaction có journal;
@@ -185,19 +227,18 @@ hoặc còn job đang hoạt động. Source mới được kích hoạt bằng 
 acceptance thất bại, trình cài phục hồi source và trạng thái stack cũ. Backup source
 cũ được giữ lại để kiểm tra thủ công.
 
-Sau khi nâng cấp bản vá này, job từng dừng ở lỗi `output_track_layout_invalid` hoặc
-`output_duration_mismatch` sẽ có thể tiếp tục từ checkpoint dựng MP4. Bản xuất mới
-lấy điểm kết thúc luồng hình làm timeline chuẩn, đệm/cắt phần tiếng tương ứng mà
-không mã hóa lại hoặc cắt luồng hình:
+Job tạo trước `v0.3.0` không có `timing_profile` được giữ ở chế độ `strict`, vì vậy
+nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới mặc định dùng
+`natural`; có thể tiếp tục job lỗi có retry bằng lệnh:
 
 ```bash
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.2.4` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.3.0` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.4/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.0/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
@@ -207,7 +248,7 @@ thay đổi và không ghi đè `.env.native`. Nếu commit đích khác mà kh�
 Deployment legacy không có Git cũng bị từ chối theo mặc định. Cờ
 `--migrate-existing` chỉ dành cho bản source có runtime fingerprint giống hệt;
 khác fingerprint sẽ dừng trước khi đổi source. Không dùng cờ này để ép nâng
-`v0.1.x` lên `v0.2.x`.
+`v0.1.x` lên `v0.3.x`.
 
 Trước mọi thay đổi release, hãy snapshot toàn bộ thư mục cài và data volume. Không
 chỉ đổi source về bản cũ trong khi giữ database từ release mới hơn. Giữ nguyên

@@ -49,6 +49,9 @@ services:
       DUB_INCOMING_DIR: /data/incoming
       DUB_JOBS_DIR: /data/jobs
       DUB_OUTPUT_DIR: /data/output
+      DUB_UPLOAD_MEDIA_MAX_BYTES: ${DUB_UPLOAD_MEDIA_MAX_BYTES:-107374182400}
+      DUB_UPLOAD_SUBTITLE_MAX_BYTES: ${DUB_UPLOAD_SUBTITLE_MAX_BYTES:-16777216}
+      DUB_UPLOAD_SESSION_TTL_SECONDS: ${DUB_UPLOAD_SESSION_TTL_SECONDS:-604800}
       DUB_GPU_REPORT_PATH: /state/gpu-health.json
       DUB_DEFAULT_ASR_MODEL_ID: ${DUB_DEFAULT_ASR_MODEL_ID:-asr-faster-whisper-large-v3-turbo}
       DUB_DEFAULT_TRANSLATION_MODEL_ID: ${DUB_DEFAULT_TRANSLATION_MODEL_ID:-mt-gemma4-31b-q4}
@@ -63,7 +66,7 @@ services:
       DUB_OPENSUBTITLES_API_KEY_FILE: /run/secrets/opensubtitles_api_key
       DUB_OPENSUBTITLES_TOKEN_FILE: /run/secrets/opensubtitles_token
       DUB_OPENSUBTITLES_URL: ${DUB_OPENSUBTITLES_URL:-https://api.opensubtitles.com/api/v1}
-      DUB_OPENSUBTITLES_USER_AGENT: ${DUB_OPENSUBTITLES_USER_AGENT:-ThuyetMinhOfflineGPU v0.2.4}
+      DUB_OPENSUBTITLES_USER_AGENT: ${DUB_OPENSUBTITLES_USER_AGENT:-ThuyetMinhOfflineGPU v0.3.0}
     ports:
       - "127.0.0.1:${DUB_API_PORT:-8080}:8080"
     volumes:
