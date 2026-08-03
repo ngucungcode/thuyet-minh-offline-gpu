@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from click import unstyle
 from typer.testing import CliRunner
 
 import dub_server.cli as cli
@@ -417,7 +418,9 @@ def test_upload_command_requires_language_for_manual_srt(tmp_path: Path) -> None
     )
 
     assert result.exit_code == 2
-    assert "source-language" in result.output
+    plain_output = unstyle(result.output)
+    assert "Phải chọn" in plain_output
+    assert "source-language" in plain_output
 
 
 def test_upload_rejects_missing_or_empty_media_before_creating_session(
