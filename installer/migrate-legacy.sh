@@ -283,10 +283,11 @@ with path.open("rb") as handle:
 project = document.get("project")
 if not isinstance(project, dict):
     raise SystemExit("pyproject.toml thiếu bảng project")
-# Release metadata is intentionally excluded. The environment example is also
-# excluded because it only changes the release User-Agent default; an existing
-# .env.native is preserved verbatim. Dependencies, build configuration,
-# entrypoints, tools, model locks and native runtime files remain gated.
+# Release metadata is intentionally excluded. The environment example and the
+# native stack control script are also excluded because neither changes the
+# persistent Python/native runtime; the new source supplies those files after
+# the atomic switch. Dependencies, build configuration, entrypoints, tools,
+# model locks and native runtime files remain gated.
 project.pop("version", None)
 print(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 PY
@@ -298,7 +299,6 @@ PY
         scripts/native-bootstrap.sh \
         scripts/native-common.sh \
         scripts/install-llama-cpp.sh \
-        scripts/native-stack.sh \
         scripts/vieneu-offline.py || exit 1
       find native -maxdepth 1 -type f -print0 \
         | sort -z \
