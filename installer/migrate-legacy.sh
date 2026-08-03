@@ -265,6 +265,210 @@ migration_runtime_fingerprint() {
   )
 }
 
+migration_runtime_compatibility_fingerprint() {
+  local project_root="$1"
+  local project_manifest
+  (
+    set -o pipefail
+    cd -- "${project_root}" || exit 1
+    project_manifest="$(python3 - pyproject.toml <<'PY'
+import json
+from pathlib import Path
+import sys
+import tomllib
+
+path = Path(sys.argv[1])
+with path.open("rb") as handle:
+    document = tomllib.load(handle)
+project = document.get("project")
+if not isinstance(project, dict):
+    raise SystemExit("pyproject.toml thiếu bảng project")
+# Release metadata is intentionally excluded. The environment example is also
+# excluded because it only changes the release User-Agent default; an existing
+# .env.native is preserved verbatim. Dependencies, build configuration,
+# entrypoints, tools, model locks and native runtime files remain gated.
+project.pop("version", None)
+print(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+PY
+    )" || exit 1
+    {
+      printf '%s\n' "${project_manifest}" || exit 1
+      sha256sum \
+        config/models.lock.json \
+        scripts/native-bootstrap.sh \
+        scripts/native-common.sh \
+        scripts/install-llama-cpp.sh \
+        scripts/native-stack.sh \
+        scripts/vieneu-offline.py || exit 1
+      find native -maxdepth 1 -type f -print0 \
+        | sort -z \
+        | xargs -0 sha256sum || exit 1
+    } | sha256sum | awk '{print $1}'
+  )
+}
+
+migration_project_version() {
+  local project_root="$1"
+  python3 - "${project_root}/pyproject.toml" <<'PY'
+from pathlib import Path
+import re
+import sys
+import tomllib
+
+with Path(sys.argv[1]).open("rb") as handle:
+    version = tomllib.load(handle).get("project", {}).get("version")
+if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit("project.version không phải SemVer phát hành")
+print(version)
+PY
+}
+
+migration_version_is_compatible() {
+  local current_version="$1"
+  local compatible_versions="$2"
+  local -a candidates=()
+  local candidate
+
+  read -r -a candidates <<<"${compatible_versions}"
+  for candidate in "${candidates[@]}"; do
+    if [[ "${candidate}" == "${current_version}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+migration_validate_git_tree() {
+  local project_root="$1"
+  local resolved_root
+  local worktree_root
+
+  git -C "${project_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || return 1
+  resolved_root="$(readlink -f -- "${project_root}")" || return 1
+  worktree_root="$(git -C "${project_root}" rev-parse --show-toplevel)" \
+    || return 1
+  worktree_root="$(readlink -f -- "${worktree_root}")" || return 1
+  [[ "${resolved_root}" == "${worktree_root}" ]] || return 1
+  git -C "${project_root}" diff --quiet -- \
+    || return 1
+  git -C "${project_root}" diff --cached --quiet -- \
+    || return 1
+  [[ -z "$(git -C "${project_root}" status --porcelain)" ]] \
+    || return 1
+  git -C "${project_root}" fsck --no-dangling >/dev/null \
+    || return 1
+}
+
+migrate_git_release_upgrade() {
+  local current_root="${1%/}"
+  local staged_root="${2%/}"
+  local requested_data_dir="${3:-${current_root}/var}"
+  local data_dir_explicit="${4:-false}"
+  local expected_target_version="$5"
+  local compatible_versions="$6"
+  local current_version
+  local target_version
+  local current_commit
+  local configured_data_dir=""
+  local effective_data_dir
+  local state_path
+  local state_values
+  local state_version
+  local state_commit
+
+  migration_validate_git_tree "${current_root}" || {
+    migration_error "Git deployment hiện tại không sạch hoặc không hợp lệ"
+    return 1
+  }
+  migration_validate_git_tree "${staged_root}" || {
+    migration_error "Git source staging không sạch hoặc không hợp lệ"
+    return 1
+  }
+  current_version="$(migration_project_version "${current_root}")" || {
+    migration_error "Không đọc được phiên bản deployment hiện tại"
+    return 1
+  }
+  target_version="$(migration_project_version "${staged_root}")" || {
+    migration_error "Không đọc được phiên bản source staging"
+    return 1
+  }
+  [[ "${target_version}" == "${expected_target_version}" ]] || {
+    migration_error "Source staging có phiên bản ${target_version}, installer yêu cầu ${expected_target_version}"
+    return 1
+  }
+  [[ "${current_version}" != "${target_version}" ]] || {
+    migration_error "Deployment đã ở phiên bản ${target_version}; không có nâng cấp cần thực hiện"
+    return 1
+  }
+  migration_version_is_compatible "${current_version}" "${compatible_versions}" || {
+    migration_error "Không hỗ trợ nâng cấp ${current_version} -> ${target_version}"
+    return 1
+  }
+
+  if migration_path_exists "${current_root}/.env.native"; then
+    [[ -f "${current_root}/.env.native" \
+      && ! -L "${current_root}/.env.native" ]] || {
+      migration_error ".env.native phải là regular file, không phải symlink"
+      return 1
+    }
+    configured_data_dir="$(
+      migration_read_configured_data_root "${current_root}/.env.native"
+    )" || {
+      migration_error "Không thể đọc DUB_NATIVE_ROOT an toàn từ .env.native"
+      return 1
+    }
+  fi
+  if [[ -n "${configured_data_dir}" ]]; then
+    if [[ "${data_dir_explicit}" == true \
+      && "${requested_data_dir}" != "${configured_data_dir}" ]]; then
+      migration_error "--data-dir không khớp DUB_NATIVE_ROOT hiện có"
+      return 1
+    fi
+    effective_data_dir="${configured_data_dir}"
+  else
+    effective_data_dir="${requested_data_dir}"
+  fi
+  state_path="${effective_data_dir}/install-state.json"
+  [[ -f "${state_path}" && ! -L "${state_path}" ]] || {
+    migration_error "Thiếu install-state.json hợp lệ tại ${state_path}"
+    return 1
+  }
+  state_values="$(python3 - "${state_path}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+with Path(sys.argv[1]).open(encoding="utf-8") as handle:
+    document = json.load(handle)
+version = document.get("installer_version")
+commit = document.get("commit")
+if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit("install-state installer_version không hợp lệ")
+if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+    raise SystemExit("install-state commit không hợp lệ")
+print(version)
+print(commit)
+PY
+  )" || {
+    migration_error "Không đọc được install-state.json"
+    return 1
+  }
+  state_version="$(printf '%s\n' "${state_values}" | sed -n '1p')"
+  state_commit="$(printf '%s\n' "${state_values}" | sed -n '2p')"
+  current_commit="$(git -C "${current_root}" rev-parse HEAD)" || return 1
+  [[ "${state_version}" == "${current_version}" \
+    && "${state_commit}" == "${current_commit}" ]] || {
+    migration_error "install-state.json không khớp source Git hiện tại"
+    return 1
+  }
+
+  migrate_legacy_install \
+    "${current_root}" "${staged_root}" "${requested_data_dir}" \
+    "${data_dir_explicit}" git
+}
+
 migration_restart_stack() {
   local project_root="$1"
   local stack_mode="$2"
@@ -517,6 +721,7 @@ migrate_legacy_install() {
   local staged_root="${2%/}"
   local requested_data_dir="${3:-${legacy_root}/var}"
   local data_dir_explicit="${4:-false}"
+  local source_mode="${5:-legacy}"
   local legacy_parent
   local staged_parent
   local configured_data_dir=""
@@ -526,6 +731,7 @@ migrate_legacy_install() {
   local timestamp
   local legacy_fingerprint
   local staged_fingerprint
+  local legacy_tree_role
   local stack_mode="none"
   local stop_output=""
   local native_status_output=""
@@ -578,12 +784,29 @@ migrate_legacy_install() {
     migration_error "Source staging phải ở cùng filesystem cha để đổi tên atomic"
     return 1
   }
-  if migration_path_exists "${legacy_root}/.git" \
-    || git -C "${legacy_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    migration_error "Deployment đích đã là Git worktree; hãy dùng luồng update thông thường"
-    return 1
-  fi
-  migration_validate_project_tree "${legacy_root}" legacy || {
+  case "${source_mode}" in
+    legacy)
+      if migration_path_exists "${legacy_root}/.git" \
+        || git -C "${legacy_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        migration_error "Deployment đích đã là Git worktree; hãy dùng --upgrade-existing"
+        return 1
+      fi
+      legacy_tree_role=legacy
+      ;;
+    git)
+      if ! migration_validate_git_tree "${legacy_root}" \
+        || ! migration_validate_git_tree "${staged_root}"; then
+        migration_error "Source Git không sạch hoặc không hợp lệ"
+        return 1
+      fi
+      legacy_tree_role=staged
+      ;;
+    *)
+      migration_error "Chế độ source migration không hợp lệ: ${source_mode}"
+      return 1
+      ;;
+  esac
+  migration_validate_project_tree "${legacy_root}" "${legacy_tree_role}" || {
     migration_error "Không nhận diện được deployment cũ"
     return 1
   }
@@ -673,14 +896,29 @@ migrate_legacy_install() {
     }
   fi
 
-  legacy_fingerprint="$(migration_runtime_fingerprint "${legacy_root}")" || {
-    migration_error "Không tạo được fingerprint source cũ"
-    return 1
-  }
-  staged_fingerprint="$(migration_runtime_fingerprint "${staged_root}")" || {
-    migration_error "Không tạo được fingerprint source mới"
-    return 1
-  }
+  if [[ "${source_mode}" == git ]]; then
+    legacy_fingerprint="$(
+      migration_runtime_compatibility_fingerprint "${legacy_root}"
+    )" || {
+      migration_error "Không tạo được compatibility fingerprint source cũ"
+      return 1
+    }
+    staged_fingerprint="$(
+      migration_runtime_compatibility_fingerprint "${staged_root}"
+    )" || {
+      migration_error "Không tạo được compatibility fingerprint source mới"
+      return 1
+    }
+  else
+    legacy_fingerprint="$(migration_runtime_fingerprint "${legacy_root}")" || {
+      migration_error "Không tạo được fingerprint source cũ"
+      return 1
+    }
+    staged_fingerprint="$(migration_runtime_fingerprint "${staged_root}")" || {
+      migration_error "Không tạo được fingerprint source mới"
+      return 1
+    }
+  fi
   # The installer intentionally refuses to rebuild a persistent runtime after
   # the source switch because rollback cannot undo mutations inside that venv.
   # Reject an incompatible runtime here, before the journal or stack changes.

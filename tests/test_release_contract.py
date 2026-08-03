@@ -64,11 +64,14 @@ def test_product_versions_are_aligned() -> None:
 def test_installer_defaults_to_safe_release_and_explicit_legacy_migration() -> None:
     assert _installer_assignment("MODEL_PROFILE") == "auto"
     assert _installer_assignment("MIGRATE_EXISTING") == "false"
+    assert _installer_assignment("UPGRADE_EXISTING") == "false"
+    assert _installer_assignment("COMPATIBLE_UPGRADE_FROM") == "0.2.0"
     assert _installer_assignment("ACCEPTANCE_MODE") == "basic"
     assert _installer_assignment("START_STACK") == "true"
 
     installer = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
     assert "exec {prompt_fd}<>/dev/tty" in installer
+    assert "--upgrade-existing" in installer
     assert "main() {" in installer
     assert installer.rstrip().endswith('main "$@"')
 

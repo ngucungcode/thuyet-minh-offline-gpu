@@ -38,10 +38,11 @@ jobs:
       - name: Check streamed installer entrypoint
         run: bash -s -- --help < install.sh >/dev/null
 
-      - name: Test data root permissions and legacy installer migration
+      - name: Test data root permissions and installer migration paths
         run: |
           sudo bash tests/test-data-root-permissions.sh
           bash tests/test-installer-migration.sh
+          bash tests/test-installer-git-upgrade.sh
 
       - name: Run test suite
         run: python -m pytest -q

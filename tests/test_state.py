@@ -11,6 +11,7 @@ from dub_server.state import (
     InvalidTransition,
     JobStage,
     JobStatus,
+    StateError,
     StateStore,
 )
 
@@ -247,6 +248,72 @@ def test_interrupted_active_slot_migration_is_backfilled(tmp_path: Path) -> None
     assert reopened.get_job(job.id).active_slot is True
     with pytest.raises(ActiveJobExists):
         reopened.create_job("release-2", {"rights_confirmed": True})
+
+
+def test_schema_six_makes_legacy_track_layout_failure_retryable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    store = StateStore(database)
+    job = store.create_job("release-1", {"rights_confirmed": True})
+    store.update_status(
+        job.id,
+        JobStatus.MUXING,
+        stage=JobStage.EXPORT,
+        force=True,
+    )
+    store.update_status(
+        job.id,
+        JobStatus.FAILED,
+        error_code="output_track_layout_invalid",
+        error_message="Video có track timecode phụ",
+        retryable=False,
+    )
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE schema_metadata SET value = '5' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = StateStore(database)
+    migrated = reopened.get_job(job.id)
+
+    assert migrated.retryable is True
+    assert migrated.revision == 3
+    assert reopened.list_events(job.id)[-1].event_type == "job.error_reclassified"
+    resumed = reopened.resume(job.id)
+    assert resumed.status is JobStatus.MUXING
+    assert resumed.error_code is None
+
+
+def test_future_schema_is_rejected_without_downgrading_metadata(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    StateStore(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE schema_metadata SET value = '7' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(StateError, match="schema mới hơn"):
+        StateStore(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'schema_version'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == "7"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

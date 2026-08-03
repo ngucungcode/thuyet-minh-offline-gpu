@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 main() {
-INSTALLER_VERSION="0.2.0"
+INSTALLER_VERSION="0.2.1"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
 SOURCE_REF="v${INSTALLER_VERSION}"
@@ -17,6 +17,8 @@ ACCEPTANCE_MODE="basic"
 ASSUME_YES=false
 DRY_RUN=false
 MIGRATE_EXISTING=false
+UPGRADE_EXISTING=false
+COMPATIBLE_UPGRADE_FROM="0.2.0"
 MIGRATED_RUNTIME_REUSABLE=false
 MIGRATION_BACKUP_PATH=""
 MIGRATION_ACTIVE=false
@@ -62,6 +64,32 @@ wait_for_installer_stack() {
   return 1
 }
 
+installer_exit_handler() {
+  local installer_status=$?
+  trap - EXIT INT TERM HUP
+  if [[ "${MIGRATION_ACTIVE}" == true ]]; then
+    MIGRATION_ACTIVE=false
+    MIGRATION_SIGNAL_ARMED=false
+    log "Installer lỗi sau khi đổi source; đang rollback source, dữ liệu và stack cũ"
+    if ! migration_rollback_switch \
+      "${INSTALL_DIR}" "${MIGRATION_BACKUP_PATH}" \
+      "${MIGRATION_FAILED_SOURCE_PATH}" "${MIGRATION_OLD_STACK_MODE}" \
+      true "${MIGRATION_MOVED_ITEMS[@]}"; then
+      installer_status=1
+    else
+      migration_clear_journal || installer_status=1
+    fi
+  fi
+  exit "${installer_status}"
+}
+
+arm_source_transaction() {
+  MIGRATION_ACTIVE=true
+  trap installer_exit_handler EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+}
+
 usage() {
   cat <<'EOF'
 Cài Thuyết Minh Offline GPU trên Ubuntu 22.04 + NVIDIA GPU.
@@ -80,6 +108,7 @@ Tùy chọn:
   --autostart MODE           auto, systemd, provider hoặc none
   --acceptance MODE          basic, full hoặc none; mặc định basic
   --migrate-existing         Nâng cấp deployment cũ hợp lệ; giữ dữ liệu và tạo backup
+  --upgrade-existing         Nâng cấp Git deployment từ release tương thích; có rollback
   --yes                      Xác nhận tải model và chạy không tương tác
   --dry-run                  Chỉ kiểm tra và in kế hoạch
   --help                     Hiển thị trợ giúp
@@ -134,6 +163,10 @@ while (($#)); do
       ;;
     --migrate-existing)
       MIGRATE_EXISTING=true
+      shift
+      ;;
+    --upgrade-existing)
+      UPGRADE_EXISTING=true
       shift
       ;;
     --yes)
@@ -193,6 +226,12 @@ if [[ -n "${SCRIPT_ROOT}" ]]; then
 fi
 if [[ "${MIGRATE_EXISTING}" == true && -n "${SCRIPT_ROOT}" ]]; then
   die "--migrate-existing chỉ dùng với installer chạy qua curl; không chạy từ source đang hoạt động"
+fi
+if [[ "${UPGRADE_EXISTING}" == true && -n "${SCRIPT_ROOT}" ]]; then
+  die "--upgrade-existing chỉ dùng với installer chạy qua curl; không chạy từ source đang hoạt động"
+fi
+if [[ "${MIGRATE_EXISTING}" == true && "${UPGRADE_EXISTING}" == true ]]; then
+  die "Không dùng đồng thời --migrate-existing và --upgrade-existing"
 fi
 if [[ -z "${DATA_DIR}" ]]; then
   DATA_DIR="${INSTALL_DIR}/var"
@@ -344,9 +383,47 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
       || die "Repository có thay đổi cục bộ; không tự ghi đè"
     git -C "${INSTALL_DIR}" fetch --depth 1 origin "${SOURCE_REF}"
     target_commit="$(git -C "${INSTALL_DIR}" rev-parse FETCH_HEAD)"
-    [[ "${current_commit}" == "${target_commit}" ]] \
-      || die "Không tự nâng cấp in-place giữa hai release; source và runtime hiện tại chưa bị thay đổi"
-    git -C "${INSTALL_DIR}" checkout --detach FETCH_HEAD
+    if [[ "${current_commit}" == "${target_commit}" ]]; then
+      git -C "${INSTALL_DIR}" checkout --detach FETCH_HEAD
+    else
+      [[ "${UPGRADE_EXISTING}" == true ]] \
+        || die "Không tự nâng cấp in-place giữa hai release; chạy lại với --upgrade-existing"
+      install_parent="$(dirname -- "${INSTALL_DIR}")"
+      install_name="$(basename -- "${INSTALL_DIR}")"
+      staging_dir="$(mktemp -d "${install_parent}/.${install_name}.upgrade.XXXXXXXX")"
+      chmod 0700 "${staging_dir}"
+      if ! fetch_ref_into "${staging_dir}"; then
+        rm -rf -- "${staging_dir}"
+        die "Không thể lấy source nâng cấp ${REPOSITORY_URL}@${SOURCE_REF}"
+      fi
+      upgrade_helper="${staging_dir}/installer/migrate-legacy.sh"
+      if [[ ! -f "${upgrade_helper}" || -L "${upgrade_helper}" ]] \
+        || ! git -C "${staging_dir}" diff --quiet \
+        || [[ -n "$(git -C "${staging_dir}" status --porcelain)" ]] \
+        || ! git -C "${staging_dir}" fsck --no-dangling >/dev/null \
+        || ! git -C "${staging_dir}" ls-files --error-unmatch \
+          installer/migrate-legacy.sh >/dev/null; then
+        rm -rf -- "${staging_dir}"
+        die "Source nâng cấp không có transaction helper hợp lệ"
+      fi
+      # shellcheck disable=SC1090
+      source "${upgrade_helper}"
+      if ! migrate_git_release_upgrade \
+        "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" \
+        "${DATA_DIR_EXPLICIT}" "${INSTALLER_VERSION}" \
+        "${COMPATIBLE_UPGRADE_FROM}"; then
+        if [[ -d "${staging_dir}" ]]; then
+          rm -rf -- "${staging_dir}"
+        fi
+        die "Nâng cấp Git deployment thất bại; source hiện tại chưa bị thay đổi hoặc đã được phục hồi"
+      fi
+      DATA_DIR="${MIGRATION_EFFECTIVE_DATA_DIR}"
+      arm_source_transaction
+      if [[ "${MIGRATED_RUNTIME_REUSABLE}" != true ]]; then
+        die "Runtime release cũ không tương thích source mới"
+      fi
+      log "Đã chuyển source atomically; backup release cũ: ${MIGRATION_BACKUP_PATH}"
+    fi
   elif [[ -n "$(find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
     if [[ "${MIGRATE_EXISTING}" != true ]]; then
       die "Thư mục cài là deployment cũ không có Git. Chạy lại với --migrate-existing để giữ .env.native, model và dữ liệu trong một bản nâng cấp có backup"
@@ -380,28 +457,7 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
       die "Nâng cấp deployment cũ thất bại; xem thông báo rollback ở trên"
     fi
     DATA_DIR="${MIGRATION_EFFECTIVE_DATA_DIR}"
-    MIGRATION_ACTIVE=true
-    installer_exit_handler() {
-      local installer_status=$?
-      trap - EXIT INT TERM HUP
-      if [[ "${MIGRATION_ACTIVE}" == true ]]; then
-        MIGRATION_ACTIVE=false
-        MIGRATION_SIGNAL_ARMED=false
-        log "Installer lỗi sau khi đổi source; đang rollback source, dữ liệu và stack cũ"
-        if ! migration_rollback_switch \
-          "${INSTALL_DIR}" "${MIGRATION_BACKUP_PATH}" \
-          "${MIGRATION_FAILED_SOURCE_PATH}" "${MIGRATION_OLD_STACK_MODE}" \
-          true "${MIGRATION_MOVED_ITEMS[@]}"; then
-          installer_status=1
-        else
-          migration_clear_journal || installer_status=1
-        fi
-      fi
-      exit "${installer_status}"
-    }
-    trap installer_exit_handler EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM HUP
+    arm_source_transaction
     if [[ "${MIGRATED_RUNTIME_REUSABLE}" != true ]]; then
       die "Runtime legacy khác source mới; đã từ chối bootstrap trong transaction migration"
     fi
