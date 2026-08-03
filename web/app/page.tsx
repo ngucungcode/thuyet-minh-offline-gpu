@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type JsonObject = Record<string, unknown>;
 
@@ -103,6 +103,7 @@ type Job = {
     search_query?: string;
     source_language?: string;
     subtitle_mode?: string;
+    timing_profile?: "natural" | "strict";
     models?: Record<string, string | null>;
     voice?: { voice_id?: string | null; reference_path?: string | null } | null;
   };
@@ -163,6 +164,38 @@ type ProwlarrIndexer = {
   supports_rss?: boolean;
   disabled_until?: string | null;
   most_recent_failure?: string | null;
+};
+
+type UploadSession = {
+  id: string;
+  status: string;
+  media_filename: string;
+  subtitle_filename?: string | null;
+  media_size_bytes?: number | null;
+  subtitle_size_bytes?: number | null;
+  media_sha256?: string | null;
+  subtitle_sha256?: string | null;
+  job_id?: string | null;
+};
+
+type UploadPhase = "preparing" | "media" | "subtitle" | "finalizing" | "cancelling";
+
+type UploadProgress = {
+  phase: UploadPhase;
+  filename?: string;
+  fileLoaded: number;
+  fileTotal: number;
+  overallLoaded: number;
+  overallTotal: number;
+  speedBytesPerSecond: number;
+};
+
+const uploadPhaseLabels: Record<UploadPhase, string> = {
+  preparing: "Đang tạo phiên tải",
+  media: "Đang tải video",
+  subtitle: "Đang tải phụ đề",
+  finalizing: "Đang kiểm tra và tạo job",
+  cancelling: "Đang hủy và dọn dữ liệu tạm",
 };
 
 const stageOrder = [
@@ -286,6 +319,13 @@ class ApiRequestError extends Error {
   }
 }
 
+class UploadCancelledError extends Error {
+  constructor() {
+    super("Đã hủy tải tệp.");
+    this.name = "UploadCancelledError";
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit, admin = false): Promise<T> {
   const response = await fetch(`/v1${path}`, {
     cache: "no-store",
@@ -309,6 +349,99 @@ async function api<T>(path: string, init?: RequestInit, admin = false): Promise<
     );
   }
   return payload as T;
+}
+
+function fileExtension(filename: string) {
+  const separator = filename.lastIndexOf(".");
+  return separator < 0 ? "" : filename.slice(separator).toLowerCase();
+}
+
+function uploadRequestError(xhr: XMLHttpRequest) {
+  let message: string | undefined;
+  let code: string | undefined;
+  let retryable: boolean | undefined;
+  try {
+    const payload = JSON.parse(xhr.responseText) as {
+      detail?: string | { code?: string; message?: string; retryable?: boolean };
+      message?: string;
+    };
+    if (typeof payload.detail === "string") {
+      message = payload.detail;
+    } else if (payload.detail) {
+      message = payload.detail.message;
+      code = payload.detail.code;
+      retryable = payload.detail.retryable;
+    }
+    message ??= payload.message;
+  } catch {
+    // The proxy may return an empty or non-JSON error body.
+  }
+  return new ApiRequestError(
+    message || `Không thể tải tệp lên (${xhr.status || "mất kết nối"}).`,
+    code,
+    retryable,
+  );
+}
+
+function uploadBinary(
+  path: string,
+  file: File,
+  phase: "media" | "subtitle",
+  baseLoaded: number,
+  overallTotal: number,
+  requestRef: { current: XMLHttpRequest | null },
+  onProgress: (progress: UploadProgress) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const startedAt = performance.now();
+    requestRef.current = xhr;
+    xhr.open("PUT", path);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (event) => {
+      const loaded = Math.min(event.loaded, file.size);
+      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001);
+      onProgress({
+        phase,
+        filename: file.name,
+        fileLoaded: loaded,
+        fileTotal: file.size,
+        overallLoaded: baseLoaded + loaded,
+        overallTotal,
+        speedBytesPerSecond: loaded / elapsedSeconds,
+      });
+    };
+    xhr.onload = () => {
+      requestRef.current = null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress({
+          phase,
+          filename: file.name,
+          fileLoaded: file.size,
+          fileTotal: file.size,
+          overallLoaded: baseLoaded + file.size,
+          overallTotal,
+          speedBytesPerSecond: file.size / Math.max((performance.now() - startedAt) / 1000, 0.001),
+        });
+        resolve();
+      } else {
+        reject(uploadRequestError(xhr));
+      }
+    };
+    xhr.onerror = () => {
+      requestRef.current = null;
+      reject(new ApiRequestError(
+        "Mất kết nối trong khi tải tệp lên máy xử lý.",
+        "upload_network_error",
+        true,
+      ));
+    };
+    xhr.onabort = () => {
+      requestRef.current = null;
+      reject(new UploadCancelledError());
+    };
+    xhr.send(file);
+  });
 }
 
 function finiteNumber(value: unknown): number | null {
@@ -570,9 +703,14 @@ export default function Home() {
   const [results, setResults] = useState<Release[]>([]);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   const [releaseId, setReleaseId] = useState("");
-  const [sourceMode, setSourceMode] = useState<"search" | "release">("search");
+  const [sourceMode, setSourceMode] = useState<"search" | "release" | "upload">("search");
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [uploadSessionId, setUploadSessionId] = useState<string | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState("auto");
   const [subtitleMode, setSubtitleMode] = useState("prefer");
+  const [timingProfile, setTimingProfile] = useState<"natural" | "strict">("natural");
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>({});
   const [voiceId, setVoiceId] = useState("");
   const [voiceReferencePath, setVoiceReferencePath] = useState("");
@@ -598,6 +736,16 @@ export default function Home() {
   const [openSubApiKey, setOpenSubApiKey] = useState("");
   const [openSubUsername, setOpenSubUsername] = useState("");
   const [openSubPassword, setOpenSubPassword] = useState("");
+  const uploadRequestRef = useRef<XMLHttpRequest | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const uploadSessionIdRef = useRef<string | null>(null);
+  const uploadCancelledRef = useRef(false);
+  const uploadFinalizingRef = useRef(false);
+  const uploadRequestFingerprintRef = useRef<string | null>(null);
+  const uploadedMediaFileRef = useRef<File | null>(null);
+  const uploadedSubtitleFileRef = useRef<File | null>(null);
+  const mediaInputRef = useRef<HTMLInputElement | null>(null);
+  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
 
   const refreshOverview = useCallback(async () => {
     const [healthResult, jobsResult] = await Promise.allSettled([
@@ -663,6 +811,7 @@ export default function Home() {
     () => jobs.find((job) => !nonActiveStatuses.has(job.status)),
     [jobs],
   );
+  const uploadConfigurationLocked = sourceMode === "upload" && Boolean(uploadSessionId);
   const selectedJob = useMemo(
     () =>
       jobs.find((job) => job.id === selectedJobId) ??
@@ -721,6 +870,106 @@ export default function Home() {
     return catalog.models.filter((model) => model.stage === stage && model.selectable !== false);
   }
 
+  function selectMediaFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setProblem(null);
+    setNotice(null);
+    if (!file) {
+      setMediaFile(null);
+      return;
+    }
+    if (![".mp4", ".mkv"].includes(fileExtension(file.name))) {
+      event.target.value = "";
+      setMediaFile(null);
+      setProblem("Video phải là tệp MP4 hoặc MKV.");
+      return;
+    }
+    if (file.size <= 0) {
+      event.target.value = "";
+      setMediaFile(null);
+      setProblem("Video đang rỗng hoặc trình duyệt không thể đọc tệp.");
+      return;
+    }
+    setMediaFile(file);
+  }
+
+  function selectSubtitleFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setProblem(null);
+    setNotice(null);
+    if (!file) {
+      setSubtitleFile(null);
+      return;
+    }
+    if (fileExtension(file.name) !== ".srt") {
+      event.target.value = "";
+      setSubtitleFile(null);
+      setProblem("Phụ đề thủ công phải là tệp SRT.");
+      return;
+    }
+    if (file.size <= 0) {
+      event.target.value = "";
+      setSubtitleFile(null);
+      setProblem("Tệp phụ đề đang rỗng.");
+      return;
+    }
+    setSubtitleFile(file);
+  }
+
+  async function cancelUpload() {
+    if (uploadFinalizingRef.current) {
+      setNotice("Đang tạo job từ file đã tải xong; hãy hủy job sau khi nó xuất hiện.");
+      return;
+    }
+    uploadCancelledRef.current = true;
+    if (!uploadSessionIdRef.current && uploadProgress?.phase === "preparing") {
+      setNotice(
+        "Đang chờ máy chủ cấp mã phiên; dữ liệu sẽ được xóa ngay khi nhận được mã.",
+      );
+    }
+    uploadAbortRef.current?.abort();
+    uploadRequestRef.current?.abort();
+    setUploadProgress((current) => ({
+      phase: "cancelling",
+      filename: current?.filename,
+      fileLoaded: current?.fileLoaded ?? 0,
+      fileTotal: current?.fileTotal ?? 0,
+      overallLoaded: current?.overallLoaded ?? 0,
+      overallTotal: current?.overallTotal ?? 0,
+      speedBytesPerSecond: 0,
+    }));
+  }
+
+  async function discardRetainedUpload() {
+    const sessionId = uploadSessionIdRef.current;
+    if (!sessionId || submitting) return;
+    setSubmitting(true);
+    setProblem(null);
+    setNotice(null);
+    try {
+      await api<void>(`/uploads/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+      uploadSessionIdRef.current = null;
+      uploadRequestFingerprintRef.current = null;
+      uploadedMediaFileRef.current = null;
+      uploadedSubtitleFileRef.current = null;
+      setUploadSessionId(null);
+      setNotice("Đã xóa phiên tạm; bạn có thể đổi cấu hình và tải lại.");
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.code === "upload_not_found") {
+        uploadSessionIdRef.current = null;
+        uploadRequestFingerprintRef.current = null;
+        uploadedMediaFileRef.current = null;
+        uploadedSubtitleFileRef.current = null;
+        setUploadSessionId(null);
+        setNotice("Phiên tạm đã được máy chủ tự dọn; bạn có thể đổi cấu hình.");
+      } else {
+        setProblem(messageOf(error, "Không thể xóa phiên tải tạm."));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function handleSearch(event: FormEvent) {
     event.preventDefault();
     if (!query.trim()) return;
@@ -750,8 +999,16 @@ export default function Home() {
     event.preventDefault();
     const effectiveReleaseId =
       sourceMode === "search" ? selectedRelease?.release_id : releaseId.trim();
-    if (!effectiveReleaseId) {
+    if (sourceMode !== "upload" && !effectiveReleaseId) {
       setProblem("Hãy chọn một kết quả hoặc nhập Release ID.");
+      return;
+    }
+    if (sourceMode === "upload" && !mediaFile) {
+      setProblem("Hãy chọn một video MP4 hoặc MKV từ thiết bị.");
+      return;
+    }
+    if (sourceMode === "upload" && subtitleFile && sourceLanguage === "auto") {
+      setProblem("Khi dùng SRT thủ công, hãy chọn ngôn ngữ nguồn cụ thể thay vì Tự động.");
       return;
     }
     if (!rightsConfirmed) {
@@ -766,35 +1023,226 @@ export default function Home() {
     setSubmitting(true);
     setProblem(null);
     setNotice(null);
+    uploadCancelledRef.current = false;
+    uploadFinalizingRef.current = false;
+    const uploadAbort = new AbortController();
+    uploadAbortRef.current = uploadAbort;
+    let createdUploadId: string | null = null;
+    const models = {
+      asr: selectedModels.asr || null,
+      translation: selectedModels.mt || null,
+      separation: selectedModels.separation || null,
+      tts: selectedModels.tts || null,
+    };
+    const voice = hasVoiceSelection
+      ? {
+          voice_id: voiceId.trim() || null,
+          reference_path: voiceReferencePath.trim() || null,
+        }
+      : null;
     try {
-      const job = await api<Job>("/jobs", {
-        method: "POST",
-        body: JSON.stringify({
-          release_id: effectiveReleaseId,
-          rights_confirmed: true,
-          source_language: sourceLanguage,
-          subtitle_mode: subtitleMode,
-          models: {
-            asr: selectedModels.asr || null,
-            translation: selectedModels.mt || null,
-            separation: selectedModels.separation || null,
-            tts: selectedModels.tts || null,
-          },
-          voice: hasVoiceSelection
-            ? {
-                voice_id: voiceId.trim() || null,
-                reference_path: voiceReferencePath.trim() || null,
-              }
-            : null,
-          voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
-        }),
-      });
+      let job: Job;
+      if (sourceMode === "upload" && mediaFile) {
+        const overallTotal = mediaFile.size + (subtitleFile?.size ?? 0);
+        const retainedUploadId = uploadSessionIdRef.current;
+        createdUploadId = retainedUploadId;
+        setUploadProgress({
+          phase: "preparing",
+          fileLoaded: 0,
+          fileTotal: mediaFile.size,
+          overallLoaded: 0,
+          overallTotal,
+          speedBytesPerSecond: 0,
+        });
+        const uploadRequest = {
+            media_filename: mediaFile.name,
+            ...(subtitleFile ? { subtitle_filename: subtitleFile.name } : {}),
+            rights_confirmed: true,
+            source_language: sourceLanguage,
+            timing_profile: timingProfile,
+            models,
+            voice,
+            voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
+        };
+        const uploadRequestFingerprint = JSON.stringify({
+          rights_confirmed: uploadRequest.rights_confirmed,
+          source_language: uploadRequest.source_language,
+          timing_profile: uploadRequest.timing_profile,
+          models: uploadRequest.models,
+          voice: uploadRequest.voice,
+          voice_rights_confirmed: uploadRequest.voice_rights_confirmed,
+          subtitle_declared: Boolean(uploadRequest.subtitle_filename),
+        });
+        let session: UploadSession | null = null;
+        if (retainedUploadId) {
+          if (
+            uploadRequestFingerprintRef.current &&
+            uploadRequestFingerprintRef.current !== uploadRequestFingerprint
+          ) {
+            throw new ApiRequestError(
+              "Cấu hình đã thay đổi so với phiên đang giữ. Hãy xóa phiên tạm trước khi tạo phiên mới.",
+              "upload_configuration_changed",
+              true,
+            );
+          }
+          try {
+            session = await api<UploadSession>(
+              `/uploads/${encodeURIComponent(retainedUploadId)}`,
+              { signal: uploadAbort.signal },
+            );
+          } catch (error) {
+            if (!(error instanceof ApiRequestError) || error.code !== "upload_not_found") {
+              throw error;
+            }
+            uploadSessionIdRef.current = null;
+            uploadRequestFingerprintRef.current = null;
+            uploadedMediaFileRef.current = null;
+            uploadedSubtitleFileRef.current = null;
+            setUploadSessionId(null);
+          }
+        }
+        if (session && (
+          session.media_filename !== mediaFile.name ||
+          Boolean(session.subtitle_filename) !== Boolean(subtitleFile)
+        )) {
+          throw new ApiRequestError(
+            "Tệp đã chọn không khớp phiên đang giữ. Hãy bấm Xóa phiên tạm trước khi đổi video hoặc trạng thái SRT.",
+            "upload_configuration_changed",
+            true,
+          );
+        }
+        if (!session) {
+          session = await api<UploadSession>("/uploads", {
+            method: "POST",
+            body: JSON.stringify(uploadRequest),
+          });
+          uploadRequestFingerprintRef.current = uploadRequestFingerprint;
+        }
+        createdUploadId = session.id;
+        uploadSessionIdRef.current = session.id;
+        setUploadSessionId(session.id);
+        // Session creation is intentionally not aborted: once the server has
+        // reserved durable storage we need its ID so cancellation can delete
+        // it instead of leaving an unknown orphan until TTL cleanup.
+        if (uploadCancelledRef.current) {
+          throw new UploadCancelledError();
+        }
+        const mediaReady = session.media_size_bytes === mediaFile.size &&
+          uploadedMediaFileRef.current === mediaFile;
+        const subtitleReady = !subtitleFile || (
+          session.subtitle_size_bytes === subtitleFile.size &&
+          uploadedSubtitleFileRef.current === subtitleFile
+        );
+        if (!mediaReady) {
+          await uploadBinary(
+            `/v1/uploads/${encodeURIComponent(session.id)}/media`,
+            mediaFile,
+            "media",
+            0,
+            overallTotal,
+            uploadRequestRef,
+            setUploadProgress,
+          );
+          uploadedMediaFileRef.current = mediaFile;
+        }
+        if (subtitleFile && !subtitleReady) {
+          await uploadBinary(
+            `/v1/uploads/${encodeURIComponent(session.id)}/subtitle`,
+            subtitleFile,
+            "subtitle",
+            mediaFile.size,
+            overallTotal,
+            uploadRequestRef,
+            setUploadProgress,
+          );
+          uploadedSubtitleFileRef.current = subtitleFile;
+        }
+        uploadFinalizingRef.current = true;
+        setUploadProgress({
+          phase: "finalizing",
+          fileLoaded: subtitleFile?.size ?? mediaFile.size,
+          fileTotal: subtitleFile?.size ?? mediaFile.size,
+          overallLoaded: overallTotal,
+          overallTotal,
+          speedBytesPerSecond: 0,
+        });
+        job = await api<Job>(`/uploads/${encodeURIComponent(session.id)}/finalize`, {
+          method: "POST",
+        });
+        uploadFinalizingRef.current = false;
+        uploadSessionIdRef.current = null;
+        uploadRequestFingerprintRef.current = null;
+        uploadedMediaFileRef.current = null;
+        uploadedSubtitleFileRef.current = null;
+        setUploadSessionId(null);
+      } else {
+        job = await api<Job>("/jobs", {
+          method: "POST",
+          signal: uploadAbort.signal,
+          body: JSON.stringify({
+            release_id: effectiveReleaseId,
+            rights_confirmed: true,
+            source_language: sourceLanguage,
+            subtitle_mode: subtitleMode,
+            timing_profile: timingProfile,
+            models,
+            voice,
+            voice_rights_confirmed: hasVoiceSelection && voiceRightsConfirmed,
+          }),
+        });
+      }
       setSelectedJobId(job.id);
-      setNotice(`Đã tạo job ${shortId(job.id)}. Tiến trình sẽ tự cập nhật.`);
+      setNotice(
+        sourceMode === "upload"
+          ? `Đã tải tệp và tạo job ${shortId(job.id)}. Tiến trình sẽ tự cập nhật.`
+          : `Đã tạo job ${shortId(job.id)}. Tiến trình sẽ tự cập nhật.`,
+      );
       await refreshOverview();
     } catch (error) {
-      setProblem(messageOf(error, "Không thể tạo job."));
+      const cancelled = uploadCancelledRef.current || error instanceof UploadCancelledError ||
+        (error instanceof DOMException && error.name === "AbortError");
+      const shouldDeleteUpload = cancelled;
+      let uploadCleanupError: unknown = null;
+      if (createdUploadId && uploadSessionIdRef.current && shouldDeleteUpload) {
+        try {
+          await api<void>(`/uploads/${encodeURIComponent(createdUploadId)}`, { method: "DELETE" });
+        } catch (cleanupError) {
+          if (!(cleanupError instanceof ApiRequestError) || cleanupError.code !== "upload_not_found") {
+            uploadCleanupError = cleanupError;
+          }
+        }
+        if (uploadCleanupError === null) {
+          uploadSessionIdRef.current = null;
+          uploadRequestFingerprintRef.current = null;
+          uploadedMediaFileRef.current = null;
+          uploadedSubtitleFileRef.current = null;
+          setUploadSessionId(null);
+        }
+      }
+      if (cancelled) {
+        if (uploadCleanupError === null && createdUploadId) {
+          setNotice("Đã hủy tải tệp và xóa dữ liệu tạm trên máy chủ.");
+        } else if (uploadCleanupError === null) {
+          setProblem(
+            "Đã yêu cầu hủy trước khi nhận được mã phiên. Nếu máy chủ đã nhận yêu cầu nhưng phản hồi bị mất, session chưa finalize sẽ tự dọn sau 7 ngày.",
+          );
+        } else {
+          const retainedId = uploadSessionIdRef.current;
+          setProblem(
+            `Đã dừng gửi file nhưng chưa thể xóa dữ liệu tạm${retainedId ? ` của phiên ${shortId(retainedId)}` : ""}. Hãy thử xóa phiên lại.`,
+          );
+        }
+      } else {
+        const retained = sourceMode === "upload" && uploadSessionIdRef.current
+          ? ` Phiên ${shortId(uploadSessionIdRef.current)} được giữ lại; bấm Bắt đầu để thử lại mà không gửi lại file đã hoàn tất.`
+          : "";
+        setProblem(`${messageOf(error, sourceMode === "upload" ? "Không thể tải tệp và tạo job." : "Không thể tạo job.")}${retained}`);
+      }
     } finally {
+      uploadFinalizingRef.current = false;
+      uploadAbortRef.current = null;
+      uploadRequestRef.current = null;
+      setUploadProgress(null);
       setSubmitting(false);
     }
   }
@@ -1018,6 +1466,7 @@ export default function Home() {
               role="tab"
               aria-selected={sourceMode === "search"}
               className={sourceMode === "search" ? "active" : ""}
+              disabled={submitting || uploadConfigurationLocked}
               onClick={() => setSourceMode("search")}
             >
               Tìm qua Prowlarr
@@ -1027,9 +1476,20 @@ export default function Home() {
               role="tab"
               aria-selected={sourceMode === "release"}
               className={sourceMode === "release" ? "active" : ""}
+              disabled={submitting || uploadConfigurationLocked}
               onClick={() => setSourceMode("release")}
             >
               Nhập Release ID
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={sourceMode === "upload"}
+              className={sourceMode === "upload" ? "active" : ""}
+              disabled={submitting || uploadConfigurationLocked}
+              onClick={() => setSourceMode("upload")}
+            >
+              Tải tệp lên
             </button>
           </div>
 
@@ -1086,7 +1546,7 @@ export default function Home() {
                 </div>
               )}
             </>
-          ) : (
+          ) : sourceMode === "release" ? (
             <label className="field release-input">
               <span>Release ID từ kết quả tìm kiếm trước đó</span>
               <input
@@ -1097,6 +1557,73 @@ export default function Home() {
               />
               <small>Release ID phải tồn tại trong bộ nhớ nguồn của API.</small>
             </label>
+          ) : (
+            <div className="upload-source" aria-label="Tải video và phụ đề thủ công">
+              <div className="upload-file-grid">
+                <label className={`file-picker ${mediaFile ? "selected" : ""}`}>
+                  <input
+                    ref={mediaInputRef}
+                    type="file"
+                    accept=".mp4,.mkv,video/mp4,video/x-matroska"
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={selectMediaFile}
+                  />
+                  <span className="file-picker-kicker">VIDEO BẮT BUỘC</span>
+                  <strong>{mediaFile ? mediaFile.name : "Chọn MP4 hoặc MKV"}</strong>
+                  <small>{mediaFile ? formatBytes(mediaFile.size) : "Tệp được truyền thẳng tới máy GPU"}</small>
+                  <span className="file-picker-action">{mediaFile ? "Đổi video" : "Duyệt tệp"}</span>
+                </label>
+                <label className={`file-picker ${subtitleFile ? "selected" : ""}`}>
+                  <input
+                    ref={subtitleInputRef}
+                    type="file"
+                    accept=".srt,application/x-subrip,text/plain"
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={selectSubtitleFile}
+                  />
+                  <span className="file-picker-kicker">PHỤ ĐỀ TÙY CHỌN</span>
+                  <strong>{subtitleFile ? subtitleFile.name : "Chọn SRT thủ công"}</strong>
+                  <small>{subtitleFile ? formatBytes(subtitleFile.size) : "Để trống nếu muốn nhận dạng bằng ASR"}</small>
+                  <span className="file-picker-action">{subtitleFile ? "Đổi phụ đề" : "Duyệt tệp"}</span>
+                </label>
+              </div>
+              <p className="helper-copy">
+                MP4/MKV phải có luồng hình đầu tiên là H.264/AVC; server sẽ từ chối
+                HEVC, VP8, FFV1 hoặc ảnh bìa trước khi tạo job.
+              </p>
+              <div className="upload-file-summary">
+                <span>
+                  {mediaFile
+                    ? `${mediaFile.name} · ${formatBytes(mediaFile.size)}`
+                    : "Chưa chọn video"}
+                </span>
+                {subtitleFile && (
+                  <button
+                    type="button"
+                    disabled={submitting || uploadConfigurationLocked}
+                    onClick={() => {
+                      setSubtitleFile(null);
+                      if (subtitleInputRef.current) subtitleInputRef.current.value = "";
+                    }}
+                  >
+                    Bỏ SRT
+                  </button>
+                )}
+              </div>
+              <p className="upload-helper">
+                Video giữ nguyên trên máy chủ này. Có SRT thì cần chọn đúng ngôn ngữ nguồn; không có SRT, hệ thống sẽ dùng ASR.
+              </p>
+              {uploadSessionId && !uploadProgress && (
+                <div className="upload-file-summary">
+                  <span>
+                    Phiên {shortId(uploadSessionId)} đang được giữ; file đã gửi xong sẽ được bỏ qua. Cấu hình bị khóa theo phiên này.
+                  </span>
+                  <button type="button" disabled={submitting} onClick={() => void discardRetainedUpload()}>
+                    Xóa phiên tạm
+                  </button>
+                </div>
+              )}
+            </div>
           )}
 
           <div className="divider" />
@@ -1112,7 +1639,11 @@ export default function Home() {
             <div className="settings-grid">
               <label className="field">
                 <span>Ngôn ngữ nguồn</span>
-                <select value={sourceLanguage} onChange={(event) => setSourceLanguage(event.target.value)}>
+                <select
+                  value={sourceLanguage}
+                  disabled={submitting || uploadConfigurationLocked}
+                  onChange={(event) => setSourceLanguage(event.target.value)}
+                >
                   {languageOptions.map(([value, label]) => (
                     <option key={value} value={value}>{label}</option>
                   ))}
@@ -1120,13 +1651,50 @@ export default function Home() {
               </label>
               <label className="field">
                 <span>Nguồn lời thoại</span>
-                <select value={subtitleMode} onChange={(event) => setSubtitleMode(event.target.value)}>
-                  <option value="prefer">Ưu tiên phụ đề, fallback ASR</option>
-                  <option value="asr">Luôn nhận dạng bằng ASR</option>
-                  <option value="manual">Chọn phụ đề thủ công</option>
-                </select>
+                {sourceMode === "upload" ? (
+                  <span className="static-field">
+                    {subtitleFile ? "SRT thủ công đã chọn" : "Nhận dạng lời nói bằng ASR"}
+                  </span>
+                ) : (
+                  <select value={subtitleMode} onChange={(event) => setSubtitleMode(event.target.value)}>
+                    <option value="prefer">Ưu tiên phụ đề, fallback ASR</option>
+                    <option value="asr">Luôn nhận dạng bằng ASR</option>
+                    <option value="manual">Chọn phụ đề thủ công</option>
+                  </select>
+                )}
               </label>
             </div>
+
+            <fieldset className="timing-profile" disabled={submitting || uploadConfigurationLocked}>
+              <legend>Nhịp lời thuyết minh</legend>
+              <label className={timingProfile === "natural" ? "selected" : ""}>
+                <input
+                  type="radio"
+                  name="timing-profile"
+                  value="natural"
+                  checked={timingProfile === "natural"}
+                  onChange={() => setTimingProfile("natural")}
+                />
+                <span>
+                  <strong>Tự nhiên</strong>
+                  <small>Ưu tiên tốc độ nói ổn định, mượn khoảng lặng và cho phép lệch nhẹ để câu dễ nghe.</small>
+                </span>
+                <em>Mặc định</em>
+              </label>
+              <label className={timingProfile === "strict" ? "selected" : ""}>
+                <input
+                  type="radio"
+                  name="timing-profile"
+                  value="strict"
+                  checked={timingProfile === "strict"}
+                  onChange={() => setTimingProfile("strict")}
+                />
+                <span>
+                  <strong>Khớp chặt</strong>
+                  <small>Bám sát từng mốc phụ đề; tốc độ giữa các câu có thể thay đổi rõ hơn.</small>
+                </span>
+              </label>
+            </fieldset>
 
             <details className="advanced-config">
               <summary>Model và giọng nói nâng cao</summary>
@@ -1136,6 +1704,7 @@ export default function Home() {
                     <span>{label}</span>
                     <select
                       value={selectedModels[stage] ?? ""}
+                      disabled={submitting || uploadConfigurationLocked}
                       onChange={(event) =>
                         setSelectedModels((current) => ({ ...current, [stage]: event.target.value }))
                       }
@@ -1153,12 +1722,18 @@ export default function Home() {
               <div className="voice-grid">
                 <label className="field">
                   <span>Voice ID (tùy chọn)</span>
-                  <input value={voiceId} onChange={(event) => setVoiceId(event.target.value)} placeholder="Preset giọng cục bộ" />
+                  <input
+                    value={voiceId}
+                    disabled={submitting || uploadConfigurationLocked}
+                    onChange={(event) => setVoiceId(event.target.value)}
+                    placeholder="Preset giọng cục bộ"
+                  />
                 </label>
                 <label className="field">
                   <span>Đường dẫn giọng tham chiếu trên server</span>
                   <input
                     value={voiceReferencePath}
+                    disabled={submitting || uploadConfigurationLocked}
                     onChange={(event) => setVoiceReferencePath(event.target.value)}
                     placeholder="/workspace/voices/reference.wav"
                   />
@@ -1169,6 +1744,7 @@ export default function Home() {
                   <input
                     type="checkbox"
                     checked={voiceRightsConfirmed}
+                    disabled={submitting || uploadConfigurationLocked}
                     onChange={(event) => setVoiceRightsConfirmed(event.target.checked)}
                   />
                   <span>Tôi có quyền sử dụng giọng hoặc bản ghi tham chiếu này.</span>
@@ -1183,12 +1759,70 @@ export default function Home() {
               <input
                 type="checkbox"
                 checked={rightsConfirmed}
+                disabled={submitting || uploadConfigurationLocked}
                 onChange={(event) => setRightsConfirmed(event.target.checked)}
               />
               <span>
                 Tôi xác nhận mình sở hữu hoặc được phép tải, chỉnh sửa và xử lý nội dung này.
               </span>
             </label>
+
+            {sourceMode === "upload" && uploadProgress && (
+              <section className="upload-progress" aria-live="polite" aria-label="Tiến độ tải tệp">
+                <div className="upload-progress-heading">
+                  <span>{uploadPhaseLabels[uploadProgress.phase]}</span>
+                  <strong>
+                    {uploadProgress.overallTotal > 0
+                      ? `${clampPercent((uploadProgress.overallLoaded / uploadProgress.overallTotal) * 100).toFixed(1)}%`
+                      : "Đang chuẩn bị"}
+                  </strong>
+                </div>
+                <div
+                  className="upload-progress-track"
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={uploadProgress.overallTotal > 0
+                    ? Math.round(clampPercent((uploadProgress.overallLoaded / uploadProgress.overallTotal) * 100))
+                    : 0}
+                >
+                  <i style={{
+                    width: `${uploadProgress.overallTotal > 0
+                      ? clampPercent((uploadProgress.overallLoaded / uploadProgress.overallTotal) * 100)
+                      : 0}%`,
+                  }} />
+                </div>
+                <div className="upload-progress-metrics">
+                  <span>
+                    <small>Tệp hiện tại</small>
+                    <strong>{uploadProgress.filename ?? "Đang khởi tạo…"}</strong>
+                  </span>
+                  <span>
+                    <small>Đã gửi</small>
+                    <strong>{formatBytes(uploadProgress.overallLoaded)} / {formatBytes(uploadProgress.overallTotal)}</strong>
+                  </span>
+                  <span>
+                    <small>Tốc độ</small>
+                    <strong>{uploadProgress.speedBytesPerSecond > 0
+                      ? formatByteRate(uploadProgress.speedBytesPerSecond)
+                      : "Đang đo…"}</strong>
+                  </span>
+                </div>
+                {uploadSessionId && <code>Phiên {shortId(uploadSessionId)}</code>}
+                <button
+                  className="small-button danger upload-cancel"
+                  type="button"
+                  disabled={uploadProgress.phase === "cancelling" || uploadProgress.phase === "finalizing"}
+                  onClick={() => void cancelUpload()}
+                >
+                  {uploadProgress.phase === "cancelling"
+                    ? "Đang hủy…"
+                    : uploadProgress.phase === "finalizing"
+                      ? "Đang tạo job…"
+                      : "Hủy tải tệp"}
+                </button>
+              </section>
+            )}
 
             {(problem || notice) && (
               <div className={`notice ${problem ? "error" : "success"}`} role="status">
@@ -1198,9 +1832,24 @@ export default function Home() {
 
             <button
               className="primary start-button"
-              disabled={submitting || Boolean(activeJob) || !rightsConfirmed}
+              disabled={
+                submitting ||
+                Boolean(activeJob) ||
+                !rightsConfirmed ||
+                (sourceMode === "upload" && (!mediaFile || Boolean(subtitleFile && sourceLanguage === "auto")))
+              }
             >
-              <span>{submitting ? "Đang tạo job…" : activeJob ? "GPU đang bận" : "Bắt đầu thuyết minh"}</span>
+              <span>{
+                submitting
+                  ? sourceMode === "upload" && uploadProgress
+                    ? uploadPhaseLabels[uploadProgress.phase]
+                    : "Đang tạo job…"
+                  : activeJob
+                    ? "GPU đang bận"
+                    : sourceMode === "upload" && subtitleFile && sourceLanguage === "auto"
+                      ? "Hãy chọn ngôn ngữ của SRT"
+                      : "Bắt đầu thuyết minh"
+              }</span>
               <span aria-hidden="true">→</span>
             </button>
           </form>
@@ -1318,6 +1967,10 @@ export default function Home() {
             <div><span>Công đoạn</span><strong>{stageLabels[selectedJob.stage] ?? selectedJob.stage}</strong></div>
             <div><span>Cập nhật</span><strong>{formatDate(selectedJob.updated_at)}</strong></div>
             <div><span>Ngôn ngữ</span><strong>{selectedJob.spec?.source_language ?? "auto"}</strong></div>
+            <div>
+              <span>Nhịp lời</span>
+              <strong>{selectedJob.spec?.timing_profile === "natural" ? "Tự nhiên" : "Khớp chặt"}</strong>
+            </div>
           </div>
 
           {selectedProgress && (

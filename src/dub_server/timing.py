@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 import wave
@@ -11,7 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from .narration import Cancellation
 
@@ -19,22 +20,116 @@ from .narration import Cancellation
 TIMELINE_SAMPLE_RATE = 48_000
 TIMELINE_CHANNELS = 1
 TIMELINE_SAMPLE_WIDTH_BYTES = 2
+NATURAL_BORROW_WINDOW_US = 800_000
+NATURAL_MAX_TOTAL_SPEED = 1.20
+NATURAL_MAX_ADJACENT_SPEED_DELTA = 0.08
 
 
 class TimingError(RuntimeError):
     """A typed timing failure safe to persist in a job checkpoint."""
 
-    def __init__(self, code: str, message_vi: str, *, retryable: bool) -> None:
+    def __init__(
+        self,
+        code: str,
+        message_vi: str,
+        *,
+        retryable: bool,
+        details: dict[str, int | float | str] | None = None,
+    ) -> None:
         super().__init__(message_vi)
         self.code = code
         self.message_vi = message_vi
         self.retryable = retryable
+        self.details = dict(details or {})
+
+
+class TimingProfile(StrEnum):
+    """How narration timestamps trade exact subtitle sync for natural speech."""
+
+    NATURAL = "natural"
+    STRICT = "strict"
 
 
 class TimingQuality(StrEnum):
     NORMAL = "normal"
     WARNING = "warning"
     SEVERE = "severe"
+
+
+@dataclass(frozen=True, slots=True)
+class NarrationTimingInput:
+    """One translated block and the measured duration of its synthesized WAV."""
+
+    start_us: int
+    end_us: int
+    source_duration_us: int
+    native_speed: float = 1.0
+    source_frame_count: int | None = None
+    source_sample_rate: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.start_us < 0 or self.end_us <= self.start_us:
+            raise TimingError(
+                "timing_slot_invalid",
+                "Mốc thời gian của lời thuyết minh không hợp lệ",
+                retryable=False,
+            )
+        if self.source_duration_us <= 0 or not math.isfinite(self.native_speed):
+            raise TimingError(
+                "timing_speed_invalid",
+                "Thời lượng hoặc tốc độ lời thuyết minh không hợp lệ",
+                retryable=False,
+            )
+        if not 0.5 <= self.native_speed <= 2.0:
+            raise TimingError(
+                "timing_speed_invalid",
+                "Tốc độ TTS gốc không hợp lệ",
+                retryable=False,
+            )
+        if (self.source_frame_count is None) != (self.source_sample_rate is None):
+            raise TimingError(
+                "timing_audio_invalid",
+                "Metadata sample của âm thanh TTS không đầy đủ",
+                retryable=False,
+            )
+        if self.source_frame_count is not None and (
+            isinstance(self.source_frame_count, bool)
+            or not isinstance(self.source_frame_count, int)
+            or isinstance(self.source_sample_rate, bool)
+            or not isinstance(self.source_sample_rate, int)
+            or self.source_frame_count <= 0
+            or self.source_sample_rate <= 0
+        ):
+            raise TimingError(
+                "timing_audio_invalid",
+                "Metadata sample của âm thanh TTS không hợp lệ",
+                retryable=False,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedNarrationSlot:
+    """A non-overlapping slot selected before sample-exact FFmpeg fitting."""
+
+    start_us: int
+    end_us: int
+    planned_total_speed: float
+
+    def __post_init__(self) -> None:
+        if self.start_us < 0 or self.end_us <= self.start_us:
+            raise TimingError(
+                "timing_slot_invalid",
+                "Mốc thời gian đã lập kế hoạch không hợp lệ",
+                retryable=False,
+            )
+        if self.planned_total_speed <= 0 or not math.isfinite(
+            self.planned_total_speed
+        ):
+            raise TimingError(
+                "timing_speed_invalid",
+                "Tốc độ lời thuyết minh đã lập kế hoạch không hợp lệ",
+                retryable=False,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +211,372 @@ async def _default_process_factory(*command: str, **kwargs: object) -> ProcessHa
     return await asyncio.create_subprocess_exec(*command, **kwargs)
 
 
+@dataclass(frozen=True, slots=True)
+class _NaturalWindow:
+    ordinal: int
+    lower_us: int
+    upper_us: int
+    preferred_center_us: int
+    work_duration_us: int
+    source_frame_count: int | None
+    source_sample_rate: int | None
+    native_speed_ppm: int
+
+
+def plan_narration_slots(
+    blocks: Sequence[NarrationTimingInput],
+    *,
+    duration_us: int,
+    profile: TimingProfile | str = TimingProfile.NATURAL,
+    borrow_window_us: int = NATURAL_BORROW_WINDOW_US,
+    maximum_total_speed: float = NATURAL_MAX_TOTAL_SPEED,
+    maximum_adjacent_speed_delta: float = NATURAL_MAX_ADJACENT_SPEED_DELTA,
+) -> tuple[PlannedNarrationSlot, ...]:
+    """Plan deterministic narration slots before invoking FFmpeg.
+
+    ``strict`` preserves every translated timestamp.  ``natural`` synthesizes at
+    a stable native speed and places speech inside an expanded local window.
+    Local rolling chains are compressed only when their combined speech would
+    collide; neighbouring blocks are then raised (never slowed) just enough to
+    avoid an audible speed step.  No block may exceed ``maximum_total_speed``.
+    """
+
+    try:
+        selected_profile = (
+            profile if isinstance(profile, TimingProfile) else TimingProfile(profile)
+        )
+    except (TypeError, ValueError) as exc:
+        raise TimingError(
+            "timing_profile_invalid",
+            "Chế độ khớp thời lượng không hợp lệ",
+            retryable=False,
+        ) from exc
+    if (
+        isinstance(duration_us, bool)
+        or not isinstance(duration_us, int)
+        or duration_us <= 0
+    ):
+        raise TimingError(
+            "timeline_duration_invalid",
+            "Thời lượng video không hợp lệ để lập timeline thuyết minh",
+            retryable=False,
+        )
+    if not blocks:
+        raise TimingError(
+            "timeline_empty",
+            "Không có lời thuyết minh để lập timeline",
+            retryable=False,
+        )
+    if borrow_window_us < 0:
+        raise ValueError("borrow_window_us must not be negative")
+    if not 1.0 <= maximum_total_speed <= 2.0:
+        raise ValueError("maximum_total_speed must be between 1.0 and 2.0")
+    if not 0 <= maximum_adjacent_speed_delta <= maximum_total_speed - 1.0:
+        raise ValueError(
+            "maximum_adjacent_speed_delta must fit inside the natural speed range"
+        )
+
+    previous_end_us = 0
+    for block in blocks:
+        if not isinstance(block, NarrationTimingInput):
+            raise TimingError(
+                "timing_block_invalid",
+                "Khối thuyết minh dùng để lập timeline không hợp lệ",
+                retryable=False,
+            )
+        if block.start_us < previous_end_us or block.end_us > duration_us:
+            raise TimingError(
+                "timing_source_overlap",
+                "Timestamp bản dịch bị overlap hoặc vượt thời lượng video",
+                retryable=False,
+            )
+        previous_end_us = block.end_us
+
+    if selected_profile is TimingProfile.STRICT:
+        return tuple(
+            PlannedNarrationSlot(
+                start_us=block.start_us,
+                end_us=block.end_us,
+                planned_total_speed=(
+                    block.source_duration_us
+                    * block.native_speed
+                    / (block.end_us - block.start_us)
+                ),
+            )
+            for block in blocks
+        )
+
+    windows = tuple(
+        _NaturalWindow(
+            ordinal=ordinal,
+            lower_us=max(0, block.start_us - borrow_window_us),
+            upper_us=min(duration_us, block.end_us + borrow_window_us),
+            preferred_center_us=(block.start_us + block.end_us) // 2,
+            # Reconstruct duration at native TTS speed 1.0.  Keeping this as an
+            # integer makes checkpoint/retry planning byte-for-byte stable.
+            work_duration_us=max(
+                1, round(block.source_duration_us * block.native_speed)
+            ),
+            source_frame_count=block.source_frame_count,
+            source_sample_rate=block.source_sample_rate,
+            native_speed_ppm=round(block.native_speed * 1_000_000),
+        )
+        for ordinal, block in enumerate(blocks)
+    )
+    maximum_speed_ppm = round(maximum_total_speed * 1_000_000)
+    speed_delta_ppm = round(maximum_adjacent_speed_delta * 1_000_000)
+    speeds = [
+        _minimum_window_speed(window, maximum_speed_ppm) for window in windows
+    ]
+
+    # Expanded windows form independent components only when their possible
+    # placement ranges no longer touch.  Splitting on an idle point observed
+    # only at maximum speed is unsafe: a slower selected speed can consume that
+    # gap again.  Each connected component needs at most one bounded binary
+    # search, keeping planning O(n log speed_range).
+    chains = _independent_natural_chains(windows)
+    for chain_start, chain_end in chains:
+        chain = windows[chain_start:chain_end]
+        if _first_schedule_failure(
+            chain, speeds[chain_start:chain_end]
+        )[0] is None:
+            continue
+        failure_index, available_us = _first_schedule_failure(
+            chain, [maximum_speed_ppm] * len(chain)
+        )
+        if failure_index is not None:
+            _raise_rewrite_required(
+                chain[failure_index],
+                available_us=available_us,
+                maximum_speed_ppm=maximum_speed_ppm,
+                maximum_total_speed=maximum_total_speed,
+            )
+        low = 1_000_000
+        high = maximum_speed_ppm
+        while low < high:
+            candidate = (low + high) // 2
+            candidate_speeds = [
+                max(speeds[chain_start + offset], candidate)
+                for offset in range(len(chain))
+            ]
+            if _first_schedule_failure(chain, candidate_speeds)[0] is None:
+                high = candidate
+            else:
+                low = candidate + 1
+        for index in range(chain_start, chain_end):
+            speeds[index] = max(speeds[index], low)
+
+    # Only raise a slower nearby neighbour.  Shortening an already feasible
+    # schedule cannot introduce overlap, while a bounded slope removes sudden
+    # speed jumps without accelerating speech separated by a long silent scene.
+    for chain_start, chain_end in _nearby_natural_chains(
+        windows, maximum_gap_us=borrow_window_us * 2
+    ):
+        for index in range(chain_start + 1, chain_end):
+            speeds[index] = max(
+                speeds[index], speeds[index - 1] - speed_delta_ppm
+            )
+        for index in range(chain_end - 2, chain_start - 1, -1):
+            speeds[index] = max(
+                speeds[index], speeds[index + 1] - speed_delta_ppm
+            )
+
+    failure_index, available_us = _first_schedule_failure(windows, speeds)
+    if failure_index is not None:  # Defensive typed failure for persisted jobs.
+        _raise_rewrite_required(
+            windows[failure_index],
+            available_us=available_us,
+            maximum_speed_ppm=maximum_speed_ppm,
+            maximum_total_speed=maximum_total_speed,
+        )
+    scheduled = _centered_natural_schedule(windows, speeds)
+    return tuple(
+        PlannedNarrationSlot(
+            start_us=slot_start_us,
+            end_us=slot_end_us,
+            planned_total_speed=(
+                window.work_duration_us / (slot_end_us - slot_start_us)
+            ),
+        )
+        for window, (slot_start_us, slot_end_us) in zip(
+            windows, scheduled, strict=True
+        )
+    )
+
+
+def _duration_at_speed(window: _NaturalWindow, speed_ppm: int) -> int:
+    if window.source_frame_count is not None:
+        if window.source_sample_rate is None:  # pragma: no cover - dataclass input guard
+            raise AssertionError("sample rate is required with an exact frame count")
+        frame_numerator = (
+            window.source_frame_count
+            * TIMELINE_SAMPLE_RATE
+            * window.native_speed_ppm
+        )
+        frame_denominator = window.source_sample_rate * speed_ppm
+        required_frames = (
+            frame_numerator + frame_denominator - 1
+        ) // frame_denominator
+        return max(
+            1,
+            (
+                required_frames * 1_000_000
+                + TIMELINE_SAMPLE_RATE
+                - 1
+            )
+            // TIMELINE_SAMPLE_RATE,
+        )
+    return max(
+        1,
+        (window.work_duration_us * 1_000_000 + speed_ppm - 1) // speed_ppm,
+    )
+
+
+def _minimum_window_speed(window: _NaturalWindow, maximum_speed_ppm: int) -> int:
+    available_us = window.upper_us - window.lower_us
+    if _duration_at_speed(window, maximum_speed_ppm) > available_us:
+        _raise_rewrite_required(
+            window,
+            available_us=available_us,
+            maximum_speed_ppm=maximum_speed_ppm,
+            maximum_total_speed=maximum_speed_ppm / 1_000_000,
+        )
+    low = 1_000_000
+    high = maximum_speed_ppm
+    while low < high:
+        candidate = (low + high) // 2
+        if _duration_at_speed(window, candidate) <= available_us:
+            high = candidate
+        else:
+            low = candidate + 1
+    return low
+
+
+def _first_schedule_failure(
+    windows: Sequence[_NaturalWindow], speeds: Sequence[int]
+) -> tuple[int | None, int]:
+    """Return the first failed local ordinal and its remaining window time."""
+
+    cursor = 0
+    for index, (window, speed_ppm) in enumerate(
+        zip(windows, speeds, strict=True)
+    ):
+        earliest = max(window.lower_us, cursor)
+        slot_duration_us = _duration_at_speed(window, speed_ppm)
+        available_us = max(0, window.upper_us - earliest)
+        if slot_duration_us > available_us:
+            return index, available_us
+        cursor = earliest + slot_duration_us
+    return None, 0
+
+
+def _independent_natural_chains(
+    windows: Sequence[_NaturalWindow],
+) -> tuple[tuple[int, int], ...]:
+    """Partition expanded windows into non-touching connected components."""
+
+    if not windows:
+        return ()
+    chains: list[tuple[int, int]] = []
+    chain_start = 0
+    component_upper_us = windows[0].upper_us
+    for index, window in enumerate(windows[1:], start=1):
+        if window.lower_us >= component_upper_us:
+            chains.append((chain_start, index))
+            chain_start = index
+            component_upper_us = window.upper_us
+        else:
+            component_upper_us = max(component_upper_us, window.upper_us)
+    chains.append((chain_start, len(windows)))
+    return tuple(chains)
+
+
+def _nearby_natural_chains(
+    windows: Sequence[_NaturalWindow], *, maximum_gap_us: int
+) -> tuple[tuple[int, int], ...]:
+    """Group windows whose narration remains perceptually adjacent."""
+
+    if not windows:
+        return ()
+    chains: list[tuple[int, int]] = []
+    chain_start = 0
+    for index, window in enumerate(windows[1:], start=1):
+        previous = windows[index - 1]
+        if window.lower_us - previous.upper_us > maximum_gap_us:
+            chains.append((chain_start, index))
+            chain_start = index
+    chains.append((chain_start, len(windows)))
+    return tuple(chains)
+
+
+def _centered_natural_schedule(
+    windows: Sequence[_NaturalWindow], speeds: Sequence[int]
+) -> tuple[tuple[int, int], ...]:
+    """Centre a known-feasible ordered schedule inside its local windows."""
+
+    durations = tuple(
+        _duration_at_speed(window, speed_ppm)
+        for window, speed_ppm in zip(windows, speeds, strict=True)
+    )
+    if _first_schedule_failure(windows, speeds)[0] is not None:  # pragma: no cover
+        raise AssertionError("a natural schedule must be feasible before centring")
+
+    latest_starts = [0] * len(windows)
+    next_start: int | None = None
+    for index in range(len(windows) - 1, -1, -1):
+        window = windows[index]
+        slot_duration_us = durations[index]
+        latest = window.upper_us - slot_duration_us
+        if next_start is not None:
+            latest = min(latest, next_start - slot_duration_us)
+        if latest < window.lower_us:  # pragma: no cover - guarded by forward pass
+            raise AssertionError("forward-feasible schedule must have a latest start")
+        latest_starts[index] = latest
+        next_start = latest
+
+    schedule: list[tuple[int, int]] = []
+    previous_end = 0
+    for index, (window, slot_duration_us) in enumerate(
+        zip(windows, durations, strict=True)
+    ):
+        lower = max(window.lower_us, previous_end)
+        upper = latest_starts[index]
+        preferred = window.preferred_center_us - slot_duration_us // 2
+        start_us = min(max(preferred, lower), upper)
+        end_us = start_us + slot_duration_us
+        schedule.append((start_us, end_us))
+        previous_end = end_us
+    return tuple(schedule)
+
+
+def _raise_rewrite_required(
+    window: _NaturalWindow,
+    *,
+    available_us: int,
+    maximum_speed_ppm: int,
+    maximum_total_speed: float,
+) -> NoReturn:
+    required_us = _duration_at_speed(window, maximum_speed_ppm)
+    formatted_maximum_speed = f"{maximum_total_speed:.2f}".replace(".", ",")
+    raise TimingError(
+        "timing_rewrite_required",
+        (
+            f"Khối thuyết minh {window.ordinal + 1} cần khoảng "
+            f"{required_us / 1_000_000:.2f} giây nhưng cửa sổ gần cảnh "
+            f"chỉ còn {available_us / 1_000_000:.2f} giây; cần rút gọn "
+            f"bản dịch thay vì tăng tốc giọng quá {formatted_maximum_speed}×"
+        ),
+        retryable=False,
+        details={
+            "profile": TimingProfile.NATURAL.value,
+            "ordinal": window.ordinal,
+            "required_duration_us": required_us,
+            "available_duration_us": available_us,
+            "maximum_total_speed": maximum_total_speed,
+        },
+    )
+
+
 class FfmpegTimingFitter:
     """Fit a local PCM WAV to one timeline slot using FFmpeg ``atempo``.
 
@@ -165,6 +626,7 @@ class FfmpegTimingFitter:
         end_us: int,
         text: str = "",
         native_speed: float = 1.0,
+        maximum_total_speed: float | None = None,
         cancellation: Cancellation | None = None,
         on_progress: TimingProgress | None = None,
     ) -> FittedNarrationBlock:
@@ -178,6 +640,12 @@ class FfmpegTimingFitter:
             raise TimingError(
                 "timing_speed_invalid",
                 "Tốc độ TTS gốc không hợp lệ",
+                retryable=False,
+            )
+        if maximum_total_speed is not None and not 1.0 <= maximum_total_speed <= 2.0:
+            raise TimingError(
+                "timing_speed_invalid",
+                "Giới hạn tốc độ lời thuyết minh không hợp lệ",
                 retryable=False,
             )
         destination = Path(output_path).resolve(strict=False)
@@ -226,6 +694,23 @@ class FfmpegTimingFitter:
         )
         padded_frames = max(0, target_frames - estimated_content_frames)
         total_speed = native_speed * applied_atempo
+        if maximum_total_speed is not None and total_speed > maximum_total_speed:
+            work_duration_us = round(source_metadata.duration_us * native_speed)
+            required_duration_us = math.ceil(work_duration_us / maximum_total_speed)
+            raise TimingError(
+                "timing_rewrite_required",
+                (
+                    "Câu thuyết minh vẫn quá dài sau khi mượn khoảng lặng; "
+                    "cần rút gọn bản dịch thay vì tăng tốc giọng quá 1,20×"
+                ),
+                retryable=False,
+                details={
+                    "profile": TimingProfile.NATURAL.value,
+                    "required_duration_us": required_duration_us,
+                    "available_duration_us": end_us - start_us,
+                    "maximum_total_speed": maximum_total_speed,
+                },
+            )
         quality = classify_timing_quality(total_speed)
 
         temporary = destination.with_name(f".{destination.stem}.timing.part.wav")
@@ -724,16 +1209,23 @@ def _report_progress(
 __all__ = [
     "FfmpegTimingFitter",
     "FittedNarrationBlock",
+    "NATURAL_BORROW_WINDOW_US",
+    "NATURAL_MAX_ADJACENT_SPEED_DELTA",
+    "NATURAL_MAX_TOTAL_SPEED",
+    "NarrationTimingInput",
     "NarrationTimeline",
+    "PlannedNarrationSlot",
     "ProcessFactory",
     "TIMELINE_CHANNELS",
     "TIMELINE_SAMPLE_RATE",
     "TIMELINE_SAMPLE_WIDTH_BYTES",
     "TimingError",
+    "TimingProfile",
     "TimingProgress",
     "TimingQuality",
     "build_timeline_wav",
     "classify_timing_quality",
     "decompose_atempo",
     "microseconds_to_samples",
+    "plan_narration_slots",
 ]

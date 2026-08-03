@@ -43,6 +43,7 @@ TranslatorFactory = Callable[[VerifiedModel], Translator]
 _BYPASS_MODEL_ID = "translation-bypass"
 _BYPASS_TREE_SHA256 = hashlib.sha256(b"translation-bypass-v1").hexdigest()
 _BUILDER_VERSION = "translation-blocks-v1"
+_NATURAL_PROMPT_VERSION = "natural-duration-v1"
 
 
 class _StageCancelled(Exception):
@@ -264,9 +265,14 @@ class TranslationStage:
                 await asyncio.to_thread(start)
             if self._is_cancel_requested(job.id):
                 raise _StageCancelled()
+            timing_profile = self._timing_profile(job)
             prompt_template_id = str(
                 verified.entry.get("prompt_template_id", "gemma4-translation-v1")
             )
+            if timing_profile == "natural":
+                prompt_template_id = (
+                    f"{prompt_template_id}+{_NATURAL_PROMPT_VERSION}"
+                )
             source = source_artifact.result
             if job.status is JobStatus.READY_TRANSLATION:
                 blocks = await asyncio.to_thread(
@@ -305,6 +311,7 @@ class TranslationStage:
                     source_transcript_sha256=source_artifact.sha256,
                     model_id=model_id,
                     model_tree_sha256=verified.tree_sha256,
+                    prompt_template_id=prompt_template_id,
                 )
 
             for stored in self._store.list_translation_blocks(job.id):
@@ -324,6 +331,7 @@ class TranslationStage:
                     block,
                     source.language,
                     job.id,
+                    timing_profile,
                 )
                 if self._is_cancel_requested(job.id):
                     raise _StageCancelled()
@@ -351,12 +359,25 @@ class TranslationStage:
         block: TranslationBlock,
         source_language: str,
         job_id: str,
+        timing_profile: str,
     ) -> str:
         def progress(_completed: int, _total: int) -> None:
             if self._is_cancel_requested(job_id):
                 raise _StageCancelled()
 
         try:
+            duration_translation = getattr(
+                translator, "translate_batch_for_durations", None
+            )
+            if timing_profile == "natural" and callable(duration_translation):
+                outputs = duration_translation(
+                    [block.source_text],
+                    [block.end_us - block.start_us],
+                    source_language=source_language,
+                    target_language="vi",
+                    on_progress=progress,
+                )
+                return self._single_translation_output(outputs)
             result = translate_blocks(
                 translator,
                 (block,),
@@ -369,16 +390,50 @@ class TranslationStage:
             halves = self._split_retry_block(block)
             if halves is None:
                 raise
-            outputs = translator.translate_batch(
-                [item.source_text for item in halves],
-                source_language=source_language,
-                target_language="vi",
-                on_progress=progress,
-            )
+            if timing_profile == "natural" and callable(duration_translation):
+                outputs = duration_translation(
+                    [item.source_text for item in halves],
+                    [item.end_us - item.start_us for item in halves],
+                    source_language=source_language,
+                    target_language="vi",
+                    on_progress=progress,
+                )
+            else:
+                outputs = translator.translate_batch(
+                    [item.source_text for item in halves],
+                    source_language=source_language,
+                    target_language="vi",
+                    on_progress=progress,
+                )
             if len(outputs) != 2 or any(not str(value).strip() for value in outputs):
                 raise
             return " ".join(" ".join(str(value).split()) for value in outputs)
         return " ".join(item.translated_text for item in result)
+
+    @staticmethod
+    def _single_translation_output(outputs: Any) -> str:
+        try:
+            values = tuple(outputs)
+        except TypeError as error:
+            raise TranslationError(
+                "translation_output_mismatch",
+                "Kết quả dịch theo thời lượng không hợp lệ",
+                retryable=True,
+            ) from error
+        if len(values) != 1:
+            raise TranslationError(
+                "translation_output_mismatch",
+                "Số kết quả dịch không khớp số khối nguồn",
+                retryable=True,
+            )
+        normalized = " ".join(str(values[0]).split())
+        if not normalized:
+            raise TranslationError(
+                "translation_output_empty",
+                "Model dịch trả về nội dung rỗng",
+                retryable=True,
+            )
+        return normalized
 
     async def _publish_and_commit(
         self,
@@ -490,6 +545,7 @@ class TranslationStage:
         source_transcript_sha256: str,
         model_id: str,
         model_tree_sha256: str,
+        prompt_template_id: str,
     ) -> None:
         checkpoint = self._store.get_checkpoint(job_id, JobStage.TRANSLATION)
         rows = self._store.list_translation_blocks(job_id)
@@ -500,6 +556,7 @@ class TranslationStage:
             != source_transcript_sha256
             or checkpoint.payload.get("model_id") != model_id
             or checkpoint.payload.get("model_tree_sha256") != model_tree_sha256
+            or checkpoint.payload.get("prompt_template_id") != prompt_template_id
             or len(rows) != checkpoint.payload.get("block_count")
         ):
             raise TranslationError(
@@ -545,6 +602,19 @@ class TranslationStage:
         if isinstance(selected, str) and selected.strip():
             return selected.strip()
         return self._default_model_id
+
+    @staticmethod
+    def _timing_profile(job: JobRecord) -> str:
+        value = job.spec.get("timing_profile")
+        if value is None:
+            return "strict"
+        if value not in {"natural", "strict"}:
+            raise TranslationError(
+                "invalid_timing_profile",
+                "Chế độ căn thời lượng lời thuyết minh không hợp lệ",
+                retryable=False,
+            )
+        return str(value)
 
     @staticmethod
     def _is_vietnamese(language: str) -> bool:

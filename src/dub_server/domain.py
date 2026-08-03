@@ -98,6 +98,8 @@ class MediaAsset:
     tmdb_id: int | None = None
     audio_stream_index: int | None = None
     audio_start_us: int = 0
+    video_stream_index: int | None = None
+    video_codec: str | None = None
 
     def __post_init__(self) -> None:
         if self.duration_us <= 0:
@@ -107,7 +109,15 @@ class MediaAsset:
             raise ValueError("Ngôn ngữ nguồn không được để trống")
         if self.audio_stream_index is not None and self.audio_stream_index < 0:
             raise ValueError("Chỉ số luồng âm thanh không hợp lệ")
+        if self.video_stream_index is not None and self.video_stream_index < 0:
+            raise ValueError("Chỉ số luồng hình không hợp lệ")
+        video_codec = (
+            self.video_codec.strip().lower() or None
+            if self.video_codec is not None
+            else None
+        )
         object.__setattr__(self, "source_language", language)
+        object.__setattr__(self, "video_codec", video_codec)
 
 
 @dataclass(frozen=True, slots=True)

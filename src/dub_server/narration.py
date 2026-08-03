@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
+import sys
 import time
 import unicodedata
 import wave
+from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -46,6 +49,10 @@ _COMMON_VIETNAMESE_ABBREVIATIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bVN\b", re.IGNORECASE), "Việt Nam"),
 )
 
+TTS_SILENCE_THRESHOLD_DBFS = -45.0
+TTS_SILENCE_PADDING_MS = 30
+TTS_SILENCE_TRIM_VERSION = "pcm16-threshold-45dbfs-pad30ms-v1"
+
 
 class NarrationError(RuntimeError):
     """A typed TTS failure safe to checkpoint and expose to clients."""
@@ -70,6 +77,104 @@ class SynthesizedNarration:
     duration_us: int
     native_speed: float
     backend: str
+
+
+def trim_synthesized_narration_silence(
+    narration: SynthesizedNarration,
+) -> SynthesizedNarration:
+    """Atomically trim low-level PCM silence while retaining natural margins.
+
+    TTS adapters already guarantee mono 16-bit PCM WAV.  Samples below
+    ``-45 dBFS`` at the leading and trailing edges are removed, except for a
+    30 ms margin immediately surrounding the detected speech.  The original
+    WAV remains untouched until a complete replacement has been written.
+    """
+
+    path = Path(narration.path).resolve(strict=False)
+    metadata = _inspect_pcm_wav(path)
+    try:
+        with wave.open(os.fspath(path), "rb") as stream:
+            pcm_bytes = stream.readframes(metadata.frame_count)
+    except (OSError, EOFError, wave.Error) as exc:
+        raise NarrationError(
+            "tts_output_invalid",
+            "Không thể đọc âm thanh TTS để loại bỏ khoảng lặng",
+            retryable=True,
+        ) from exc
+
+    expected_bytes = metadata.frame_count * metadata.sample_width_bytes
+    if len(pcm_bytes) != expected_bytes:
+        raise NarrationError(
+            "tts_output_invalid",
+            "Dữ liệu PCM của âm thanh TTS không đầy đủ",
+            retryable=True,
+        )
+
+    samples = array("h")
+    samples.frombytes(pcm_bytes)
+    if sys.byteorder != "little":  # WAV PCM is always little-endian.
+        samples.byteswap()
+    threshold = math.ceil(
+        ((1 << 15) - 1) * math.pow(10.0, TTS_SILENCE_THRESHOLD_DBFS / 20.0)
+    )
+    first_audible = next(
+        (index for index, sample in enumerate(samples) if abs(sample) >= threshold),
+        None,
+    )
+    if first_audible is None:
+        raise NarrationError(
+            "tts_output_silent",
+            "Bộ tổng hợp giọng nói chỉ tạo ra khoảng lặng",
+            retryable=True,
+        )
+    last_audible = next(
+        index
+        for index in range(len(samples) - 1, first_audible - 1, -1)
+        if abs(samples[index]) >= threshold
+    )
+    padding_frames = (
+        metadata.sample_rate * TTS_SILENCE_PADDING_MS + 999
+    ) // 1_000
+    start_frame = max(0, first_audible - padding_frames)
+    end_frame = min(metadata.frame_count, last_audible + 1 + padding_frames)
+    trimmed_frame_count = end_frame - start_frame
+
+    if start_frame != 0 or end_frame != metadata.frame_count:
+        temporary = path.with_name(f".{path.stem}.silence-trim.part.wav")
+        start_byte = start_frame * metadata.sample_width_bytes
+        end_byte = end_frame * metadata.sample_width_bytes
+        try:
+            temporary.unlink(missing_ok=True)
+            with wave.open(os.fspath(temporary), "wb") as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(2)
+                stream.setframerate(metadata.sample_rate)
+                stream.writeframes(pcm_bytes[start_byte:end_byte])
+            os.replace(temporary, path)
+        except (OSError, wave.Error) as exc:
+            raise NarrationError(
+                "tts_output_unavailable",
+                "Không thể lưu âm thanh TTS sau khi loại bỏ khoảng lặng",
+                retryable=True,
+            ) from exc
+        finally:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+
+    duration_us = (
+        trimmed_frame_count * 1_000_000 + metadata.sample_rate // 2
+    ) // metadata.sample_rate
+    return SynthesizedNarration(
+        path=path,
+        text=narration.text,
+        sample_rate=metadata.sample_rate,
+        channels=metadata.channels,
+        sample_width_bytes=metadata.sample_width_bytes,
+        frame_count=trimmed_frame_count,
+        duration_us=duration_us,
+        native_speed=narration.native_speed,
+        backend=narration.backend,
+    )
 
 
 class CancellationToken(Protocol):
@@ -1190,8 +1295,12 @@ __all__ = [
     "PiperNarrationSynthesizer",
     "ProcessFactory",
     "SynthesizedNarration",
+    "TTS_SILENCE_PADDING_MS",
+    "TTS_SILENCE_THRESHOLD_DBFS",
+    "TTS_SILENCE_TRIM_VERSION",
     "VieNeuArgumentBuilder",
     "VieNeuNarrationSynthesizer",
     "is_cancelled",
     "normalize_vietnamese_for_tts",
+    "trim_synthesized_narration_silence",
 ]

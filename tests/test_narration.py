@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import os
+import struct
 import sys
 import wave
 from pathlib import Path
 
 import pytest
 
+import dub_server.narration as narration_module
 from dub_server.narration import (
     NarrationError,
     NarrationSynthesizer,
     PiperNarrationSynthesizer,
+    SynthesizedNarration,
+    TTS_SILENCE_PADDING_MS,
     VieNeuNarrationSynthesizer,
     normalize_vietnamese_for_tts,
+    trim_synthesized_narration_silence,
 )
 
 
@@ -24,6 +29,116 @@ def _write_wav(path: Path, *, frames: int = 22_050, sample_rate: int = 22_050) -
         stream.setsampwidth(2)
         stream.setframerate(sample_rate)
         stream.writeframes(b"\x01\x00" * frames)
+
+
+def _write_pcm_samples(
+    path: Path, samples: list[int], *, sample_rate: int = 8_000
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(os.fspath(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate)
+        stream.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+
+
+def _synthesized_fixture(
+    path: Path, *, frames: int, sample_rate: int = 8_000
+) -> SynthesizedNarration:
+    return SynthesizedNarration(
+        path=path,
+        text="Xin chào",
+        sample_rate=sample_rate,
+        channels=1,
+        sample_width_bytes=2,
+        frame_count=frames,
+        duration_us=round(frames * 1_000_000 / sample_rate),
+        native_speed=1.0,
+        backend="fixture",
+    )
+
+
+def test_trim_synthesized_narration_keeps_thirty_millisecond_margins(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "voice.wav"
+    samples = [100] * 800 + [2_000] * 160 + [-100] * 640
+    _write_pcm_samples(path, samples)
+
+    trimmed = trim_synthesized_narration_silence(
+        _synthesized_fixture(path, frames=len(samples))
+    )
+
+    padding_frames = 8_000 * TTS_SILENCE_PADDING_MS // 1_000
+    assert trimmed.path == path
+    assert trimmed.frame_count == padding_frames + 160 + padding_frames
+    assert trimmed.duration_us == 80_000
+    with wave.open(os.fspath(path), "rb") as stream:
+        output = struct.unpack(
+            f"<{stream.getnframes()}h", stream.readframes(stream.getnframes())
+        )
+    assert output[:padding_frames] == (100,) * padding_frames
+    assert output[padding_frames : padding_frames + 160] == (2_000,) * 160
+    assert output[-padding_frames:] == (-100,) * padding_frames
+    assert not (tmp_path / ".voice.silence-trim.part.wav").exists()
+
+
+def test_trim_synthesized_narration_uses_exact_threshold_and_ceil_padding(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "voice-22050.wav"
+    samples = [184] * 1_000 + [185] + [-184] * 1_000
+    _write_pcm_samples(path, samples, sample_rate=22_050)
+
+    trimmed = trim_synthesized_narration_silence(
+        _synthesized_fixture(path, frames=len(samples), sample_rate=22_050)
+    )
+
+    padding_frames = (22_050 * TTS_SILENCE_PADDING_MS + 999) // 1_000
+    assert padding_frames == 662
+    assert trimmed.frame_count == padding_frames + 1 + padding_frames
+    with wave.open(os.fspath(path), "rb") as stream:
+        output = struct.unpack(
+            f"<{stream.getnframes()}h", stream.readframes(stream.getnframes())
+        )
+    assert output[:padding_frames] == (184,) * padding_frames
+    assert output[padding_frames] == 185
+    assert output[-padding_frames:] == (-184,) * padding_frames
+
+
+def test_trim_synthesized_narration_rejects_all_silent_output(tmp_path: Path) -> None:
+    path = tmp_path / "silent.wav"
+    _write_pcm_samples(path, [100] * 800)
+
+    with pytest.raises(NarrationError) as captured:
+        trim_synthesized_narration_silence(
+            _synthesized_fixture(path, frames=800)
+        )
+
+    assert captured.value.code == "tts_output_silent"
+    assert path.is_file()
+
+
+def test_trim_synthesized_narration_preserves_original_on_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "voice.wav"
+    samples = [0] * 800 + [2_000] * 160 + [0] * 800
+    _write_pcm_samples(path, samples)
+    original = path.read_bytes()
+
+    def fail_replace(_source: Path, _destination: Path) -> None:
+        raise OSError("fixture publish failure")
+
+    monkeypatch.setattr(narration_module.os, "replace", fail_replace)
+    with pytest.raises(NarrationError) as captured:
+        trim_synthesized_narration_silence(
+            _synthesized_fixture(path, frames=len(samples))
+        )
+
+    assert captured.value.code == "tts_output_unavailable"
+    assert path.read_bytes() == original
+    assert not (tmp_path / ".voice.silence-trim.part.wav").exists()
 
 
 class CompletingProcess:

@@ -37,19 +37,26 @@ async function proxy(
 
   const requestHeaders = new Headers();
   const contentType = request.headers.get("content-type");
+  const contentLength = request.headers.get("content-length");
   const range = request.headers.get("range");
   if (contentType) requestHeaders.set("content-type", contentType);
+  if (contentLength && /^(0|[1-9]\d*)$/.test(contentLength)) {
+    requestHeaders.set("content-length", contentLength);
+  }
   if (range) requestHeaders.set("range", range);
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
   try {
-    const upstream = await fetch(destination, {
+    const body = hasBody ? request.body : null;
+    const requestInit: RequestInit & { duplex?: "half" } = {
       method: request.method,
       headers: requestHeaders,
-      body: hasBody ? await request.arrayBuffer() : undefined,
+      body,
       cache: "no-store",
       redirect: "manual",
-    });
+    };
+    if (body) requestInit.duplex = "half";
+    const upstream = await fetch(destination, requestInit);
     const responseHeaders = new Headers();
     for (const name of forwardedResponseHeaders) {
       const value = upstream.headers.get(name);

@@ -9,6 +9,7 @@ from dub_server.domain import TranscriptSegment, TranscriptionResult
 from dub_server.state import (
     ActiveJobExists,
     InvalidTransition,
+    JobNotFound,
     JobStage,
     JobStatus,
     StateError,
@@ -79,6 +80,67 @@ def test_checkpoint_is_upserted_without_losing_other_job_state(tmp_path: Path) -
     assert checkpoint is not None
     assert checkpoint.payload == {"bytes": 250}
     assert len(store.list_events(job.id)) == 3
+
+
+def test_create_ready_offline_job_commits_handoff_atomically(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "jobs.sqlite3")
+
+    job = store.create_ready_offline_job(
+        "local-upload:job-local",
+        {"source_kind": "local_upload", "timing_profile": "natural"},
+        {"source_media_path": "/data/incoming/job-local/source.mkv"},
+        acquisition_checkpoint={"source": "local_upload"},
+        subtitle_checkpoint={"transcript_source": "asr"},
+        job_id="job-local",
+    )
+
+    assert job.status is JobStatus.READY_OFFLINE
+    assert job.stage is JobStage.SUBTITLE
+    assert job.progress_permille == 250
+    assert store.get_checkpoint(job.id, JobStage.ACQUISITION).payload == {
+        "source": "local_upload"
+    }
+    assert store.get_checkpoint(job.id, JobStage.SUBTITLE).payload == {
+        "transcript_source": "asr"
+    }
+    assert [event.event_type for event in store.list_events(job.id)] == [
+        "job.created",
+        "job.checkpoint",
+        "job.checkpoint",
+    ]
+
+
+def test_create_ready_offline_job_rolls_back_every_row_on_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = StateStore(tmp_path / "jobs.sqlite3")
+
+    def fail_event(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("simulated event failure")
+
+    monkeypatch.setattr(store, "_insert_event", fail_event)
+    with pytest.raises(RuntimeError, match="simulated event failure"):
+        store.create_ready_offline_job(
+            "local-upload:job-local",
+            {"source_kind": "local_upload"},
+            {"source_media_path": "/data/incoming/job-local/source.mkv"},
+            acquisition_checkpoint={"source": "local_upload"},
+            subtitle_checkpoint={"transcript_source": "asr"},
+            job_id="job-local",
+        )
+
+    with pytest.raises(JobNotFound):
+        store.get_job("job-local")
+    connection = sqlite3.connect(tmp_path / "jobs.sqlite3")
+    try:
+        checkpoint_count = connection.execute(
+            "SELECT COUNT(*) FROM checkpoints"
+        ).fetchone()[0]
+        assert checkpoint_count == 0
+    finally:
+        connection.close()
 
 
 def test_commit_transcript_is_atomic_and_ready_for_translation(tmp_path: Path) -> None:

@@ -12,12 +12,15 @@ import pytest
 from dub_server.timing import (
     FfmpegTimingFitter,
     FittedNarrationBlock,
+    NarrationTimingInput,
     TimingError,
+    TimingProfile,
     TimingQuality,
     build_timeline_wav,
     classify_timing_quality,
     decompose_atempo,
     microseconds_to_samples,
+    plan_narration_slots,
 )
 
 
@@ -158,6 +161,177 @@ def test_atempo_is_decomposed_and_quality_thresholds_are_locked() -> None:
     assert classify_timing_quality(1.700001) is TimingQuality.SEVERE
 
 
+def test_natural_planner_borrows_silence_and_centres_speech() -> None:
+    inputs = (
+        NarrationTimingInput(1_000_000, 2_000_000, 1_600_000),
+        NarrationTimingInput(3_000_000, 3_500_000, 500_000),
+    )
+    planned = plan_narration_slots(inputs, duration_us=6_000_000)
+
+    assert planned[0].start_us == 700_000
+    assert planned[0].end_us == 2_300_000
+    assert planned[0].planned_total_speed == pytest.approx(1.0)
+    assert planned[1].start_us == 3_000_000
+    assert planned[1].end_us == 3_500_000
+    assert planned[0].end_us <= planned[1].start_us
+    assert plan_narration_slots(inputs, duration_us=6_000_000) == planned
+
+
+def test_natural_planner_smooths_neighbouring_cluster_speeds() -> None:
+    planned = plan_narration_slots(
+        (
+            NarrationTimingInput(0, 1_000_000, 1_000_000),
+            NarrationTimingInput(4_000_000, 5_000_000, 3_000_000),
+        ),
+        duration_us=6_000_000,
+    )
+
+    assert all(slot.end_us <= 6_000_000 for slot in planned)
+    assert planned[0].end_us <= planned[1].start_us
+    assert max(slot.planned_total_speed for slot in planned) <= 1.20
+    assert abs(
+        planned[1].planned_total_speed - planned[0].planned_total_speed
+    ) <= 0.080_01
+    # The first block had enough room at 1.0x, but is raised gently so the
+    # transition into the dense second block does not sound abrupt.
+    assert planned[0].planned_total_speed > 1.0
+
+
+def test_natural_planner_does_not_smooth_across_a_long_silent_scene() -> None:
+    planned = plan_narration_slots(
+        (
+            NarrationTimingInput(0, 1_000_000, 1_000_000),
+            NarrationTimingInput(600_000_000, 601_000_000, 3_000_000),
+        ),
+        duration_us=602_000_000,
+    )
+
+    assert planned[0].planned_total_speed == pytest.approx(1.0)
+    assert planned[1].planned_total_speed > 1.1
+
+
+def test_natural_planner_resolves_dense_rolling_chain_without_overlap() -> None:
+    planned = plan_narration_slots(
+        (
+            NarrationTimingInput(0, 1_000_000, 1_200_000),
+            NarrationTimingInput(1_000_000, 2_000_000, 1_200_000),
+        ),
+        duration_us=2_000_000,
+    )
+
+    assert [(slot.start_us, slot.end_us) for slot in planned] == [
+        (0, 1_000_000),
+        (1_000_000, 2_000_000),
+    ]
+    assert [slot.planned_total_speed for slot in planned] == pytest.approx(
+        [1.2, 1.2]
+    )
+
+
+def test_natural_planner_does_not_split_a_gap_consumed_at_slower_speed() -> None:
+    planned = plan_narration_slots(
+        (
+            NarrationTimingInput(0, 1_000_000, 1_800_000),
+            NarrationTimingInput(2_500_000, 3_500_000, 2_600_000),
+        ),
+        duration_us=4_300_000,
+    )
+
+    assert [(slot.start_us, slot.end_us) for slot in planned] == [
+        (0, 1_759_091),
+        (1_759_091, 4_300_000),
+    ]
+    assert all(slot.planned_total_speed <= 1.20 for slot in planned)
+
+
+def test_natural_planner_handles_a_long_connected_window_chain() -> None:
+    planned = plan_narration_slots(
+        tuple(
+            NarrationTimingInput(
+                ordinal * 1_000_000,
+                (ordinal + 1) * 1_000_000,
+                1_050_000,
+            )
+            for ordinal in range(8)
+        ),
+        duration_us=8_000_000,
+    )
+
+    assert [(slot.start_us, slot.end_us) for slot in planned] == [
+        (ordinal * 1_000_000, (ordinal + 1) * 1_000_000)
+        for ordinal in range(8)
+    ]
+    assert [slot.planned_total_speed for slot in planned] == pytest.approx(
+        [1.05] * 8
+    )
+
+
+def test_natural_planner_rejects_sample_rounding_above_the_hard_cap() -> None:
+    with pytest.raises(TimingError) as captured:
+        plan_narration_slots(
+            tuple(
+                NarrationTimingInput(
+                    ordinal * 833_351,
+                    (ordinal + 1) * 833_351,
+                    1_000_021,
+                    source_frame_count=48_001,
+                    source_sample_rate=48_000,
+                )
+                for ordinal in range(4)
+            ),
+            duration_us=3_333_404,
+        )
+
+    assert captured.value.code == "timing_rewrite_required"
+    assert captured.value.details["maximum_total_speed"] == 1.2
+
+
+def test_natural_planner_requires_rewrite_instead_of_speeding_above_cap() -> None:
+    with pytest.raises(TimingError) as captured:
+        plan_narration_slots(
+            (NarrationTimingInput(1_000_000, 2_000_000, 3_200_000),),
+            duration_us=3_000_000,
+        )
+
+    error = captured.value
+    assert error.code == "timing_rewrite_required"
+    assert error.retryable is False
+    assert error.details == {
+        "profile": "natural",
+        "ordinal": 0,
+        "required_duration_us": 2_666_667,
+        "available_duration_us": 2_600_000,
+        "maximum_total_speed": 1.2,
+    }
+    assert "rút gọn" in error.message_vi
+    assert "1,20×" in error.message_vi
+
+
+def test_strict_planner_preserves_legacy_slots_even_when_speech_is_long() -> None:
+    planned = plan_narration_slots(
+        (NarrationTimingInput(1_000_000, 2_000_000, 3_200_000),),
+        duration_us=3_000_000,
+        profile=TimingProfile.STRICT,
+    )
+
+    assert [(slot.start_us, slot.end_us) for slot in planned] == [
+        (1_000_000, 2_000_000)
+    ]
+    assert planned[0].planned_total_speed == pytest.approx(3.2)
+
+
+def test_natural_planner_rejects_overlapping_source_timestamps() -> None:
+    with pytest.raises(TimingError) as captured:
+        plan_narration_slots(
+            (
+                NarrationTimingInput(0, 1_000_001, 500_000),
+                NarrationTimingInput(1_000_000, 2_000_000, 500_000),
+            ),
+            duration_us=2_000_000,
+        )
+    assert captured.value.code == "timing_source_overlap"
+
+
 def test_microsecond_rounding_and_timeline_placement_are_sample_exact(
     tmp_path: Path,
 ) -> None:
@@ -239,3 +413,59 @@ def test_fitter_failure_is_typed_and_does_not_overwrite(tmp_path: Path) -> None:
     assert captured.value.code == "timing_ffmpeg_failed"
     assert captured.value.retryable is True
     assert output.read_bytes() == b"old"
+
+
+def test_fitter_enforces_natural_total_speed_cap_before_ffmpeg(tmp_path: Path) -> None:
+    source = tmp_path / "long-tts.wav"
+    _write_wav(source, frames=153_600)
+    output = tmp_path / "fitted.wav"
+    process_started = False
+
+    async def process_factory(*command: str, **kwargs: object):
+        nonlocal process_started
+        process_started = True
+        return CompletingFfmpeg(Path(command[-1]), 124_800)
+
+    with pytest.raises(TimingError) as captured:
+        asyncio.run(
+            FfmpegTimingFitter(process_factory=process_factory).fit(
+                source,
+                output,
+                start_us=200_000,
+                end_us=2_800_000,
+                maximum_total_speed=1.20,
+            )
+        )
+
+    assert captured.value.code == "timing_rewrite_required"
+    assert captured.value.details["required_duration_us"] == 2_666_667
+    assert process_started is False
+    assert not output.exists()
+
+
+def test_fitter_rejects_even_one_sample_above_natural_hard_cap(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "boundary-tts.wav"
+    _write_wav(source, frames=57_601)
+    output = tmp_path / "fitted.wav"
+    process_started = False
+
+    async def process_factory(*command: str, **kwargs: object):
+        nonlocal process_started
+        process_started = True
+        return CompletingFfmpeg(Path(command[-1]), 48_000)
+
+    with pytest.raises(TimingError) as captured:
+        asyncio.run(
+            FfmpegTimingFitter(process_factory=process_factory).fit(
+                source,
+                output,
+                start_us=0,
+                end_us=1_000_000,
+                maximum_total_speed=1.20,
+            )
+        )
+
+    assert captured.value.code == "timing_rewrite_required"
+    assert process_started is False

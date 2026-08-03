@@ -35,6 +35,7 @@ class MediaProbe(Protocol):
         title: str | None = None,
         media_kind: MediaKind = MediaKind.MOVIE,
         year: int | None = None,
+        require_h264_passthrough: bool = False,
     ) -> MediaAsset: ...
 
 
@@ -110,6 +111,7 @@ class FfprobeMediaProbe:
         title: str | None = None,
         media_kind: MediaKind = MediaKind.MOVIE,
         year: int | None = None,
+        require_h264_passthrough: bool = False,
     ) -> MediaAsset:
         media_path = path.resolve(strict=False)
         if not media_path.is_file():
@@ -125,7 +127,7 @@ class FfprobeMediaProbe:
             "-protocol_whitelist",
             "file",
             "-show_entries",
-            "format=duration:format_tags=title:stream=index,codec_type,start_time,duration,avg_frame_rate,r_frame_rate:stream_tags=language:stream_disposition=default",
+            "format=duration:format_tags=title:stream=index,codec_name,codec_type,start_time,duration,avg_frame_rate,r_frame_rate:stream_tags=language:stream_disposition=default,attached_pic",
             "-of",
             "json",
             os.fspath(media_path),
@@ -177,6 +179,19 @@ class FfprobeMediaProbe:
             raise MediaProbeError(
                 "unsupported_media",
                 "File đã tải không chứa luồng video",
+                retryable=False,
+            )
+        selected_video = video_streams[0]
+        video_codec = str(selected_video.get("codec_name") or "").strip().lower()
+        disposition = selected_video.get("disposition")
+        attached_picture = (
+            isinstance(disposition, dict) and disposition.get("attached_pic") == 1
+        )
+        if require_h264_passthrough and (video_codec != "h264" or attached_picture):
+            raise MediaProbeError(
+                "unsupported_media",
+                "Luồng hình đầu tiên phải là video H.264/AVC (không phải ảnh bìa) "
+                "để xuất MP4 không mã hóa lại",
                 retryable=False,
             )
         audio_streams = [
@@ -238,9 +253,11 @@ class FfprobeMediaProbe:
             source_language=requested_language,
             media_kind=media_kind,
             year=year,
-            fps=_fps(video_streams[0]),
+            fps=_fps(selected_video),
             audio_stream_index=audio_stream_index,
             audio_start_us=_signed_time_us(selected_audio.get("start_time")),
+            video_stream_index=_stream_index(selected_video.get("index")),
+            video_codec=video_codec or None,
         )
 
 

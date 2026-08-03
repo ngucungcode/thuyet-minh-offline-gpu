@@ -658,6 +658,93 @@ class StateStore:
             connection.close()
         return self.get_job(identifier)
 
+    def create_ready_offline_job(
+        self,
+        release_id: str,
+        spec: Mapping[str, Any],
+        details: Mapping[str, Any],
+        *,
+        acquisition_checkpoint: Mapping[str, Any],
+        subtitle_checkpoint: Mapping[str, Any],
+        job_id: str | None = None,
+    ) -> JobRecord:
+        """Atomically publish a fully materialized local-upload job.
+
+        A local upload has no network acquisition stage to resume.  Inserting
+        the job, its artifact metadata, and both hand-off checkpoints in one
+        transaction prevents a process death from exposing a transient
+        ``CREATED`` job that the regular torrent resume path could mistake for
+        an unfinished download.
+        """
+
+        identifier = job_id or str(uuid.uuid4())
+        now = _utc_now()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO jobs(
+                    id, release_id, status, stage, progress_permille,
+                    spec_json, details_json, active_slot, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 250, ?, ?, 1, ?, ?)
+                """,
+                (
+                    identifier,
+                    release_id,
+                    JobStatus.READY_OFFLINE.value,
+                    JobStage.SUBTITLE.value,
+                    _encode(spec),
+                    _encode(details),
+                    now,
+                    now,
+                ),
+            )
+            for stage, payload in (
+                (JobStage.ACQUISITION, acquisition_checkpoint),
+                (JobStage.SUBTITLE, subtitle_checkpoint),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO checkpoints(job_id, stage, payload_json, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (identifier, stage.value, _encode(payload), now),
+                )
+            self._insert_event(
+                connection,
+                identifier,
+                "job.created",
+                {
+                    "status": JobStatus.READY_OFFLINE.value,
+                    "stage": JobStage.SUBTITLE.value,
+                    "source": "local_upload",
+                },
+                now,
+            )
+            for stage in (JobStage.ACQUISITION, JobStage.SUBTITLE):
+                self._insert_event(
+                    connection,
+                    identifier,
+                    "job.checkpoint",
+                    {"stage": stage.value},
+                    now,
+                )
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            if "jobs_one_active_idx" in str(exc):
+                raise ActiveJobExists(
+                    "Đã có một job nặng đang hoạt động trên GPU"
+                ) from exc
+            raise DuplicateJob(f"Job đã tồn tại: {identifier}") from exc
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_job(identifier)
+
     def get_job(self, job_id: str) -> JobRecord:
         connection = self._connect()
         try:

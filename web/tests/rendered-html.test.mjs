@@ -32,6 +32,9 @@ test("server-renders the Vietnamese GPU dashboard", async () => {
   assert.match(html, /Biến một bản phim thành bản thuyết minh Việt/);
   assert.match(html, /Chỉ nội dung bạn có quyền sử dụng/);
   assert.match(html, /Tự động nhận diện/);
+  assert.match(html, /Nhịp lời thuyết minh/);
+  assert.match(html, /Tự nhiên/);
+  assert.match(html, /Khớp chặt/);
   assert.match(html, /Tôi xác nhận mình sở hữu hoặc được phép tải/);
   assert.match(html, /Kho model cục bộ/);
   assert.match(html, /Indexer và phụ đề/);
@@ -51,6 +54,19 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.match(page, /api<Health>\("\/health"\)/);
   assert.match(page, /api<\{ items: Job\[\] \}>\("\/jobs\?limit=20/);
   assert.match(page, /rights_confirmed: true/);
+  assert.match(page, /useState<"natural" \| "strict">\("natural"\)/);
+  assert.match(page, /timing_profile: timingProfile/);
+  assert.match(page, /sourceMode === "upload"/);
+  assert.match(page, /accept="\.mp4,\.mkv,video\/mp4,video\/x-matroska"/);
+  assert.match(page, /accept="\.srt,application\/x-subrip,text\/plain"/);
+  assert.match(page, /api<UploadSession>\("\/uploads"/);
+  assert.match(page, /`\/v1\/uploads\/\$\{encodeURIComponent\(session\.id\)\}\/media`/);
+  assert.match(page, /`\/v1\/uploads\/\$\{encodeURIComponent\(session\.id\)\}\/subtitle`/);
+  assert.match(page, /`\/uploads\/\$\{encodeURIComponent\(session\.id\)\}\/finalize`/);
+  assert.match(page, /method: "DELETE"/);
+  assert.match(page, /xhr\.upload\.onprogress/);
+  assert.match(page, /uploadRequestRef\.current\?\.abort\(\)/);
+  assert.match(page, /Khi dùng SRT thủ công, hãy chọn ngôn ngữ nguồn cụ thể/);
   assert.match(page, /fetch\(`\/v1\$\{path\}`/);
   assert.match(page, /href=\{`\/v1\/jobs\/\$\{job\.id\}\/artifacts\/video`\}/);
   assert.match(page, /"subtitle",\s*"asr",\s*"translation"/);
@@ -70,6 +86,10 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.match(page, /"X-Dub-Admin-Request": "1"/);
   assert.match(route, /process\.env\.DUB_API_URL \|\| "http:\/\/127\.0\.0\.1:8080"/);
   assert.match(route, /request\.headers\.get\("range"\)/);
+  assert.match(route, /request\.headers\.get\("content-length"\)/);
+  assert.match(route, /body = hasBody \? request\.body : null/);
+  assert.match(route, /requestInit\.duplex = "half"/);
+  assert.doesNotMatch(route, /request\.arrayBuffer\(\)/);
   assert.match(route, /admin_proxy_disabled/);
   assert.doesNotMatch(route, /request\.headers\.get\("x-dub-admin-request"\)/);
   assert.match(route, /export const PUT = proxy/);
@@ -80,4 +100,49 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 
   await access(new URL("../public/og.png", import.meta.url));
+});
+
+test("validates local files and exposes detailed cancellable upload progress", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+
+  assert.match(page, /\["\.mp4", "\.mkv"\]\.includes\(fileExtension\(file\.name\)\)/);
+  assert.match(page, /fileExtension\(file\.name\) !== "\.srt"/);
+  assert.match(page, /Video phải là tệp MP4 hoặc MKV/);
+  assert.match(page, /Phụ đề thủ công phải là tệp SRT/);
+  assert.match(page, /MP4\/MKV phải có luồng hình đầu tiên là H\.264\/AVC/);
+  assert.match(page, /file\.size <= 0/);
+  assert.match(page, /phase: "preparing"/);
+  assert.match(page, /"media",\s*0,\s*overallTotal/);
+  assert.match(page, /"subtitle",\s*mediaFile\.size,\s*overallTotal/);
+  assert.match(page, /overallLoaded: baseLoaded \+ loaded/);
+  assert.match(page, /speedBytesPerSecond: loaded \/ elapsedSeconds/);
+  assert.match(page, /xhr\.onerror/);
+  assert.match(page, /xhr\.onabort/);
+  assert.match(page, /session\.media_size_bytes === mediaFile\.size/);
+  assert.match(page, /session\.subtitle_size_bytes === subtitleFile\.size/);
+  assert.match(page, /const shouldDeleteUpload = cancelled/);
+  assert.match(page, /error\.code !== "upload_not_found"/);
+  assert.match(page, /uploadRequestFingerprintRef\.current/);
+  assert.match(page, /uploadedMediaFileRef\.current === mediaFile/);
+  assert.match(page, /Cấu hình bị khóa theo phiên này/);
+  assert.match(page, /Tệp đã chọn không khớp phiên đang giữ/);
+  assert.match(
+    page,
+    /ref=\{mediaInputRef\}[\s\S]{0,220}disabled=\{submitting \|\| uploadConfigurationLocked\}/,
+  );
+  assert.match(
+    page,
+    /ref=\{subtitleInputRef\}[\s\S]{0,220}disabled=\{submitting \|\| uploadConfigurationLocked\}/,
+  );
+  assert.match(page, /Xóa phiên tạm/);
+  assert.match(page, /uploadFinalizingRef\.current/);
+  assert.match(page, /if \(uploadCancelledRef\.current\) \{\s*throw new UploadCancelledError\(\)/);
+  assert.doesNotMatch(
+    page,
+    /api<UploadSession>\("\/uploads", \{\s*method: "POST",\s*signal:/,
+  );
+  assert.match(page, /phase: "finalizing"/);
+  assert.match(page, /phase: "cancelling"/);
+  assert.match(page, /Đã hủy tải tệp và xóa dữ liệu tạm trên máy chủ/);
+  assert.match(page, /sourceMode === "upload" \? "Không thể tải tệp và tạo job\."/);
 });
