@@ -55,11 +55,19 @@ class FakeRunner:
         *,
         ffmpeg_returncode: int = 0,
         ffmpeg_stderr: str = "",
+        source_probe_stdout: str | None = None,
+        source_probe_returncode: int = 0,
+        source_probe_error: MediaExportError | None = None,
         probe_stdout: str | None = None,
         probe_returncode: int = 0,
     ) -> None:
         self.ffmpeg_returncode = ffmpeg_returncode
         self.ffmpeg_stderr = ffmpeg_stderr
+        self.source_probe_stdout = source_probe_stdout or json.dumps(
+            {"streams": [{"duration": "2.000000"}]}
+        )
+        self.source_probe_returncode = source_probe_returncode
+        self.source_probe_error = source_probe_error
         self.probe_stdout = probe_stdout or _probe_payload()
         self.probe_returncode = probe_returncode
         self.calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
@@ -68,11 +76,18 @@ class FakeRunner:
         normalized = tuple(str(item) for item in command)
         self.calls.append((normalized, kwargs))
         if Path(normalized[0]).name.lower().startswith("ffprobe"):
+            source_probe = "-select_streams" in normalized
+            if source_probe and self.source_probe_error is not None:
+                raise self.source_probe_error
+            payload = self.source_probe_stdout if source_probe else self.probe_stdout
+            returncode = (
+                self.source_probe_returncode if source_probe else self.probe_returncode
+            )
             return subprocess.CompletedProcess(
                 list(normalized),
-                self.probe_returncode,
-                self.probe_stdout,
-                "probe failed" if self.probe_returncode else "",
+                returncode,
+                payload,
+                "probe failed" if returncode else "",
             )
         callback = kwargs.get("on_progress")
         expected = kwargs.get("expected_duration_us")
@@ -126,7 +141,9 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert not output.with_name(".dubbed.part.mp4").exists()
     assert [item.fraction for item in progress] == [0.5, 1.0]
 
-    command = runner.calls[0][0]
+    source_probe = runner.calls[0][0]
+    assert source_probe[source_probe.index("-select_streams") + 1] == "v:0"
+    command = runner.calls[1][0]
     assert command[0] == "ffmpeg"
     input_positions = [index for index, item in enumerate(command) if item == "-i"]
     assert [command[index + 1] for index in input_positions] == [
@@ -142,7 +159,7 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert command[command.index("-map_chapters") + 1] == "-1"
     assert command[command.index("-write_tmcd") + 1] == "0"
     assert command[command.index("-protocol_whitelist") + 1] == "file,pipe"
-    assert "shell" not in runner.calls[0][1]
+    assert "shell" not in runner.calls[1][1]
 
     graph = command[command.index("-filter_complex") + 1]
     assert "loudnorm=I=-24.0" in graph
@@ -150,10 +167,10 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert "sidechaincompress=" in graph
     assert "ratio=3.00" in graph
     assert "amix=inputs=2" in graph
-    assert "atrim=" not in graph
+    assert "atrim=duration=2.000000" in graph
     assert "apad" in graph
     assert "alimiter=" in graph
-    assert "-shortest" in command
+    assert "-shortest" not in command
 
 
 @pytest.mark.parametrize(
@@ -211,7 +228,7 @@ def test_ffmpeg_failure_keeps_previous_output_and_removes_partial(tmp_path: Path
     assert captured.value.retryable is True
     assert output.read_bytes() == b"keep previous"
     assert not output.with_name(".dubbed.part.mp4").exists()
-    assert len(runner.calls) == 1
+    assert len(runner.calls) == 2
 
 
 def test_verification_rejects_any_extra_or_original_audio_track(tmp_path: Path) -> None:
@@ -300,6 +317,9 @@ def test_verification_uses_track_end_times_not_container_metadata(
 ) -> None:
     source, accompaniment, narration, output = _inputs(tmp_path)
     runner = FakeRunner(
+        source_probe_stdout=json.dumps(
+            {"streams": [{"duration": "1.920000"}]}
+        ),
         probe_stdout=_probe_payload(
             format_duration="2.400000",
             video_duration="1.920000",
@@ -323,6 +343,162 @@ def test_verification_uses_track_end_times_not_container_metadata(
     assert artifact.video_start_us == 80_000
     assert artifact.audio_start_us == 0
     assert output.is_file()
+    command = runner.calls[1][0]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "atrim=duration=1.920000" in graph
+
+
+@pytest.mark.parametrize(
+    ("source_stream", "duration_text"),
+    [
+        ({"duration_ts": 180_000, "time_base": "1/90000"}, "2.000000"),
+        ({"tags": {"DURATION": "00:00:02.250000000"}}, "2.250000"),
+    ],
+)
+def test_source_video_duration_supports_timestamp_and_matroska_tag_fallbacks(
+    tmp_path: Path,
+    source_stream: dict[str, object],
+    duration_text: str,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        source_probe_stdout=json.dumps({"streams": [source_stream]}),
+        probe_stdout=_probe_payload(duration=duration_text),
+    )
+
+    asyncio.run(
+        FfmpegAudioMixExporter(runner=runner).export(
+            source,
+            accompaniment,
+            narration,
+            output,
+            expected_duration_us=2_600_000,
+        )
+    )
+
+    command = runner.calls[1][0]
+    graph = command[command.index("-filter_complex") + 1]
+    assert f"atrim=duration={duration_text}" in graph
+
+
+@pytest.mark.parametrize(
+    "source_stream",
+    [
+        {"duration_ts": 1, "time_base": "1/0"},
+        {"duration_ts": "NaN", "time_base": "1/90000"},
+        {"tags": {"DURATION": "invalid"}},
+    ],
+)
+def test_malformed_source_video_timing_is_rejected_safely(
+    tmp_path: Path,
+    source_stream: dict[str, object],
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        source_probe_stdout=json.dumps({"streams": [source_stream]}),
+    )
+
+    with pytest.raises(MediaExportError) as captured:
+        asyncio.run(
+            FfmpegAudioMixExporter(runner=runner).export(
+                source,
+                accompaniment,
+                narration,
+                output,
+                expected_duration_us=2_600_000,
+            )
+        )
+
+    assert captured.value.code == MediaExportErrorCode.INVALID_OUTPUT
+    assert captured.value.retryable is True
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("source_probe_stdout", "source_probe_returncode", "retryable"),
+    [
+        (json.dumps({"streams": [{"duration": "2.0"}]}), 1, True),
+        ("not-json", 0, True),
+        (json.dumps({"streams": []}), 0, False),
+        (json.dumps({"streams": [{}]}), 0, True),
+    ],
+)
+def test_invalid_source_video_timeline_fails_before_ffmpeg(
+    tmp_path: Path,
+    source_probe_stdout: str,
+    source_probe_returncode: int,
+    retryable: bool,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        source_probe_stdout=source_probe_stdout,
+        source_probe_returncode=source_probe_returncode,
+    )
+
+    with pytest.raises(MediaExportError) as captured:
+        asyncio.run(
+            FfmpegAudioMixExporter(runner=runner).export(
+                source,
+                accompaniment,
+                narration,
+                output,
+                expected_duration_us=2_600_000,
+            )
+        )
+
+    assert captured.value.code == MediaExportErrorCode.INVALID_OUTPUT
+    assert captured.value.retryable is retryable
+    assert len(runner.calls) == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("probe_error", "expected_code", "retryable"),
+    [
+        (
+            MediaExportError(
+                MediaExportErrorCode.FFMPEG_UNAVAILABLE,
+                "runner missing",
+                retryable=False,
+            ),
+            MediaExportErrorCode.FFPROBE_UNAVAILABLE,
+            False,
+        ),
+        (
+            MediaExportError(
+                MediaExportErrorCode.EXPORT_FAILED,
+                "runner timed out",
+                retryable=True,
+            ),
+            MediaExportErrorCode.INVALID_OUTPUT,
+            True,
+        ),
+    ],
+)
+def test_source_video_probe_errors_are_mapped_to_probe_context(
+    tmp_path: Path,
+    probe_error: MediaExportError,
+    expected_code: MediaExportErrorCode,
+    retryable: bool,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(source_probe_error=probe_error)
+
+    with pytest.raises(MediaExportError) as captured:
+        asyncio.run(
+            FfmpegAudioMixExporter(runner=runner).export(
+                source,
+                accompaniment,
+                narration,
+                output,
+                expected_duration_us=2_600_000,
+            )
+        )
+
+    assert captured.value.code == expected_code
+    assert captured.value.retryable is retryable
+    assert len(runner.calls) == 1
+    assert not output.exists()
 
 
 def test_pre_cancelled_export_is_typed_and_does_not_start_runner(tmp_path: Path) -> None:

@@ -14,7 +14,7 @@ import subprocess
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -306,17 +306,23 @@ class FfmpegAudioMixExporter:
 
         try:
             self._check_cancelled(cancellation)
+            visual_duration_us = await self._source_video_duration(
+                source,
+                cancellation=cancellation,
+            )
+            self._check_cancelled(cancellation)
             command = self._ffmpeg_command(
                 source,
                 accompaniment,
                 narration,
                 temporary,
+                visual_duration_us,
             )
             result = await self._runner(
                 command,
                 cancellation=cancellation,
                 on_progress=on_progress,
-                expected_duration_us=expected_duration_us,
+                expected_duration_us=visual_duration_us,
                 timeout_seconds=self._timeout_seconds,
             )
             self._check_cancelled(cancellation)
@@ -343,7 +349,7 @@ class FfmpegAudioMixExporter:
                     "Không thể công bố file video thuyết minh",
                     retryable=True,
                 ) from error
-            _emit_progress(on_progress, expected_duration_us, expected_duration_us)
+            _emit_progress(on_progress, visual_duration_us, visual_duration_us)
             return ExportedMedia(
                 path=destination,
                 duration_us=verified.duration_us,
@@ -366,13 +372,105 @@ class FfmpegAudioMixExporter:
                 retryable=True,
             ) from error
 
+    async def _source_video_duration(
+        self,
+        source: Path,
+        *,
+        cancellation: Cancellation | None,
+    ) -> int:
+        """Resolve the visual span before creating a finite replacement track.
+
+        FFmpeg 4.4 cannot always stop filtered audio at the mapped video EOF
+        when an unselected source track extends the container. Prefer the first
+        video stream's own duration. Failing closed is important here: using
+        the container/checkpoint duration can recreate the mismatch this probe
+        is intended to prevent.
+        """
+
+        command = (
+            self._ffprobe,
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,duration_ts,time_base:stream_tags=DURATION",
+            "-of",
+            "json",
+            os.fspath(source),
+        )
+        try:
+            result = await self._runner(
+                command,
+                cancellation=cancellation,
+                on_progress=None,
+                expected_duration_us=None,
+                timeout_seconds=30.0,
+            )
+        except MediaExportError as error:
+            if error.code == MediaExportErrorCode.FFMPEG_UNAVAILABLE:
+                raise MediaExportError(
+                    MediaExportErrorCode.FFPROBE_UNAVAILABLE,
+                    "Không thể khởi động ffprobe để đọc timeline luồng hình",
+                    retryable=False,
+                ) from error
+            if error.code == MediaExportErrorCode.EXPORT_FAILED:
+                raise MediaExportError(
+                    MediaExportErrorCode.INVALID_OUTPUT,
+                    "Không thể đọc thời lượng luồng hình nguồn trong thời gian cho phép",
+                    retryable=True,
+                ) from error
+            raise
+        if result.returncode != 0:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "ffprobe không đọc được timeline luồng hình nguồn",
+                retryable=True,
+            )
+        try:
+            payload = json.loads(_as_text(result.stdout))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "ffprobe trả về timeline luồng hình nguồn không hợp lệ",
+                retryable=True,
+            ) from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("streams"), list):
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "Video nguồn không có thông tin timeline luồng hình hợp lệ",
+                retryable=True,
+            )
+        video = next(
+            (stream for stream in payload["streams"] if isinstance(stream, dict)),
+            None,
+        )
+        if video is None:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "Video nguồn không có luồng hình để xuất",
+                retryable=False,
+            )
+        duration_us = _stream_duration_us(video)
+        if duration_us is None:
+            raise MediaExportError(
+                MediaExportErrorCode.INVALID_OUTPUT,
+                "Không xác định được thời lượng luồng hình nguồn",
+                retryable=True,
+            )
+        return duration_us
+
     def _ffmpeg_command(
         self,
         source: Path,
         accompaniment: Path,
         narration: Path,
         temporary: Path,
+        visual_duration_us: int,
     ) -> tuple[str, ...]:
+        duration = _seconds_text(visual_duration_us)
         settings = self._settings
         limiter = 10.0 ** (settings.true_peak_db / 20.0)
         graph = (
@@ -392,7 +490,8 @@ class FfmpegAudioMixExporter:
             f"release={settings.ducking_release_ms}:makeup=1[ducked];"
             "[ducked][narr_mix]amix=inputs=2:duration=longest:"
             "dropout_transition=0:normalize=0,"
-            f"alimiter=limit={limiter:.6f}:attack=5:release=50,apad[mixed]"
+            f"alimiter=limit={limiter:.6f}:attack=5:release=50,"
+            f"apad,atrim=duration={duration}[mixed]"
         )
         return (
             self._ffmpeg,
@@ -433,7 +532,6 @@ class FfmpegAudioMixExporter:
             "2",
             "-write_tmcd",
             "0",
-            "-shortest",
             "-movflags",
             "+faststart",
             "-progress",
@@ -609,12 +707,47 @@ def _emit_progress(
         callback(progress)
 
 
+def _seconds_text(duration_us: int) -> str:
+    whole, fraction = divmod(duration_us, 1_000_000)
+    return f"{whole}.{fraction:06d}"
+
+
 def _time_us(value: object, *, positive: bool) -> int | None:
     try:
         seconds = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
     if not seconds.is_finite() or (positive and seconds <= 0):
+        return None
+    return int((seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _stream_duration_us(stream: dict[str, object]) -> int | None:
+    duration_us = _time_us(stream.get("duration"), positive=True)
+    if duration_us is not None:
+        return duration_us
+    try:
+        ticks = Decimal(str(stream.get("duration_ts")))
+        numerator_text, denominator_text = str(stream.get("time_base")).split("/", 1)
+        seconds = ticks * Decimal(numerator_text) / Decimal(denominator_text)
+    except (DecimalException, ValueError):
+        seconds = Decimal(0)
+    if seconds.is_finite() and seconds > 0:
+        return int((seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP))
+    tags = stream.get("tags")
+    if not isinstance(tags, dict):
+        return None
+    raw_duration = tags.get("DURATION") or tags.get("duration")
+    try:
+        hours_text, minutes_text, seconds_text = str(raw_duration).split(":", 2)
+        seconds = (
+            Decimal(hours_text) * 3600
+            + Decimal(minutes_text) * 60
+            + Decimal(seconds_text)
+        )
+    except (DecimalException, ValueError):
+        return None
+    if not seconds.is_finite() or seconds <= 0:
         return None
     return int((seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP))
 
