@@ -647,6 +647,7 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
             ffmpeg_binary=str(FFMPEG),
             ffprobe_binary=str(FFPROBE),
             duration_tolerance_us=120_000,
+            timeout_seconds=30.0,
         ).export(
             source,
             accompaniment,
@@ -785,6 +786,7 @@ def test_real_ffmpeg_aligns_replacement_audio_to_shorter_video_track(
         FfmpegAudioMixExporter(
             ffmpeg_binary=str(FFMPEG),
             ffprobe_binary=str(FFPROBE),
+            timeout_seconds=30.0,
         ).export(
             source,
             accompaniment,

@@ -173,7 +173,7 @@ không mã hóa lại hoặc cắt luồng hình:
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.2.2` thay vì `latest`, dùng URL bất biến:
+Để cài mới đúng bản `v0.2.2` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
 set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.2/install.sh | sudo bash
