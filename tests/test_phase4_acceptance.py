@@ -22,6 +22,9 @@ SPEC.loader.exec_module(phase4)
 def _probe_payload(
     *,
     duration: str = "4.000000",
+    format_duration: str | None = None,
+    video_duration: str | None = None,
+    audio_duration: str | None = None,
     video_start: str = "0.000000",
     audio_start: str = "0.000000",
     audio_codec: str = "aac",
@@ -32,20 +35,23 @@ def _probe_payload(
             "index": 0,
             "codec_type": "video",
             "codec_name": "h264",
-            "duration": duration,
+            "duration": video_duration or duration,
             "start_time": video_start,
         },
         {
             "index": 1,
             "codec_type": "audio",
             "codec_name": audio_codec,
-            "duration": duration,
+            "duration": audio_duration or duration,
             "start_time": audio_start,
         },
     ]
     if extra_stream is not None:
         streams.append(extra_stream)
-    return {"format": {"duration": duration}, "streams": streams}
+    return {
+        "format": {"duration": format_duration or duration},
+        "streams": streams,
+    }
 
 
 def test_probe_contract_accepts_exactly_one_video_and_one_synced_aac() -> None:
@@ -76,7 +82,10 @@ def test_probe_contract_accepts_exactly_one_video_and_one_synced_aac() -> None:
             "đúng một video track",
         ),
         (_probe_payload(audio_codec="opus"), "không phải AAC"),
-        (_probe_payload(duration="4.100001"), "lệch quá 100 ms"),
+        (
+            _probe_payload(audio_duration="4.100001"),
+            "lệch quá 100 ms",
+        ),
         (_probe_payload(audio_start="0.100001"), "lệch quá 100 ms"),
     ],
 )
@@ -89,6 +98,21 @@ def test_probe_contract_rejects_track_codec_duration_and_sync_violations(
             payload,
             expected_duration_us=4_000_000,
         )
+
+
+def test_probe_contract_uses_video_timeline_instead_of_container_duration() -> None:
+    contract = phase4._validate_probe_contract(
+        _probe_payload(
+            format_duration="4.600000",
+            video_duration="4.000000",
+            audio_duration="4.000000",
+        ),
+        expected_duration_us=4_000_000,
+    )
+
+    assert contract.duration_us == 4_000_000
+    assert contract.duration_error_us == 0
+    assert contract.av_duration_error_us == 0
 
 
 def test_quick_fixture_command_is_shell_free_local_and_bounded(tmp_path: Path) -> None:

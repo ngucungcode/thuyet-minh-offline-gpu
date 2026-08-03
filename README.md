@@ -26,7 +26,7 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Trình cài production `v0.2.1` hỗ trợ đường triển khai native sau:
+Trình cài production `v0.2.2` hỗ trợ đường triển khai native sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
@@ -151,10 +151,11 @@ Job đã hoàn tất và toàn bộ thư mục nguồn `incoming` nằm ngoài p
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` lên `v0.2.1`, chạy một lệnh:
+Để nâng cấp deployment Git sạch từ `v0.2.0` hoặc `v0.2.1` lên `v0.2.2`, chạy
+một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.1/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.2/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Trình cài chỉ chấp nhận đường nâng cấp đã khai báo, từ chối worktree bẩn, origin sai
@@ -163,17 +164,19 @@ hoặc còn job đang hoạt động. Source mới được kích hoạt bằng 
 acceptance thất bại, trình cài phục hồi source và trạng thái stack cũ. Backup source
 cũ được giữ lại để kiểm tra thủ công.
 
-Sau khi nâng cấp bản vá này, job từng dừng ở lỗi `output_track_layout_invalid` sẽ có
-thể tiếp tục từ checkpoint:
+Sau khi nâng cấp bản vá này, job từng dừng ở lỗi `output_track_layout_invalid` hoặc
+`output_duration_mismatch` sẽ có thể tiếp tục từ checkpoint dựng MP4. Bản xuất mới
+lấy điểm kết thúc luồng hình làm timeline chuẩn, đệm/cắt phần tiếng tương ứng mà
+không mã hóa lại hoặc cắt luồng hình:
 
 ```bash
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.2.1` thay vì `latest`, dùng URL bất biến:
+Để cài mới đúng bản `v0.2.2` thay vì `latest`, dùng URL bất biến:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.1/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.2.2/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có

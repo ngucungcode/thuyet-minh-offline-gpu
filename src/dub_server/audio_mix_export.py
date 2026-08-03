@@ -311,7 +311,6 @@ class FfmpegAudioMixExporter:
                 accompaniment,
                 narration,
                 temporary,
-                expected_duration_us,
             )
             result = await self._runner(
                 command,
@@ -334,7 +333,7 @@ class FfmpegAudioMixExporter:
                     retryable=True,
                 )
 
-            verified = await self._verify(temporary, expected_duration_us, cancellation)
+            verified = await self._verify(temporary, cancellation)
             self._check_cancelled(cancellation)
             try:
                 os.replace(temporary, destination)
@@ -373,9 +372,7 @@ class FfmpegAudioMixExporter:
         accompaniment: Path,
         narration: Path,
         temporary: Path,
-        expected_duration_us: int,
     ) -> tuple[str, ...]:
-        duration = _seconds_text(expected_duration_us)
         settings = self._settings
         limiter = 10.0 ** (settings.true_peak_db / 20.0)
         graph = (
@@ -394,8 +391,8 @@ class FfmpegAudioMixExporter:
             f"ratio={settings.ducking_ratio:.2f}:attack={settings.ducking_attack_ms}:"
             f"release={settings.ducking_release_ms}:makeup=1[ducked];"
             "[ducked][narr_mix]amix=inputs=2:duration=longest:"
-            f"dropout_transition=0:normalize=0,apad,atrim=duration={duration},"
-            f"alimiter=limit={limiter:.6f}:attack=5:release=50[mixed]"
+            "dropout_transition=0:normalize=0,"
+            f"alimiter=limit={limiter:.6f}:attack=5:release=50,apad[mixed]"
         )
         return (
             self._ffmpeg,
@@ -436,6 +433,7 @@ class FfmpegAudioMixExporter:
             "2",
             "-write_tmcd",
             "0",
+            "-shortest",
             "-movflags",
             "+faststart",
             "-progress",
@@ -447,7 +445,6 @@ class FfmpegAudioMixExporter:
     async def _verify(
         self,
         temporary: Path,
-        expected_duration_us: int,
         cancellation: Cancellation | None,
     ) -> ExportedMedia:
         command = (
@@ -457,7 +454,7 @@ class FfmpegAudioMixExporter:
             "-protocol_whitelist",
             "file",
             "-show_entries",
-            "format=duration:stream=index,codec_type,codec_name,codec_tag_string,"
+            "stream=index,codec_type,codec_name,codec_tag_string,"
             "start_time,duration",
             "-of",
             "json",
@@ -529,35 +526,13 @@ class FfmpegAudioMixExporter:
                 "Luồng thuyết minh đầu ra không phải AAC",
                 retryable=False,
             )
-        format_data = payload.get("format")
-        if not isinstance(format_data, dict):
-            format_data = {}
-        duration_us = _time_us(format_data.get("duration"), positive=True)
         video_duration_us = _time_us(videos[0].get("duration"), positive=True)
         audio_duration_us = _time_us(audios[0].get("duration"), positive=True)
-        if duration_us is None:
-            duration_us = max(video_duration_us or 0, audio_duration_us or 0) or None
-        if duration_us is None:
+        if video_duration_us is None or audio_duration_us is None:
             raise MediaExportError(
                 MediaExportErrorCode.INVALID_OUTPUT,
-                "Không xác định được thời lượng video đầu ra",
+                "Không xác định được thời lượng luồng hình hoặc tiếng đầu ra",
                 retryable=True,
-            )
-        if abs(duration_us - expected_duration_us) > self._duration_tolerance_us:
-            raise MediaExportError(
-                MediaExportErrorCode.DURATION_MISMATCH,
-                "Thời lượng video đầu ra không khớp với timeline thuyết minh",
-                retryable=False,
-            )
-        if (
-            video_duration_us is not None
-            and audio_duration_us is not None
-            and abs(video_duration_us - audio_duration_us) > self._duration_tolerance_us
-        ):
-            raise MediaExportError(
-                MediaExportErrorCode.DURATION_MISMATCH,
-                "Thời lượng luồng hình và tiếng thuyết minh không khớp",
-                retryable=False,
             )
         video_start_us = _time_us(videos[0].get("start_time"), positive=False) or 0
         audio_start_us = _time_us(audios[0].get("start_time"), positive=False) or 0
@@ -567,6 +542,15 @@ class FfmpegAudioMixExporter:
                 "Luồng hình và lời thuyết minh bị lệch thời điểm bắt đầu",
                 retryable=False,
             )
+        video_end_us = video_start_us + video_duration_us
+        audio_end_us = audio_start_us + audio_duration_us
+        if abs(video_end_us - audio_end_us) > self._duration_tolerance_us:
+            raise MediaExportError(
+                MediaExportErrorCode.DURATION_MISMATCH,
+                "Điểm kết thúc luồng hình và tiếng thuyết minh không khớp",
+                retryable=False,
+            )
+        duration_us = video_duration_us
         return ExportedMedia(
             path=temporary,
             duration_us=duration_us,
@@ -623,11 +607,6 @@ def _emit_progress(
     )
     with suppress(Exception):
         callback(progress)
-
-
-def _seconds_text(duration_us: int) -> str:
-    whole, fraction = divmod(duration_us, 1_000_000)
-    return f"{whole}.{fraction:06d}"
 
 
 def _time_us(value: object, *, positive: bool) -> int | None:

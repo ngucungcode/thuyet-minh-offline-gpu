@@ -311,23 +311,19 @@ def _validate_probe_contract(
     audio_codec = str(audios[0].get("codec_name", "")).casefold()
     if audio_codec != "aac":
         raise AssertionError("Audio track đầu ra không phải AAC")
-    format_payload = payload.get("format")
-    if not isinstance(format_payload, Mapping):
-        format_payload = {}
-    format_duration = _seconds_to_us(format_payload.get("duration"), positive=True)
     video_duration = _seconds_to_us(videos[0].get("duration"), positive=True)
     audio_duration = _seconds_to_us(audios[0].get("duration"), positive=True)
-    duration = format_duration or max(video_duration or 0, audio_duration or 0)
-    if duration <= 0:
-        raise AssertionError("Không xác định được thời lượng output")
-    video_duration = video_duration or duration
-    audio_duration = audio_duration or duration
+    if video_duration is None or audio_duration is None:
+        raise AssertionError("Không xác định được thời lượng video/audio output")
+    duration = video_duration
     video_start = _seconds_to_us(videos[0].get("start_time"), positive=False) or 0
     audio_start = _seconds_to_us(audios[0].get("start_time"), positive=False) or 0
     duration_error = (
         0 if expected_duration_us is None else abs(duration - expected_duration_us)
     )
-    av_duration_error = abs(video_duration - audio_duration)
+    av_duration_error = abs(
+        (video_start + video_duration) - (audio_start + audio_duration)
+    )
     sync_error = abs(video_start - audio_start)
     if duration_error > tolerance_us:
         raise AssertionError("Thời lượng output lệch quá 100 ms so với timeline")

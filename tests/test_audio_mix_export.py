@@ -18,6 +18,9 @@ from dub_server.audio_mix_export import (
 def _probe_payload(
     *,
     duration: str = "2.000000",
+    format_duration: str | None = None,
+    video_duration: str | None = None,
+    audio_duration: str | None = None,
     video_start: str = "0.000000",
     audio_start: str = "0.000000",
     audio_codec: str = "aac",
@@ -29,19 +32,21 @@ def _probe_payload(
             "codec_type": "video",
             "codec_name": "h264",
             "start_time": video_start,
-            "duration": duration,
+            "duration": video_duration or duration,
         },
         {
             "index": 1,
             "codec_type": "audio",
             "codec_name": audio_codec,
             "start_time": audio_start,
-            "duration": duration,
+            "duration": audio_duration or duration,
         },
     ]
     if extra_stream is not None:
         streams.append(extra_stream)
-    return json.dumps({"streams": streams, "format": {"duration": duration}})
+    return json.dumps(
+        {"streams": streams, "format": {"duration": format_duration or duration}}
+    )
 
 
 class FakeRunner:
@@ -145,8 +150,10 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert "sidechaincompress=" in graph
     assert "ratio=3.00" in graph
     assert "amix=inputs=2" in graph
-    assert "atrim=duration=2.000000" in graph
+    assert "atrim=" not in graph
+    assert "apad" in graph
     assert "alimiter=" in graph
+    assert "-shortest" in command
 
 
 @pytest.mark.parametrize(
@@ -246,7 +253,14 @@ def test_verification_rejects_any_extra_or_original_audio_track(tmp_path: Path) 
 @pytest.mark.parametrize(
     ("probe", "expected_code"),
     [
-        (_probe_payload(duration="2.100001"), MediaExportErrorCode.DURATION_MISMATCH),
+        (
+            _probe_payload(audio_duration="2.100001"),
+            MediaExportErrorCode.DURATION_MISMATCH,
+        ),
+        (
+            _probe_payload(audio_start="0.080000", audio_duration="2.030001"),
+            MediaExportErrorCode.DURATION_MISMATCH,
+        ),
         (
             _probe_payload(audio_start="0.100001"),
             MediaExportErrorCode.SYNC_MISMATCH,
@@ -279,6 +293,36 @@ def test_verification_enforces_duration_sync_and_aac(
     assert captured.value.code == expected_code
     assert not output.exists()
     assert not output.with_name(".dubbed.part.mp4").exists()
+
+
+def test_verification_uses_track_end_times_not_container_metadata(
+    tmp_path: Path,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        probe_stdout=_probe_payload(
+            format_duration="2.400000",
+            video_duration="1.920000",
+            video_start="0.080000",
+            audio_duration="2.000000",
+            audio_start="0.000000",
+        )
+    )
+
+    artifact = asyncio.run(
+        FfmpegAudioMixExporter(runner=runner).export(
+            source,
+            accompaniment,
+            narration,
+            output,
+            expected_duration_us=2_400_000,
+        )
+    )
+
+    assert artifact.duration_us == 1_920_000
+    assert artifact.video_start_us == 80_000
+    assert artifact.audio_start_us == 0
+    assert output.is_file()
 
 
 def test_pre_cancelled_export_is_typed_and_does_not_start_runner(tmp_path: Path) -> None:
@@ -463,3 +507,139 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
         ("audio", "aac"),
     ]
     assert output_payload.get("chapters", []) == []
+
+
+@pytest.mark.skipif(
+    FFMPEG is None or FFPROBE is None,
+    reason="FFmpeg/ffprobe không có trên máy chạy test",
+)
+def test_real_ffmpeg_aligns_replacement_audio_to_shorter_video_track(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-with-longer-audio.mp4"
+    accompaniment = tmp_path / "accompaniment.wav"
+    narration = tmp_path / "narration.wav"
+    output = tmp_path / "dubbed.mp4"
+    subprocess.run(
+        [
+            str(FFMPEG),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=25:duration=2.0",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=48000:duration=2.6",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "5",
+            "-c:a",
+            "aac",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    for target, frequency in ((accompaniment, 440), (narration, 880)):
+        subprocess.run(
+            [
+                str(FFMPEG),
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={frequency}:sample_rate=48000:duration=2.6",
+                "-c:a",
+                "pcm_s16le",
+                str(target),
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+
+    source_probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:stream=codec_type,duration",
+            "-of",
+            "json",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    source_payload = json.loads(source_probe.stdout)
+    source_video = next(
+        item
+        for item in source_payload["streams"]
+        if item["codec_type"] == "video"
+    )
+    assert abs(float(source_payload["format"]["duration"]) - 2.6) <= 0.1
+    assert abs(float(source_video["duration"]) - 2.0) <= 0.1
+
+    artifact = asyncio.run(
+        FfmpegAudioMixExporter(
+            ffmpeg_binary=str(FFMPEG),
+            ffprobe_binary=str(FFPROBE),
+        ).export(
+            source,
+            accompaniment,
+            narration,
+            output,
+            expected_duration_us=2_600_000,
+        )
+    )
+
+    assert abs(artifact.duration_us - 2_000_000) <= 100_000
+    probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,start_time,duration",
+            "-of",
+            "json",
+            str(output),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    video = next(item for item in streams if item["codec_type"] == "video")
+    audio = next(item for item in streams if item["codec_type"] == "audio")
+    video_end = float(video.get("start_time", 0)) + float(video["duration"])
+    audio_end = float(audio.get("start_time", 0)) + float(audio["duration"])
+    assert abs(video_end - audio_end) <= 0.1
