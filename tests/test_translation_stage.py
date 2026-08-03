@@ -322,6 +322,32 @@ async def test_legacy_job_without_profile_keeps_strict_translation_prompt(
 
 
 @pytest.mark.asyncio
+async def test_invalid_timing_profile_fails_with_shared_error_code(
+    tmp_path: Path,
+) -> None:
+    store, job_id = _ready_translation_job(
+        tmp_path,
+        timing_profile="cinematic",
+    )
+    verified = _verified_model(tmp_path, SELECTED_MODEL_ID)
+    translator = DurationAwareFakeTranslator([])
+
+    result = await _stage(
+        tmp_path,
+        store,
+        translator_factory=lambda _verified: translator,
+        model_resolver=lambda *_args: verified,
+    ).run(job_id)
+
+    assert result.status is JobStatus.FAILED
+    assert result.error_code == "timing_profile_invalid"
+    assert result.retryable is False
+    assert translator.calls == []
+    assert translator.duration_calls == []
+    assert translator.closed is True
+
+
+@pytest.mark.asyncio
 async def test_default_model_is_used_when_job_did_not_select_one(
     tmp_path: Path,
 ) -> None:

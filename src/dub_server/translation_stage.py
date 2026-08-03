@@ -18,6 +18,7 @@ from .model_registry import (
     resolve_verified_model,
 )
 from .state import InvalidTransition, JobRecord, JobStage, JobStatus, StateStore
+from .timing import TimingProfile
 from .transcript import TranscriptError, load_transcript_artifact
 from .translation import (
     TranslationBlock,
@@ -269,7 +270,7 @@ class TranslationStage:
             prompt_template_id = str(
                 verified.entry.get("prompt_template_id", "gemma4-translation-v1")
             )
-            if timing_profile == "natural":
+            if timing_profile is TimingProfile.NATURAL:
                 prompt_template_id = (
                     f"{prompt_template_id}+{_NATURAL_PROMPT_VERSION}"
                 )
@@ -359,7 +360,7 @@ class TranslationStage:
         block: TranslationBlock,
         source_language: str,
         job_id: str,
-        timing_profile: str,
+        timing_profile: TimingProfile,
     ) -> str:
         def progress(_completed: int, _total: int) -> None:
             if self._is_cancel_requested(job_id):
@@ -369,7 +370,9 @@ class TranslationStage:
             duration_translation = getattr(
                 translator, "translate_batch_for_durations", None
             )
-            if timing_profile == "natural" and callable(duration_translation):
+            if timing_profile is TimingProfile.NATURAL and callable(
+                duration_translation
+            ):
                 outputs = duration_translation(
                     [block.source_text],
                     [block.end_us - block.start_us],
@@ -390,7 +393,9 @@ class TranslationStage:
             halves = self._split_retry_block(block)
             if halves is None:
                 raise
-            if timing_profile == "natural" and callable(duration_translation):
+            if timing_profile is TimingProfile.NATURAL and callable(
+                duration_translation
+            ):
                 outputs = duration_translation(
                     [item.source_text for item in halves],
                     [item.end_us - item.start_us for item in halves],
@@ -604,17 +609,18 @@ class TranslationStage:
         return self._default_model_id
 
     @staticmethod
-    def _timing_profile(job: JobRecord) -> str:
+    def _timing_profile(job: JobRecord) -> TimingProfile:
         value = job.spec.get("timing_profile")
         if value is None:
-            return "strict"
-        if value not in {"natural", "strict"}:
+            return TimingProfile.STRICT
+        try:
+            return TimingProfile(value)
+        except (TypeError, ValueError) as error:
             raise TranslationError(
-                "invalid_timing_profile",
+                "timing_profile_invalid",
                 "Chế độ căn thời lượng lời thuyết minh không hợp lệ",
                 retryable=False,
-            )
-        return str(value)
+            ) from error
 
     @staticmethod
     def _is_vietnamese(language: str) -> bool:

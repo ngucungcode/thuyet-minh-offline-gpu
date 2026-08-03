@@ -31,9 +31,10 @@ POST /v1/uploads/{id}/finalize
 
 Có thể xem lại session bằng `GET /v1/uploads/{id}` hoặc hủy và dọn file dở bằng
 `DELETE /v1/uploads/{id}`. Mặc định server nhận video tối đa 100 GiB, SRT tối đa
-16 MiB và tự dọn định kỳ session chưa finalize sau 7 ngày (đồng thời quét ngay khi
-API khởi động). Mọi lỗi upload/finalize đều giữ nguyên session để người dùng có thể
-sửa SRT hoặc thử lại; dashboard đọc lại checkpoint và bỏ qua media/SRT đã có đúng
+16 MiB và tự dọn định kỳ session chưa finalize theo TTL máy chủ, mặc định 7 ngày
+(đồng thời quét ngay khi API khởi động). Mọi lỗi upload/finalize đều giữ nguyên
+session để người dùng có thể sửa SRT hoặc thử lại; dashboard đọc lại checkpoint
+và bỏ qua media/SRT đã có đúng
 kích thước; CLI còn đối chiếu SHA-256 trước khi bỏ qua file. Server kiểm lại checksum
 trước khi finalize. Chỉ thao tác hủy/xóa rõ ràng hoặc TTL mới dọn session. Có thể đổi giới hạn bằng
 `DUB_UPLOAD_MEDIA_MAX_BYTES`, `DUB_UPLOAD_SUBTITLE_MAX_BYTES` và

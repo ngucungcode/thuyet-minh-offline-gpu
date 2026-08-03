@@ -146,7 +146,7 @@ select:focus-visible {
 .machine-label,
 .step-number,
 footer {
-  font-family: Consolas, "SFMono-Regular", monospace;
+  font-family: Consolas, SFMono-Regular, monospace;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
@@ -424,7 +424,7 @@ h1 {
 
 .file-picker-kicker {
   color: var(--acid);
-  font-family: Consolas, "SFMono-Regular", monospace;
+  font-family: Consolas, SFMono-Regular, monospace;
   font-size: 8px;
   letter-spacing: 0.14em;
 }

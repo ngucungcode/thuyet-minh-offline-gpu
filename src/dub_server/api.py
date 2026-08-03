@@ -1,6 +1,7 @@
 """FastAPI control plane for acquisition and durable job orchestration."""
 
 import asyncio
+import errno
 import hashlib
 import ipaddress
 import json
@@ -74,6 +75,13 @@ from .state import (
 
 
 _SHA256_HEX = frozenset("0123456789abcdef")
+_UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS = frozenset(
+    {
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+)
 
 
 def _opensubtitles_secret_paths(settings: Settings) -> tuple[Path, Path, Path] | None:
@@ -419,6 +427,26 @@ def _read_regular_bytes(path: Path, *, maximum: int) -> bytes:
         os.close(descriptor)
 
 
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+    except OSError as exc:
+        if exc.errno in _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS:
+            return
+        raise
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            if exc.errno not in _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS:
+                raise
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write_bytes(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.part")
     flags = (
@@ -436,6 +464,8 @@ def _atomic_write_bytes(path: Path, payload: bytes, *, mode: int = 0o600) -> Non
         os.close(descriptor)
         descriptor = None
         os.replace(temporary, path)
+        if os.name != "nt":
+            _fsync_directory(path.parent)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -692,6 +722,40 @@ def _copy_regular_file(
         temporary.unlink(missing_ok=True)
 
 
+def _expired_upload_session_directory(
+    settings: Settings,
+    raw_identifier: str,
+    *,
+    cutoff: float,
+) -> Path | None:
+    """Return one safe expired session directory after checking it in place."""
+
+    try:
+        identifier = str(uuid.UUID(raw_identifier))
+    except (ValueError, AttributeError):
+        return None
+    if identifier != raw_identifier.lower():
+        return None
+    root = settings.incoming_dir.resolve(strict=False)
+    candidate = root / identifier
+    session_path = candidate / ".upload-session.json"
+    try:
+        candidate_metadata = candidate.lstat()
+        session_metadata = session_path.lstat()
+    except OSError:
+        return None
+    if (
+        not stat_module.S_ISDIR(candidate_metadata.st_mode)
+        or candidate.is_symlink()
+        or not stat_module.S_ISREG(session_metadata.st_mode)
+        or session_path.is_symlink()
+        or session_metadata.st_mtime >= cutoff
+        or not candidate.absolute().is_relative_to(root.absolute())
+    ):
+        return None
+    return candidate
+
+
 def _expired_upload_session_identifiers(settings: Settings) -> tuple[str, ...]:
     """Return UUID sessions whose checkpoint metadata is older than the TTL."""
 
@@ -700,27 +764,20 @@ def _expired_upload_session_identifiers(settings: Settings) -> tuple[str, ...]:
         candidates = tuple(root.iterdir())
     except FileNotFoundError:
         return ()
+    except OSError:
+        _LOGGER.exception("Could not scan upload sessions for expiration")
+        return ()
     cutoff = time.time() - settings.upload_session_ttl_seconds
-    identifiers: list[str] = []
-    for candidate in candidates:
-        try:
-            identifier = str(uuid.UUID(candidate.name))
-            candidate_metadata = candidate.lstat()
-            session_metadata = (candidate / ".upload-session.json").lstat()
-        except (OSError, ValueError):
-            continue
-        if (
-            identifier != candidate.name.lower()
-            or not stat_module.S_ISDIR(candidate_metadata.st_mode)
-            or candidate.is_symlink()
-            or not stat_module.S_ISREG(session_metadata.st_mode)
-            or (candidate / ".upload-session.json").is_symlink()
-            or session_metadata.st_mtime >= cutoff
-            or not candidate.absolute().is_relative_to(root.absolute())
-        ):
-            continue
-        identifiers.append(identifier)
-    return tuple(identifiers)
+    return tuple(
+        candidate.name
+        for candidate in candidates
+        if _expired_upload_session_directory(
+            settings,
+            candidate.name,
+            cutoff=cutoff,
+        )
+        is not None
+    )
 
 
 def _cleanup_stale_upload_sessions(
@@ -731,7 +788,6 @@ def _cleanup_stale_upload_sessions(
 ) -> None:
     """Remove only expired, unfinalized UUID upload directories."""
 
-    root = settings.incoming_dir.resolve(strict=False)
     selected = (
         _expired_upload_session_identifiers(settings)
         if identifiers is None
@@ -742,20 +798,14 @@ def _cleanup_stale_upload_sessions(
     for raw_identifier in selected:
         try:
             identifier = str(uuid.UUID(raw_identifier))
-            candidate = root / identifier
-            candidate_metadata = candidate.lstat()
-            session_metadata = (candidate / ".upload-session.json").lstat()
-        except (OSError, ValueError):
+        except (ValueError, AttributeError):
             continue
-        if (
-            identifier != raw_identifier.lower()
-            or not stat_module.S_ISDIR(candidate_metadata.st_mode)
-            or candidate.is_symlink()
-            or not stat_module.S_ISREG(session_metadata.st_mode)
-            or (candidate / ".upload-session.json").is_symlink()
-            or session_metadata.st_mtime >= cutoff
-            or not candidate.absolute().is_relative_to(root.absolute())
-        ):
+        candidate = _expired_upload_session_directory(
+            settings,
+            raw_identifier,
+            cutoff=cutoff,
+        )
+        if candidate is None:
             continue
         try:
             session = _load_upload_session(settings, identifier)
@@ -769,18 +819,43 @@ def _cleanup_stale_upload_sessions(
             pass
         else:
             continue
-        shutil.rmtree(candidate)
         prepared = jobs_root / identifier
         try:
             prepared_metadata = prepared.lstat()
         except FileNotFoundError:
+            pass
+        except OSError:
+            _LOGGER.exception(
+                "Could not inspect prepared artifacts for expired upload %s",
+                identifier,
+            )
             continue
-        if (
-            stat_module.S_ISDIR(prepared_metadata.st_mode)
-            and not prepared.is_symlink()
-            and prepared.absolute().is_relative_to(jobs_root.absolute())
-        ):
-            shutil.rmtree(prepared)
+        else:
+            if not (
+                stat_module.S_ISDIR(prepared_metadata.st_mode)
+                and not prepared.is_symlink()
+                and prepared.absolute().is_relative_to(jobs_root.absolute())
+            ):
+                _LOGGER.error(
+                    "Refusing to remove unsafe prepared artifacts for upload %s",
+                    identifier,
+                )
+                continue
+            try:
+                shutil.rmtree(prepared)
+            except OSError:
+                _LOGGER.exception(
+                    "Could not remove prepared artifacts for expired upload %s",
+                    identifier,
+                )
+                continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError:
+            _LOGGER.exception(
+                "Could not remove expired upload session %s",
+                identifier,
+            )
 
 
 async def _monitor_stale_upload_sessions(
@@ -2446,14 +2521,14 @@ def create_app(
                         "active_job_id": active[0].id if active else None,
                     },
                 ) from exc
-            except DuplicateJob:
+            except DuplicateJob as exc:
                 record = store.get_job(identifier)
                 if record.release_id != expected_release_id:
                     raise _upload_error(
                         status.HTTP_409_CONFLICT,
                         "upload_job_conflict",
                         "Mã phiên tải file đã thuộc về một job khác",
-                    )
+                    ) from exc
 
             session = session.model_copy(
                 update={"status": "finalized", "job_id": record.id}
@@ -2496,20 +2571,65 @@ def create_app(
                     "upload_path_invalid",
                     "Thư mục phiên tải file không an toàn",
                 )
-            shutil.rmtree(directory)
             prepared = configured_settings.jobs_dir.resolve(strict=False) / identifier
             try:
                 prepared_metadata = prepared.lstat()
             except FileNotFoundError:
                 pass
+            except OSError as exc:
+                _LOGGER.exception(
+                    "Could not inspect prepared artifacts for upload %s",
+                    identifier,
+                )
+                raise _upload_error(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "upload_cleanup_failed",
+                    "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+                    retryable=True,
+                ) from exc
             else:
                 jobs_root = configured_settings.jobs_dir.resolve(strict=False)
-                if (
+                if not (
                     stat_module.S_ISDIR(prepared_metadata.st_mode)
                     and not prepared.is_symlink()
                     and prepared.absolute().is_relative_to(jobs_root.absolute())
                 ):
+                    _LOGGER.error(
+                        "Refusing to remove unsafe prepared artifacts for upload %s",
+                        identifier,
+                    )
+                    raise _upload_error(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "upload_cleanup_failed",
+                        "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+                        retryable=True,
+                    )
+                try:
                     shutil.rmtree(prepared)
+                except OSError as exc:
+                    _LOGGER.exception(
+                        "Could not remove prepared artifacts for upload %s",
+                        identifier,
+                    )
+                    raise _upload_error(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "upload_cleanup_failed",
+                        "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+                        retryable=True,
+                    ) from exc
+            try:
+                shutil.rmtree(directory)
+            except OSError as exc:
+                _LOGGER.exception(
+                    "Could not remove upload session %s",
+                    identifier,
+                )
+                raise _upload_error(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "upload_cleanup_failed",
+                    "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+                    retryable=True,
+                ) from exc
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @application.post("/v1/search", response_model=SearchResponse)

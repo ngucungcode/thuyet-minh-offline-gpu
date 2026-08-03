@@ -2,6 +2,25 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
+function assertContainsAll(source, fragments) {
+  for (const fragment of fragments) {
+    assert.ok(
+      source.includes(fragment),
+      `Expected source to contain: ${fragment}`,
+    );
+  }
+}
+
+function openingJsxTagContaining(source, marker) {
+  const markerIndex = source.indexOf(marker);
+  assert.notEqual(markerIndex, -1, `Missing JSX marker: ${marker}`);
+  const tagStart = source.lastIndexOf("<input", markerIndex);
+  const tagEnd = source.indexOf("/>", markerIndex);
+  assert.notEqual(tagStart, -1, `Missing <input> before: ${marker}`);
+  assert.notEqual(tagEnd, -1, `Missing closing /> after: ${marker}`);
+  return source.slice(tagStart, tagEnd + 2);
+}
+
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -60,9 +79,11 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.match(page, /accept="\.mp4,\.mkv,video\/mp4,video\/x-matroska"/);
   assert.match(page, /accept="\.srt,application\/x-subrip,text\/plain"/);
   assert.match(page, /api<UploadSession>\("\/uploads"/);
-  assert.match(page, /`\/v1\/uploads\/\$\{encodeURIComponent\(session\.id\)\}\/media`/);
-  assert.match(page, /`\/v1\/uploads\/\$\{encodeURIComponent\(session\.id\)\}\/subtitle`/);
-  assert.match(page, /`\/uploads\/\$\{encodeURIComponent\(session\.id\)\}\/finalize`/);
+  assertContainsAll(page, [
+    "`/v1/uploads/${encodeURIComponent(session.id)}/media`",
+    "`/v1/uploads/${encodeURIComponent(session.id)}/subtitle`",
+    "`/uploads/${encodeURIComponent(session.id)}/finalize`",
+  ]);
   assert.match(page, /method: "DELETE"/);
   assert.match(page, /xhr\.upload\.onprogress/);
   assert.match(page, /uploadRequestRef\.current\?\.abort\(\)/);
@@ -104,6 +125,8 @@ test("keeps the dashboard API contract local-first", async () => {
 
 test("validates local files and exposes detailed cancellable upload progress", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const mediaInput = openingJsxTagContaining(page, "ref={mediaInputRef}");
+  const subtitleInput = openingJsxTagContaining(page, "ref={subtitleInputRef}");
 
   assert.match(page, /\["\.mp4", "\.mkv"\]\.includes\(fileExtension\(file\.name\)\)/);
   assert.match(page, /fileExtension\(file\.name\) !== "\.srt"/);
@@ -126,17 +149,14 @@ test("validates local files and exposes detailed cancellable upload progress", a
   assert.match(page, /uploadedMediaFileRef\.current === mediaFile/);
   assert.match(page, /Cấu hình bị khóa theo phiên này/);
   assert.match(page, /Tệp đã chọn không khớp phiên đang giữ/);
-  assert.match(
-    page,
-    /ref=\{mediaInputRef\}[\s\S]{0,220}disabled=\{submitting \|\| uploadConfigurationLocked\}/,
-  );
-  assert.match(
-    page,
-    /ref=\{subtitleInputRef\}[\s\S]{0,220}disabled=\{submitting \|\| uploadConfigurationLocked\}/,
-  );
+  assert.match(mediaInput, /disabled=\{submitting \|\| uploadConfigurationLocked\}/);
+  assert.match(subtitleInput, /disabled=\{submitting \|\| uploadConfigurationLocked\}/);
   assert.match(page, /Xóa phiên tạm/);
   assert.match(page, /uploadFinalizingRef\.current/);
-  assert.match(page, /if \(uploadCancelledRef\.current\) \{\s*throw new UploadCancelledError\(\)/);
+  assertContainsAll(page, [
+    "if (uploadCancelledRef.current)",
+    "throw new UploadCancelledError()",
+  ]);
   assert.doesNotMatch(
     page,
     /api<UploadSession>\("\/uploads", \{\s*method: "POST",\s*signal:/,

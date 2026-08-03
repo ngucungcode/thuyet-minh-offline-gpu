@@ -116,7 +116,9 @@ Trong dashboard, chọn **Tải file lên**, rồi:
 Nếu finalize tạm bị chặn bởi một job khác, SRT chưa hợp lệ hoặc kết nối gián đoạn,
 dashboard giữ mã session và lần bấm **Bắt đầu** kế tiếp chỉ gửi artifact còn thiếu;
 video/SRT đã nhận đủ và khớp SHA-256 không bị tải lại. Session chỉ bị xóa khi người dùng chủ động hủy,
-bấm **Xóa phiên tạm**, hoặc khi server dọn session chưa finalize đã quá hạn 7 ngày.
+bấm **Xóa phiên tạm**, hoặc khi server dọn session chưa finalize đã hết TTL. TTL mặc
+định là 7 ngày (`604800` giây), cấu hình bằng `DUB_UPLOAD_SESSION_TTL_SECONDS` và
+không được vượt quá 90 ngày.
 
 CLI tương đương:
 
@@ -129,7 +131,8 @@ dub upload ./phim.mkv --subtitle ./phim.en.srt \
 Nếu không có SRT, bỏ `--subtitle`; pipeline sẽ chạy ASR offline từ âm thanh video.
 File được truyền theo luồng và ghi vào `.part` trước khi đổi tên atomic, nên API không
 nạp cả phim vào RAM. Giới hạn mặc định là 100 GiB cho video và 16 MiB cho SRT;
-session chưa hoàn tất được kiểm tra định kỳ và tự dọn sau 7 ngày.
+session chưa hoàn tất được kiểm tra định kỳ và tự dọn theo TTL cấu hình bằng
+`DUB_UPLOAD_SESSION_TTL_SECONDS` (mặc định 7 ngày).
 
 ### Tìm nguồn qua Prowlarr
 
@@ -184,8 +187,9 @@ dub maintenance sbom
 ```
 
 Nguồn của job đã finalize trong `incoming` nằm ngoài lệnh maintenance cleanup;
-chỉ session upload chưa finalize quá 7 ngày được tự dọn. Luôn đọc dry-run trước
-khi dùng `--apply`.
+chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu hình bằng
+`DUB_UPLOAD_SESSION_TTL_SECONDS`) được tự dọn. Luôn đọc dry-run trước khi dùng
+`--apply`.
 
 ## Nâng cấp, cài bản ghim và rollback
 

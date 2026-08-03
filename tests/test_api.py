@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import gc
 import hashlib
 import json
@@ -619,6 +620,99 @@ def test_local_upload_accepts_mp4_and_rejects_delete_after_finalize(
     assert (tmp_path / "incoming" / upload_id / "source.mp4").is_file()
 
 
+def test_atomic_metadata_write_fsyncs_file_and_parent_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fsynced_modes: list[int] = []
+    real_fsync = os.fsync
+
+    def capture_fsync(descriptor: int) -> None:
+        fsynced_modes.append(os.fstat(descriptor).st_mode)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(api_module.os, "fsync", capture_fsync)
+    destination = tmp_path / "checkpoint.json"
+    api_module._atomic_write_bytes(destination, b"{}")
+
+    assert destination.read_bytes() == b"{}"
+    assert api_module.stat_module.S_ISREG(fsynced_modes[0])
+    if os.name != "nt":
+        assert api_module.stat_module.S_ISDIR(fsynced_modes[-1])
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    sorted(api_module._UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS),
+)
+def test_directory_fsync_ignores_unsupported_filesystems_and_closes_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+    error_number: int,
+) -> None:
+    closed: list[int] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module.os, "open", lambda _path, _flags: 41)
+        patch.setattr(
+            api_module.os,
+            "fsync",
+            lambda _descriptor: (_ for _ in ()).throw(
+                OSError(error_number, "directory fsync is unsupported")
+            ),
+        )
+        patch.setattr(api_module.os, "close", closed.append)
+        api_module._fsync_directory(tmp_path)
+
+    assert closed == [41]
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    sorted(api_module._UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS),
+)
+def test_directory_fsync_ignores_unsupported_open_without_closing_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+    error_number: int,
+) -> None:
+    closed: list[int] = []
+
+    def unsupported_open(_path: Path, _flags: int) -> int:
+        raise OSError(error_number, "opening directories is unsupported")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module.os, "open", unsupported_open)
+        patch.setattr(
+            api_module.os,
+            "fsync",
+            lambda _descriptor: pytest.fail("fsync must not run when open failed"),
+        )
+        patch.setattr(api_module.os, "close", closed.append)
+        api_module._fsync_directory(tmp_path)
+
+    assert closed == []
+
+
+def test_directory_fsync_propagates_real_io_failure_and_closes_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    closed: list[int] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(api_module.os, "open", lambda _path, _flags: 42)
+        patch.setattr(
+            api_module.os,
+            "fsync",
+            lambda _descriptor: (_ for _ in ()).throw(OSError(errno.EIO, "I/O error")),
+        )
+        patch.setattr(api_module.os, "close", closed.append)
+        with pytest.raises(OSError) as failure:
+            api_module._fsync_directory(tmp_path)
+
+    assert failure.value.errno == errno.EIO
+    assert closed == [42]
+
+
 def test_stream_upload_validates_malformed_and_mismatched_content_length(
     tmp_path: Path,
 ) -> None:
@@ -816,6 +910,50 @@ def test_local_upload_finalize_respects_single_heavy_job(
     assert session.json()["status"] == "ready"
 
 
+def test_delete_upload_returns_retryable_error_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+
+        def fail_cleanup(_path: Path) -> None:
+            raise OSError("filesystem is temporarily unavailable")
+
+        monkeypatch.setattr(api_module.shutil, "rmtree", fail_cleanup)
+        response = client.delete(f"/v1/uploads/{upload_id}")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "upload_cleanup_failed",
+        "message": "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+        "retryable": True,
+    }
+    assert (tmp_path / "incoming" / upload_id).is_dir()
+
+
+def test_delete_upload_rejects_unsafe_prepared_artifact_and_keeps_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch, media_probe=FakeMediaProbe())
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+        prepared = tmp_path / "jobs" / upload_id
+        prepared.write_bytes(b"unsafe artifact")
+        response = client.delete(f"/v1/uploads/{upload_id}")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "upload_cleanup_failed",
+        "message": "Không thể xóa dữ liệu phiên tải file; hãy thử lại",
+        "retryable": True,
+    }
+    assert prepared.is_file()
+    assert (tmp_path / "incoming" / upload_id).is_dir()
+
+
 def test_expired_unfinalized_upload_is_cleaned_on_startup(
     tmp_path: Path,
     monkeypatch,
@@ -842,6 +980,85 @@ def test_expired_unfinalized_upload_is_cleaned_on_startup(
 
     assert missing.status_code == 404
     assert not session_directory.exists()
+
+
+def test_expired_upload_cleanup_failure_does_not_block_startup(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_session_ttl_seconds = 60
+    client, _, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+    session_directory = tmp_path / "incoming" / upload_id
+    metadata = session_directory / ".upload-session.json"
+    old = time.time() - 120
+    os.utime(metadata, (old, old))
+
+    def fail_cleanup(_path: Path) -> None:
+        raise OSError("filesystem is temporarily unavailable")
+
+    monkeypatch.setattr(api_module.shutil, "rmtree", fail_cleanup)
+    with caplog.at_level("ERROR", logger=api_module.__name__):
+        with client:
+            health = client.get("/v1/health")
+            session = client.get(f"/v1/uploads/{upload_id}")
+
+    assert health.status_code == 200
+    assert session.status_code == 200
+    assert session_directory.is_dir()
+    assert "Could not remove expired upload session" in caplog.text
+
+
+def test_expired_upload_keeps_session_when_prepared_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.upload_session_ttl_seconds = 60
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=FakeMediaProbe(),
+        settings=settings,
+    )
+    with client:
+        upload_id = client.post("/v1/uploads", json=_upload_request()).json()["id"]
+    session_directory = tmp_path / "incoming" / upload_id
+    metadata = session_directory / ".upload-session.json"
+    old = time.time() - 120
+    os.utime(metadata, (old, old))
+    prepared = tmp_path / "jobs" / upload_id
+    prepared.mkdir(parents=True)
+    (prepared / "artifact.part").write_bytes(b"partial")
+    removed: list[Path] = []
+    real_rmtree = api_module.shutil.rmtree
+
+    def fail_prepared(path: Path) -> None:
+        candidate = Path(path)
+        removed.append(candidate)
+        if candidate == prepared:
+            raise OSError("filesystem is temporarily unavailable")
+        real_rmtree(candidate)
+
+    monkeypatch.setattr(api_module.shutil, "rmtree", fail_prepared)
+    api_module._cleanup_stale_upload_sessions(
+        settings,
+        store,
+        identifiers=(upload_id,),
+    )
+
+    assert removed == [prepared]
+    assert prepared.is_dir()
+    assert session_directory.is_dir()
+    assert metadata.is_file()
 
 
 @pytest.mark.asyncio
@@ -884,7 +1101,7 @@ async def test_expired_upload_cleanup_runs_periodically(
         await asyncio.sleep(0.03)
         assert calls == []
         session_lock.release()
-        for _ in range(20):
+        for _ in range(100):
             if calls:
                 break
             await asyncio.sleep(0.01)

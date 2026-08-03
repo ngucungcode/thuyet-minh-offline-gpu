@@ -1224,7 +1224,7 @@ export default function Home() {
           setNotice("Đã hủy tải tệp và xóa dữ liệu tạm trên máy chủ.");
         } else if (uploadCleanupError === null) {
           setProblem(
-            "Đã yêu cầu hủy trước khi nhận được mã phiên. Nếu máy chủ đã nhận yêu cầu nhưng phản hồi bị mất, session chưa finalize sẽ tự dọn sau 7 ngày.",
+            "Đã yêu cầu hủy trước khi nhận được mã phiên. Nếu máy chủ đã nhận yêu cầu nhưng phản hồi bị mất, session chưa finalize sẽ tự dọn theo TTL máy chủ (mặc định 7 ngày).",
           );
         } else {
           const retainedId = uploadSessionIdRef.current;
