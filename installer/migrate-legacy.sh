@@ -475,7 +475,7 @@ migration_restart_stack() {
   case "${stack_mode}" in
     systemd) systemctl start thuyet-minh-offline.service || return 1 ;;
     systemd-stopped) return 0 ;;
-    native) "${project_root}/scripts/native-stack.sh" start || return 1 ;;
+    native) "${project_root}/scripts/native-stack.sh" start 9>&- || return 1 ;;
     none) return 0 ;;
     *) return 1 ;;
   esac

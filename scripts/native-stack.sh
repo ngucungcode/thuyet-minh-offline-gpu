@@ -45,7 +45,9 @@ start_stack() {
     echo "Supervisor đang chạy nhưng stack chưa khỏe" >&2
     exit 1
   fi
-  nohup "${SUPERVISORD}" -n -c "${SUPERVISOR_CONFIG}" \
+  # Descriptor 9 belongs to the installer lock when this command is launched
+  # during provider-mode installation. Never let the persistent daemon retain it.
+  nohup "${SUPERVISORD}" -n -c "${SUPERVISOR_CONFIG}" 9>&- \
     >>"${DUB_RUNTIME_LOG_DIR}/launcher.log" 2>&1 </dev/null &
   local launcher_pid=$!
   for _ in {1..30}; do

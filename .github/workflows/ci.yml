@@ -41,6 +41,7 @@ jobs:
       - name: Test data root permissions and installer migration paths
         run: |
           sudo bash tests/test-data-root-permissions.sh
+          sudo bash tests/test-native-stack-lock.sh
           bash tests/test-installer-migration.sh
           bash tests/test-installer-git-upgrade.sh
 

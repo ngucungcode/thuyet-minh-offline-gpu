@@ -46,6 +46,7 @@ jobs:
           bash -n install.sh installer/*.sh scripts/*.sh tests/*.sh
           bash -s -- --help < install.sh >/dev/null
           sudo bash tests/test-data-root-permissions.sh
+          sudo bash tests/test-native-stack-lock.sh
           bash tests/test-installer-migration.sh
           python -m pytest -q
 

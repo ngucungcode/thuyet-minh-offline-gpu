@@ -102,6 +102,11 @@ case "${1:-status}" in
     fi
     ;;
   start)
+    if [[ "${MIGRATION_TEST_REQUIRE_CLOSED_FD9:-false}" == true \
+      && -e /proc/$$/fd/9 ]]; then
+      printf 'installer lock FD 9 leaked into rollback stack start\n' >&2
+      exit 7
+    fi
     [[ "${MIGRATION_TEST_FAIL_START:-false}" != true ]] || exit 5
     printf 'start\n' >>"${MIGRATION_TEST_EVENTS:?}"
     touch "${MIGRATION_TEST_STACK_STATE}"
@@ -151,9 +156,9 @@ prepare_installed_release() {
 # must preserve the persistent runtime and support a complete rollback.
 upgrade_root="${TEST_ROOT}/upgrade-current"
 upgrade_stage="${TEST_ROOT}/upgrade-stage"
-create_git_project "${upgrade_root}" 0.2.0 old
-create_git_project "${upgrade_stage}" 0.2.1 new
-prepare_installed_release "${upgrade_root}" 0.2.0 model-bytes
+create_git_project "${upgrade_root}" 0.2.2 old
+create_git_project "${upgrade_stage}" 0.2.3 new
+prepare_installed_release "${upgrade_root}" 0.2.2 model-bytes
 model_inode_before="$(stat -c '%i' -- "${upgrade_root}/var/models/sentinel")"
 old_commit="$(git -C "${upgrade_root}" rev-parse HEAD)"
 new_commit="$(git -C "${upgrade_stage}" rev-parse HEAD)"
@@ -164,7 +169,7 @@ touch "${MIGRATION_TEST_STACK_STATE}"
 
 migrate_git_release_upgrade \
   "${upgrade_root}" "${upgrade_stage}" "${upgrade_root}/var" false \
-  0.2.1 "0.1.9 0.2.0"
+  0.2.3 "0.2.0 0.2.1 0.2.2"
 
 [[ "$(<"${upgrade_root}/SOURCE_MARKER")" == new ]] \
   || fail "Source release mới chưa active"
@@ -271,6 +276,28 @@ fi
   || fail "State mismatch đã đổi source"
 assert_absent "${MIGRATION_TEST_EVENTS}"
 assert_absent "${state_root}.migration-state.json"
+
+# Rollback can invoke an older native-stack script that does not close the
+# installer descriptor itself. The migration boundary must close only the child
+# copy while the parent continues to own the lock.
+fd_root="${TEST_ROOT}/fd-boundary"
+create_git_project "${fd_root}" 0.2.2 old
+export MIGRATION_TEST_STACK_STATE="${TEST_ROOT}/fd-boundary-stack.running"
+export MIGRATION_TEST_EVENTS="${TEST_ROOT}/fd-boundary-stack.events"
+export MIGRATION_EXPECTED_JOURNAL="${fd_root}.migration-state.json"
+export MIGRATION_TEST_REQUIRE_CLOSED_FD9=true
+fd_lock="${TEST_ROOT}/fd-boundary.lock"
+exec 9>"${fd_lock}"
+flock -n 9 || fail "KhÃ´ng thá»ƒ táº¡o installer lock cho rollback fixture"
+migration_restart_stack "${fd_root}" native \
+  || fail "Rollback stack start khÃ´ng Ä‘Ã³ng installer FD trong child"
+if flock -n "${fd_lock}" true; then
+  fail "Rollback stack start Ä‘Ã£ lÃ m parent máº¥t installer lock"
+fi
+exec 9>&-
+flock -n "${fd_lock}" true \
+  || fail "Installer lock khÃ´ng Ä‘Æ°á»£c nháº£ sau khi parent Ä‘Ã³ng FD"
+unset MIGRATION_TEST_REQUIRE_CLOSED_FD9
 
 # A nested directory must never be accepted as the deployment worktree root.
 if migration_validate_git_tree "${state_root}/src"; then
