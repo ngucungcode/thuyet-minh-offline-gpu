@@ -576,7 +576,7 @@ FFPROBE = shutil.which("ffprobe")
     FFMPEG is None or FFPROBE is None,
     reason="FFmpeg/ffprobe không có trên máy chạy test",
 )
-def test_real_ffmpeg_ignores_embedded_cover_before_content_video(
+def test_real_ffmpeg_ignores_embedded_cover_alongside_content_video(
     tmp_path: Path,
 ) -> None:
     main = tmp_path / "main.mp4"
@@ -720,8 +720,12 @@ def test_real_ffmpeg_ignores_embedded_cover_before_content_video(
         if item["codec_type"] == "video"
     ]
     assert len(source_videos) == 2
-    assert source_videos[0]["disposition"]["attached_pic"] == 1
-    assert source_videos[1]["disposition"]["attached_pic"] == 0
+    # The MP4 muxer may canonicalize stream order independently of -map.
+    # What matters is that both a moving-picture stream and a cover stream
+    # reach the exporter, whose V:0 selector must exclude the latter.
+    assert sorted(
+        item["disposition"]["attached_pic"] for item in source_videos
+    ) == [0, 1]
 
     artifact = asyncio.run(
         FfmpegAudioMixExporter(
