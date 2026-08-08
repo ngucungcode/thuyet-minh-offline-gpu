@@ -714,7 +714,7 @@ def _is_visual_attachment(stream: dict[str, object]) -> bool:
     if not isinstance(disposition, dict):
         return False
     return any(
-        disposition.get(name) in {1, "1", True}
+        disposition.get(name) in {1, "1"}
         for name in ("attached_pic", "timed_thumbnails")
     )
 

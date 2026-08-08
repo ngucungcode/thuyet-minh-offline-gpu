@@ -311,7 +311,7 @@ def _validate_probe_contract(
         raise AssertionError("Output phải có đúng một video track và một audio track")
     disposition = videos[0].get("disposition")
     if isinstance(disposition, Mapping) and any(
-        disposition.get(name) in {1, "1", True}
+        disposition.get(name) in {1, "1"}
         for name in ("attached_pic", "timed_thumbnails")
     ):
         raise AssertionError("Video track đầu ra không được là ảnh bìa/thumbnail")
