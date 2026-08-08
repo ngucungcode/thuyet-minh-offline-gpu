@@ -127,7 +127,7 @@ class FfprobeMediaProbe:
             "-protocol_whitelist",
             "file",
             "-show_entries",
-            "format=duration:format_tags=title:stream=index,codec_name,codec_type,start_time,duration,avg_frame_rate,r_frame_rate:stream_tags=language:stream_disposition=default,attached_pic",
+            "format=duration:format_tags=title:stream=index,codec_name,codec_type,start_time,duration,avg_frame_rate,r_frame_rate:stream_tags=language:stream_disposition=default,attached_pic,timed_thumbnails",
             "-of",
             "json",
             os.fspath(media_path),
@@ -181,17 +181,23 @@ class FfprobeMediaProbe:
                 "File đã tải không chứa luồng video",
                 retryable=False,
             )
-        selected_video = video_streams[0]
-        video_codec = str(selected_video.get("codec_name") or "").strip().lower()
-        disposition = selected_video.get("disposition")
-        attached_picture = (
-            isinstance(disposition, dict) and disposition.get("attached_pic") == 1
-        )
-        if require_h264_passthrough and (video_codec != "h264" or attached_picture):
+        content_video_streams = [
+            stream for stream in video_streams if not _is_visual_attachment(stream)
+        ]
+        if not content_video_streams:
             raise MediaProbeError(
                 "unsupported_media",
-                "Luồng hình đầu tiên phải là video H.264/AVC (không phải ảnh bìa) "
-                "để xuất MP4 không mã hóa lại",
+                "File chỉ chứa ảnh bìa hoặc thumbnail, không có luồng hình của video",
+                retryable=False,
+            )
+        selected_video = content_video_streams[0]
+        video_codec = str(selected_video.get("codec_name") or "").strip().lower()
+        if require_h264_passthrough and video_codec != "h264":
+            codec_label = video_codec.upper() if video_codec else "không xác định"
+            raise MediaProbeError(
+                "unsupported_media",
+                f"Luồng hình chính dùng codec {codec_label}; cần H.264/AVC để xuất "
+                "MP4 không mã hóa lại",
                 retryable=False,
             )
         audio_streams = [
@@ -214,7 +220,7 @@ class FfprobeMediaProbe:
             duration_us = next(
                 (
                     parsed
-                    for stream in video_streams
+                    for stream in content_video_streams
                     if (parsed := _duration_us(stream.get("duration"))) is not None
                 ),
                 None,
@@ -266,6 +272,23 @@ def _normalize_language(value: object) -> str:
         return "auto"
     normalized = value.strip().lower().replace("_", "-")
     return normalized or "auto"
+
+
+def _is_visual_attachment(stream: dict[str, Any]) -> bool:
+    """Return whether a video-typed stream is cover art or a thumbnail.
+
+    FFmpeg exposes attached pictures as video streams.  They must not become
+    the visual timeline even when the attachment happens to precede the movie
+    stream in container order.
+    """
+
+    disposition = stream.get("disposition")
+    if not isinstance(disposition, dict):
+        return False
+    return any(
+        disposition.get(name) in {1, "1", True}
+        for name in ("attached_pic", "timed_thumbnails")
+    )
 
 
 def _duration_us(value: object) -> int | None:

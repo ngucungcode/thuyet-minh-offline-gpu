@@ -623,7 +623,7 @@ def test_ffprobe_media_probe_keeps_legacy_non_h264_acquisition_compatible(
     assert asset.video_codec == "vp8"
 
 
-def test_ffprobe_media_probe_rejects_attached_picture_selected_as_video(
+def test_ffprobe_media_probe_ignores_attached_picture_before_content_video(
     tmp_path: Path,
 ) -> None:
     media = tmp_path / "cover-first.mkv"
@@ -645,6 +645,37 @@ def test_ffprobe_media_probe_rejects_attached_picture_selected_as_video(
         }
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
+    asset = asyncio.run(
+        FfprobeMediaProbe(runner=runner).probe(
+            media,
+            source_language="en",
+            require_h264_passthrough=True,
+        )
+    )
+
+    assert asset.video_stream_index == 1
+    assert asset.video_codec == "h264"
+
+
+def test_ffprobe_media_probe_rejects_cover_only_input(tmp_path: Path) -> None:
+    media = tmp_path / "cover-only.mp4"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_name": "mjpeg",
+                    "codec_type": "video",
+                    "disposition": {"attached_pic": 1},
+                },
+                {"index": 1, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
     with pytest.raises(MediaProbeError) as raised:
         asyncio.run(
             FfprobeMediaProbe(runner=runner).probe(
@@ -655,4 +686,5 @@ def test_ffprobe_media_probe_rejects_attached_picture_selected_as_video(
         )
 
     assert raised.value.code == "unsupported_media"
+    assert "chỉ chứa ảnh bìa" in raised.value.message_vi
     assert raised.value.retryable is False

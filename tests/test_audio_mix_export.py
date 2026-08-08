@@ -142,7 +142,7 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert [item.fraction for item in progress] == [0.5, 1.0]
 
     source_probe = runner.calls[0][0]
-    assert source_probe[source_probe.index("-select_streams") + 1] == "v:0"
+    assert source_probe[source_probe.index("-select_streams") + 1] == "V:0"
     command = runner.calls[1][0]
     assert command[0] == "ffmpeg"
     input_positions = [index for index, item in enumerate(command) if item == "-i"]
@@ -152,9 +152,10 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
         str(narration.resolve()),
     ]
     maps = [command[index + 1] for index, item in enumerate(command) if item == "-map"]
-    assert maps == ["0:v:0", "[mixed]"]
+    assert maps == ["0:V:0", "[mixed]"]
     assert all(not item.startswith("0:a") for item in maps)
     assert command[command.index("-c:v") + 1] == "copy"
+    assert command[command.index("-disposition:v:0") + 1] == "default"
     assert command[command.index("-c:a") + 1] == "aac"
     assert command[command.index("-map_chapters") + 1] == "-1"
     assert command[command.index("-write_tmcd") + 1] == "0"
@@ -265,6 +266,50 @@ def test_verification_rejects_any_extra_or_original_audio_track(tmp_path: Path) 
     assert "2:audio/aac[mp4a]" in captured.value.message_vi
     assert output.read_bytes() == b"keep previous"
     assert not output.with_name(".dubbed.part.mp4").exists()
+
+
+def test_verification_rejects_output_video_still_marked_as_cover_art(
+    tmp_path: Path,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        probe_stdout=json.dumps(
+            {
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "video",
+                        "codec_name": "h264",
+                        "start_time": "0",
+                        "duration": "2",
+                        "disposition": {"attached_pic": 1},
+                    },
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "codec_name": "aac",
+                        "start_time": "0",
+                        "duration": "2",
+                    },
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(MediaExportError) as captured:
+        asyncio.run(
+            FfmpegAudioMixExporter(runner=runner).export(
+                source,
+                accompaniment,
+                narration,
+                output,
+                expected_duration_us=2_000_000,
+            )
+        )
+
+    assert captured.value.code == MediaExportErrorCode.TRACK_LAYOUT_INVALID
+    assert "ảnh bìa/thumbnail" in captured.value.message_vi
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(
@@ -525,6 +570,198 @@ def test_pre_cancelled_export_is_typed_and_does_not_start_runner(tmp_path: Path)
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+
+
+@pytest.mark.skipif(
+    FFMPEG is None or FFPROBE is None,
+    reason="FFmpeg/ffprobe không có trên máy chạy test",
+)
+def test_real_ffmpeg_ignores_embedded_cover_before_content_video(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main.mp4"
+    cover = tmp_path / "cover.jpg"
+    source = tmp_path / "source-cover-first.mp4"
+    accompaniment = tmp_path / "accompaniment.wav"
+    narration = tmp_path / "narration.wav"
+    output = tmp_path / "dubbed.mp4"
+
+    subprocess.run(
+        [
+            str(FFMPEG),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x64:rate=10:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=48000:duration=2",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "5",
+            "-c:a",
+            "aac",
+            str(main),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    subprocess.run(
+        [
+            str(FFMPEG),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:size=64x64",
+            "-frames:v",
+            "1",
+            "-c:v",
+            "mjpeg",
+            str(cover),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    subprocess.run(
+        [
+            str(FFMPEG),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(main),
+            "-i",
+            str(cover),
+            "-map",
+            "1:v:0",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0",
+            "-c",
+            "copy",
+            "-disposition:v:0",
+            "attached_pic",
+            "-disposition:v:1",
+            "default",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    for target, frequency in ((accompaniment, 440), (narration, 880)):
+        subprocess.run(
+            [
+                str(FFMPEG),
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={frequency}:sample_rate=48000:duration=2",
+                "-c:a",
+                "pcm_s16le",
+                str(target),
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+
+    source_probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_type:stream_disposition=attached_pic",
+            "-of",
+            "json",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    source_videos = [
+        item
+        for item in json.loads(source_probe.stdout)["streams"]
+        if item["codec_type"] == "video"
+    ]
+    assert len(source_videos) == 2
+    assert source_videos[0]["disposition"]["attached_pic"] == 1
+    assert source_videos[1]["disposition"]["attached_pic"] == 0
+
+    artifact = asyncio.run(
+        FfmpegAudioMixExporter(
+            ffmpeg_binary=str(FFMPEG),
+            ffprobe_binary=str(FFPROBE),
+            timeout_seconds=30.0,
+        ).export(
+            source,
+            accompaniment,
+            narration,
+            output,
+            expected_duration_us=2_000_000,
+        )
+    )
+
+    assert artifact.path == output.resolve()
+    output_probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,codec_name:stream_disposition=attached_pic",
+            "-of",
+            "json",
+            str(output),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    output_streams = json.loads(output_probe.stdout)["streams"]
+    assert [(item["codec_type"], item["codec_name"]) for item in output_streams] == [
+        ("video", "mpeg4"),
+        ("audio", "aac"),
+    ]
+    assert output_streams[0]["disposition"]["attached_pic"] == 0
 
 
 @pytest.mark.skipif(

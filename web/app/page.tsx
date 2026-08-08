@@ -1588,8 +1588,8 @@ export default function Home() {
                 </label>
               </div>
               <p className="helper-copy">
-                MP4/MKV phải có luồng hình đầu tiên là H.264/AVC; server sẽ từ chối
-                HEVC, VP8, FFV1 hoặc ảnh bìa trước khi tạo job.
+                Luồng hình chính của MP4/MKV phải là H.264/AVC. Ảnh bìa nhúng và
+                thumbnail được tự động bỏ qua; HEVC, AV1, VP9, VP8 và FFV1 sẽ bị từ chối.
               </p>
               <div className="upload-file-summary">
                 <span>

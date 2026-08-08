@@ -262,7 +262,8 @@ def _probe_json(path: Path, *, ffprobe: str) -> dict[str, Any]:
             "-protocol_whitelist",
             "file",
             "-show_entries",
-            "format=duration:stream=index,codec_type,codec_name,start_time,duration",
+            "format=duration:stream=index,codec_type,codec_name,start_time,duration:"
+            "stream_disposition=attached_pic,timed_thumbnails",
             "-of",
             "json",
             os.fspath(local),
@@ -308,6 +309,12 @@ def _validate_probe_contract(
     audios = [item for item in streams if item.get("codec_type") == "audio"]
     if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
         raise AssertionError("Output phải có đúng một video track và một audio track")
+    disposition = videos[0].get("disposition")
+    if isinstance(disposition, Mapping) and any(
+        disposition.get(name) in {1, "1", True}
+        for name in ("attached_pic", "timed_thumbnails")
+    ):
+        raise AssertionError("Video track đầu ra không được là ảnh bìa/thumbnail")
     audio_codec = str(audios[0].get("codec_name", "")).casefold()
     if audio_codec != "aac":
         raise AssertionError("Audio track đầu ra không phải AAC")

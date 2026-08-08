@@ -132,7 +132,8 @@ test("validates local files and exposes detailed cancellable upload progress", a
   assert.match(page, /fileExtension\(file\.name\) !== "\.srt"/);
   assert.match(page, /Video phải là tệp MP4 hoặc MKV/);
   assert.match(page, /Phụ đề thủ công phải là tệp SRT/);
-  assert.match(page, /MP4\/MKV phải có luồng hình đầu tiên là H\.264\/AVC/);
+  assert.match(page, /Luồng hình chính của MP4\/MKV phải là H\.264\/AVC/);
+  assert.match(page, /Ảnh bìa nhúng và\s+thumbnail được tự động bỏ qua/);
   assert.match(page, /file\.size <= 0/);
   assert.match(page, /phase: "preparing"/);
   assert.match(page, /"media",\s*0,\s*overallTotal/);

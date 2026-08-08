@@ -404,6 +404,51 @@ def test_schema_seven_makes_legacy_duration_failure_retryable(
     assert reopened.get_checkpoint(job.id, JobStage.TIMING).payload["completed"] is True
 
 
+def test_schema_eight_makes_cover_layout_failure_retryable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    store = StateStore(database)
+    job = store.create_job("release-1", {"rights_confirmed": True})
+    store.update_status(
+        job.id,
+        JobStatus.MUXING,
+        stage=JobStage.EXPORT,
+        force=True,
+    )
+    store.save_checkpoint(
+        job.id,
+        JobStage.TIMING,
+        {"completed": True, "timeline_sha256": "c" * 64},
+    )
+    store.update_status(
+        job.id,
+        JobStatus.FAILED,
+        error_code="output_track_layout_invalid",
+        error_message="Luồng ảnh bìa bị chọn thay cho video",
+        retryable=False,
+    )
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE schema_metadata SET value = '7' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = StateStore(database)
+    migrated = reopened.get_job(job.id)
+
+    assert migrated.retryable is True
+    event = reopened.list_events(job.id)[-1]
+    assert event.event_type == "job.error_reclassified"
+    assert event.payload["reason"] == "mp4_cover_stream_selection_fix"
+    resumed = reopened.resume(job.id)
+    assert resumed.status is JobStatus.MUXING
+    assert reopened.get_checkpoint(job.id, JobStage.TIMING).payload["completed"] is True
+
+
 def test_future_schema_is_rejected_without_downgrading_metadata(
     tmp_path: Path,
 ) -> None:
@@ -412,7 +457,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "UPDATE schema_metadata SET value = '8' WHERE key = 'schema_version'"
+            "UPDATE schema_metadata SET value = '9' WHERE key = 'schema_version'"
         )
         connection.commit()
     finally:
@@ -428,7 +473,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
         ).fetchone()[0]
     finally:
         connection.close()
-    assert version == "8"
+    assert version == "9"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

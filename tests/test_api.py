@@ -218,20 +218,37 @@ class FakeMediaProbe:
         )
 
 
-def _codec_media_probe(codec_name: str) -> FfprobeMediaProbe:
+def _codec_media_probe(
+    codec_name: str,
+    *,
+    cover_first: bool = False,
+) -> FfprobeMediaProbe:
     async def runner(command):
+        video_streams = []
+        if cover_first:
+            video_streams.append(
+                {
+                    "index": 0,
+                    "codec_name": "mjpeg",
+                    "codec_type": "video",
+                    "avg_frame_rate": "0/0",
+                    "disposition": {"attached_pic": 1},
+                }
+            )
+        video_index = 1 if cover_first else 0
         payload = {
             "format": {"duration": "4"},
             "streams": [
+                *video_streams,
                 {
-                    "index": 0,
+                    "index": video_index,
                     "codec_name": codec_name,
                     "codec_type": "video",
                     "avg_frame_rate": "24/1",
                     "disposition": {"attached_pic": 0},
                 },
                 {
-                    "index": 1,
+                    "index": video_index + 1,
                     "codec_name": "aac",
                     "codec_type": "audio",
                     "disposition": {"default": 1},
@@ -434,6 +451,28 @@ def test_local_mkv_upload_accepts_h264_passthrough_before_creating_job(
     assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
 
 
+def test_local_upload_ignores_embedded_cover_before_h264_video(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=_codec_media_probe("h264", cover_first=True),
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        client.put(f"/v1/uploads/{upload_id}/media", content=b"mkv with cover")
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert finalized.status_code == 202
+    selected = finalized.json()["details"]["selected_media"]
+    assert selected["video_stream_index"] == 1
+    assert selected["video_codec"] == "h264"
+    assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
+
+
 @pytest.mark.parametrize("codec_name", ["vp8", "hevc", "ffv1"])
 def test_local_mkv_upload_rejects_non_h264_before_creating_job(
     tmp_path: Path,
@@ -456,7 +495,7 @@ def test_local_mkv_upload_rejects_non_h264_before_creating_job(
     assert rejected.json()["detail"] == {
         "code": "unsupported_media",
         "message": (
-            "Luồng hình đầu tiên phải là video H.264/AVC (không phải ảnh bìa) "
+            f"Luồng hình chính dùng codec {codec_name.upper()}; cần H.264/AVC "
             "để xuất MP4 không mã hóa lại"
         ),
         "retryable": False,
