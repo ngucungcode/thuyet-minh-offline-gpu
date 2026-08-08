@@ -67,7 +67,7 @@ TERMINAL_STATUSES = frozenset(
     {JobStatus.COMPLETED, JobStatus.CANCELLED}
 )
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 ACTIVE_JOB_STATUSES = (
     JobStatus.CREATED,
@@ -550,6 +550,10 @@ class StateStore:
                         if schema_version < 7:
                             reclassified_errors["output_duration_mismatch"] = (
                                 "video_canonical_duration_fix"
+                            )
+                        if schema_version < 8:
+                            reclassified_errors["output_track_layout_invalid"] = (
+                                "mp4_cover_stream_selection_fix"
                             )
                         affected: list[sqlite3.Row] = []
                         if reclassified_errors:

@@ -1,8 +1,9 @@
 """Offline, loudness-aware dubbing mix and atomic MP4 export.
 
-The exporter deliberately maps only the first video stream from the source
-file.  Original source audio is never mapped.  The replacement audio is made
-from a dialogue-reduced accompaniment stem and the Vietnamese narration.
+The exporter deliberately maps only the first moving-picture stream from the
+source file, excluding attached cover art and thumbnails.  Original source
+audio is never mapped.  The replacement audio is made from a dialogue-reduced
+accompaniment stem and the Vietnamese narration.
 """
 
 from __future__ import annotations
@@ -394,7 +395,7 @@ class FfmpegAudioMixExporter:
             "-protocol_whitelist",
             "file",
             "-select_streams",
-            "v:0",
+            "V:0",
             "-show_entries",
             "stream=duration,duration_ts,time_base:stream_tags=DURATION",
             "-of",
@@ -511,7 +512,7 @@ class FfmpegAudioMixExporter:
             "-filter_complex",
             graph,
             "-map",
-            "0:v:0",
+            "0:V:0",
             "-map",
             "[mixed]",
             "-map_metadata",
@@ -522,6 +523,8 @@ class FfmpegAudioMixExporter:
             "-dn",
             "-c:v",
             "copy",
+            "-disposition:v:0",
+            "default",
             "-c:a",
             "aac",
             "-b:a",
@@ -553,7 +556,8 @@ class FfmpegAudioMixExporter:
             "file",
             "-show_entries",
             "stream=index,codec_type,codec_name,codec_tag_string,"
-            "start_time,duration",
+            "start_time,duration:stream_disposition=default,attached_pic,"
+            "timed_thumbnails",
             "-of",
             "json",
             os.fspath(temporary),
@@ -597,7 +601,15 @@ class FfmpegAudioMixExporter:
         streams = [stream for stream in payload["streams"] if isinstance(stream, dict)]
         videos = [stream for stream in streams if stream.get("codec_type") == "video"]
         audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
-        if len(streams) != 2 or len(videos) != 1 or len(audios) != 1:
+        attached_videos = [
+            stream for stream in videos if _is_visual_attachment(stream)
+        ]
+        if (
+            len(streams) != 2
+            or len(videos) != 1
+            or len(audios) != 1
+            or attached_videos
+        ):
             layout_parts: list[str] = []
             for stream in streams[:8]:
                 codec = str(stream.get("codec_name", "?"))
@@ -611,10 +623,16 @@ class FfmpegAudioMixExporter:
             layout = ", ".join(layout_parts)
             if len(streams) > 8:
                 layout = f"{layout}, …"
+            cover_note = (
+                "; luồng hình đầu ra vẫn bị đánh dấu là ảnh bìa/thumbnail"
+                if attached_videos
+                else ""
+            )
             raise MediaExportError(
                 MediaExportErrorCode.TRACK_LAYOUT_INVALID,
                 "Video đầu ra phải có đúng một luồng hình và một luồng tiếng "
-                f"thuyết minh; ffprobe thấy {len(streams)} luồng ({layout or 'trống'})",
+                f"thuyết minh; ffprobe thấy {len(streams)} luồng "
+                f"({layout or 'trống'}){cover_note}",
                 retryable=False,
             )
         audio_codec = str(audios[0].get("codec_name", "")).lower()
@@ -689,6 +707,16 @@ def _is_cancelled(cancellation: Cancellation | None) -> bool:
         )
     except Exception:
         return True
+
+
+def _is_visual_attachment(stream: dict[str, object]) -> bool:
+    disposition = stream.get("disposition")
+    if not isinstance(disposition, dict):
+        return False
+    return any(
+        disposition.get(name) in {1, "1"}
+        for name in ("attached_pic", "timed_thumbnails")
+    )
 
 
 def _emit_progress(
