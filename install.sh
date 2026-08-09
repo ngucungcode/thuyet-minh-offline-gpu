@@ -23,6 +23,11 @@ MIGRATED_RUNTIME_REUSABLE=false
 MIGRATION_BACKUP_PATH=""
 MIGRATION_ACTIVE=false
 SYSTEMD_ENABLE_PENDING=false
+install_started_seconds=${SECONDS}
+bootstrap_seconds=0
+model_install_seconds=0
+acceptance_seconds=0
+bootstrap_performed=false
 
 # BASH_SOURCE is absent when the installer is streamed through `bash -s`.
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
@@ -552,8 +557,11 @@ elif [[ -x "${DUB_VENV_DIR}/bin/python" && -r "${state_file}" ]] \
   fi
 fi
 if [[ "${bootstrap_required}" == true ]]; then
-  log "Bootstrap runtime native và chạy unit test"
+  log "Bootstrap runtime native và chạy smoke check production"
+  stage_started_seconds=${SECONDS}
   "${PROJECT_ROOT}/scripts/native-bootstrap.sh"
+  bootstrap_seconds=$((SECONDS - stage_started_seconds))
+  bootstrap_performed=true
 else
   log "Runtime không đổi; bỏ qua bootstrap nặng"
 fi
@@ -602,11 +610,12 @@ case "${MODEL_PROFILE}" in
     ;;
 esac
 
+stage_started_seconds=${SECONDS}
 for model_id in "${model_ids[@]}"; do
   log "Cài và xác minh model ${model_id}"
   "${PROJECT_ROOT}/scripts/native-model.sh" install "${model_id}"
-  "${PROJECT_ROOT}/scripts/native-model.sh" verify "${model_id}"
 done
+model_install_seconds=$((SECONDS - stage_started_seconds))
 
 wrapper_target="${PROJECT_ROOT}/scripts/dub-wrapper.sh"
 wrapper_link="/usr/local/bin/dub"
@@ -701,6 +710,7 @@ if [[ "${START_STACK}" == true ]]; then
     "${PROJECT_ROOT}/scripts/native-init-services.sh" --rotate-secrets
   fi
 
+  stage_started_seconds=${SECONDS}
   case "${ACCEPTANCE_MODE}" in
     basic)
       "${PROJECT_ROOT}/scripts/native-acceptance.sh"
@@ -713,6 +723,7 @@ if [[ "${START_STACK}" == true ]]; then
       ;;
     none) ;;
   esac
+  acceptance_seconds=$((SECONDS - stage_started_seconds))
 fi
 
 if [[ "${SYSTEMD_ENABLE_PENDING}" == true ]]; then
@@ -734,6 +745,7 @@ if [[ -d "${PROJECT_ROOT}/.git" ]]; then
   commit="$(git -C "${PROJECT_ROOT}" rev-parse HEAD)"
 fi
 models_json="$(printf '%s\n' "${model_ids[@]}" | jq -R . | jq -s .)"
+total_seconds=$((SECONDS - install_started_seconds))
 temporary_state="$(mktemp "${DUB_NATIVE_ROOT}/.install-state.XXXXXX")"
 jq -n \
   --arg installer_version "${INSTALLER_VERSION}" \
@@ -742,9 +754,19 @@ jq -n \
   --arg fingerprint "${fingerprint}" \
   --arg installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg migration_backup "${MIGRATION_BACKUP_PATH}" \
+  --argjson bootstrap_performed "${bootstrap_performed}" \
+  --argjson bootstrap_seconds "${bootstrap_seconds}" \
+  --argjson model_install_seconds "${model_install_seconds}" \
+  --argjson acceptance_seconds "${acceptance_seconds}" \
+  --argjson total_seconds "${total_seconds}" \
   --argjson models "${models_json}" \
   '{schema_version:1, installer_version:$installer_version, commit:$commit,
     profile:$profile, models:$models, bootstrap_fingerprint:$fingerprint,
+    performance:{bootstrap_performed:$bootstrap_performed,
+      bootstrap_seconds:$bootstrap_seconds,
+      model_install_seconds:$model_install_seconds,
+      acceptance_seconds:$acceptance_seconds,
+      total_seconds:$total_seconds},
     installed_at:$installed_at,
     migration_backup:(if $migration_backup == "" then null else $migration_backup end)}' >"${temporary_state}"
 install -m 0640 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \
@@ -762,6 +784,7 @@ if [[ "${MIGRATION_ACTIVE}" == true ]]; then
 fi
 
 log "Cài đặt hoàn tất"
+log "Thời gian: tổng ${total_seconds}s; bootstrap ${bootstrap_seconds}s; model ${model_install_seconds}s; acceptance ${acceptance_seconds}s"
 log "Kiểm tra: dub doctor && dub stack status"
 log "Bắt đầu: dub search \"Tên phim\" --year 2024"
 }

@@ -209,6 +209,71 @@ def test_count_tokens_uses_local_tokenize_and_validates_ids(tmp_path: Path) -> N
     translator.close()
 
 
+def test_count_tokens_caches_normalized_text_and_refreshes_lru_order(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(
+        [_health_ok(), _tokens(1), _tokens(2), _tokens(3), _tokens(4)]
+    )
+    translator, _, _ = _translator(
+        tmp_path,
+        transport,
+        token_cache_capacity=2,
+    )
+
+    # Canonically equivalent text shares one tokenizer result.
+    assert translator.count_tokens("e\u0301") == 1
+    assert translator.count_tokens("\u00e9") == 1
+    assert translator.count_tokens("second") == 2
+
+    # Refreshing the first key makes `second` the least-recently-used entry.
+    assert translator.count_tokens("\u00e9") == 1
+    assert translator.count_tokens("third") == 3
+    assert translator.count_tokens("second") == 4
+
+    tokenize_requests = [
+        request for request in transport.requests if request[1] == "/tokenize"
+    ]
+    assert [request[2]["content"] for request in tokenize_requests] == [
+        "\u00e9",
+        "second",
+        "third",
+        "second",
+    ]
+    translator.close()
+
+
+def test_count_tokens_does_not_cache_invalid_responses(tmp_path: Path) -> None:
+    transport = FakeTransport(
+        [
+            _health_ok(),
+            JsonHttpResponse(200, {"tokens": [True]}),
+            _tokens(2),
+        ]
+    )
+    translator, _, _ = _translator(tmp_path, transport)
+
+    with pytest.raises(LlamaTranslationError) as caught:
+        translator.count_tokens("retry me")
+    assert caught.value.code == "invalid_response"
+    assert translator.count_tokens("retry me") == 2
+    assert sum(request[1] == "/tokenize" for request in transport.requests) == 2
+    translator.close()
+
+
+@pytest.mark.parametrize("capacity", [0, -1, True, 4097])
+def test_token_cache_capacity_is_bounded(
+    tmp_path: Path,
+    capacity: object,
+) -> None:
+    with pytest.raises(ValueError, match="cache tokenizer"):
+        _translator(
+            tmp_path,
+            FakeTransport([]),
+            token_cache_capacity=capacity,
+        )
+
+
 @pytest.mark.parametrize(
     "payload",
     [None, {}, {"tokens": "1,2"}, {"tokens": [1, True]}, {"tokens": [-1]}],
@@ -419,11 +484,11 @@ def test_close_escalates_from_terminate_to_kill_and_is_idempotent(tmp_path: Path
     process = FakeProcess(timeout_on_wait=True)
     translator, _, _ = _translator(
         tmp_path,
-        FakeTransport([_health_ok()]),
+        FakeTransport([_health_ok(), _tokens(2)]),
         process=process,
     )
-    with translator:
-        pass
+    with translator as running:
+        assert running.count_tokens("closed") == 2
     assert process.terminated
     assert process.killed
     translator.close()

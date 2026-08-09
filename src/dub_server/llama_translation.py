@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -161,6 +162,7 @@ class LlamaServerTranslator:
         shutdown_timeout_seconds: float = 5.0,
         max_input_characters: int = 64 * 1024,
         max_output_characters: int = 64 * 1024,
+        token_cache_capacity: int = 512,
         process_factory: ProcessFactory | None = None,
         http_transport: JsonHttpTransport | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -208,6 +210,12 @@ class LlamaServerTranslator:
             or max_output_characters <= 0
         ):
             raise ValueError("Gi\u1edbi h\u1ea1n k\u00fd t\u1ef1 \u0111\u1ea7u ra kh\u00f4ng h\u1ee3p l\u1ec7")
+        if (
+            isinstance(token_cache_capacity, bool)
+            or not isinstance(token_cache_capacity, int)
+            or not 1 <= token_cache_capacity <= 4096
+        ):
+            raise ValueError("Dung l\u01b0\u1ee3ng cache tokenizer kh\u00f4ng h\u1ee3p l\u1ec7")
         self._model_id = model_id
         self._port = port
         self._context_size = context_size
@@ -217,6 +225,10 @@ class LlamaServerTranslator:
         self._shutdown_timeout = float(shutdown_timeout_seconds)
         self._max_input_characters = max_input_characters
         self._max_output_characters = max_output_characters
+        self._token_cache_capacity = token_cache_capacity
+        self._token_cache: OrderedDict[str, int] = OrderedDict()
+        self._token_cache_lock = threading.Lock()
+        self._token_cache_generation = 0
         self._process_factory = process_factory or _spawn_process
         self._transport = http_transport or _StdlibLoopbackJsonTransport(port)
         self._clock = clock
@@ -296,6 +308,18 @@ class LlamaServerTranslator:
             max_characters=self._max_input_characters,
             allow_empty=True,
         )
+        with self._token_cache_lock:
+            if self._closed:
+                cache_generation = self._token_cache_generation
+            else:
+                try:
+                    cached = self._token_cache.pop(normalized)
+                except KeyError:
+                    cache_generation = self._token_cache_generation
+                else:
+                    self._token_cache[normalized] = cached
+                    return cached
+
         response = self._post_json(
             "/tokenize",
             {
@@ -313,7 +337,23 @@ class LlamaServerTranslator:
             for token in tokens
         ):
             raise _invalid_response("Danh s\u00e1ch token llama.cpp kh\u00f4ng h\u1ee3p l\u1ec7")
-        return len(tokens)
+        count = len(tokens)
+        with self._token_cache_lock:
+            # A concurrent close invalidates the generation so an in-flight
+            # request cannot repopulate the cache after resources are closed.
+            if (
+                not self._closed
+                and cache_generation == self._token_cache_generation
+            ):
+                try:
+                    cached = self._token_cache.pop(normalized)
+                except KeyError:
+                    cached = count
+                self._token_cache[normalized] = cached
+                while len(self._token_cache) > self._token_cache_capacity:
+                    self._token_cache.popitem(last=False)
+                return cached
+        return count
 
     def translate_batch(
         self,
@@ -462,6 +502,9 @@ class LlamaServerTranslator:
                     return
                 self._closed = True
                 self._stop_process()
+            with self._token_cache_lock:
+                self._token_cache_generation += 1
+                self._token_cache.clear()
 
     def _wait_until_healthy(self) -> None:
         deadline = self._clock() + self._startup_timeout

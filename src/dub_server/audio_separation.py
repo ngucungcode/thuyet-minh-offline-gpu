@@ -805,6 +805,8 @@ def _run_tiger_runtime(arguments: Sequence[str]) -> int:
 
     decoded = output.parent / ".tiger-input.wav"
     ffmpeg = os.environ.get("DUB_FFMPEG_BINARY", "ffmpeg")
+    torch_runtime: Any | None = None
+    model: Any | None = None
     try:
         subprocess.run(
             (
@@ -841,6 +843,7 @@ def _run_tiger_runtime(arguments: Sequence[str]) -> int:
         import torch
         from look2hear.models import TIGERDNR
 
+        torch_runtime = torch
         device = torch.device("cuda")
         model = TIGERDNR.from_pretrained(
             os.fspath(model_path),
@@ -916,17 +919,19 @@ def _run_tiger_runtime(arguments: Sequence[str]) -> int:
                     )
                     writer.writeframesraw(pcm.tobytes())
                     del waveform, mixture, effects, music, accompaniment, pcm
-                    with suppress(Exception):
-                        torch.cuda.empty_cache()
                     _write_runtime_progress(
                         progress_path,
                         0.05 + 0.95 * (core_end / max(total_frames, 1)),
                     )
                 writer.writeframes(b"")
-        del model
-        with suppress(Exception):
-            torch.cuda.empty_cache()
     finally:
+        # Releasing the allocator after every chunk forces synchronization and
+        # defeats PyTorch's caching allocator. Drop the model and empty unused
+        # blocks once when this short-lived runtime finishes instead.
+        model = None
+        if torch_runtime is not None:
+            with suppress(Exception):
+                torch_runtime.cuda.empty_cache()
         with suppress(OSError):
             decoded.unlink(missing_ok=True)
     return 0

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
+import inspect
 import os
+import textwrap
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +20,7 @@ from dub_server.audio_separation import (
     SeparationBackendRequest,
     SeparationProgress,
     TigerDnrSubprocessRunner,
+    _run_tiger_runtime,
 )
 
 
@@ -377,6 +381,40 @@ def test_tiger_runner_reports_bounded_chunk_progress(tmp_path: Path) -> None:
     assert progress[-1] == 1.0
     assert any(0.2 <= value <= 0.3 for value in progress)
     assert any(0.7 <= value <= 0.8 for value in progress)
+
+
+def test_tiger_runtime_clears_cuda_cache_only_in_final_cleanup() -> None:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_run_tiger_runtime)))
+    function = tree.body[0]
+    assert isinstance(function, ast.FunctionDef)
+
+    def is_empty_cache_call(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "empty_cache"
+        )
+
+    all_calls = [node for node in ast.walk(function) if is_empty_cache_call(node)]
+    final_calls = [
+        node
+        for candidate in ast.walk(function)
+        if isinstance(candidate, ast.Try)
+        for statement in candidate.finalbody
+        for node in ast.walk(statement)
+        if is_empty_cache_call(node)
+    ]
+    loop_calls = [
+        node
+        for candidate in ast.walk(function)
+        if isinstance(candidate, (ast.For, ast.While))
+        for node in ast.walk(candidate)
+        if is_empty_cache_call(node)
+    ]
+
+    assert len(all_calls) == 1
+    assert len(final_calls) == 1
+    assert loop_calls == []
 
 
 @pytest.mark.parametrize(

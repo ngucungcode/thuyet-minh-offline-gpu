@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import dub_server.model_registry as model_registry
 from dub_server.config import load_model_catalog
 from dub_server.model_manager import install_model, load_catalog, verify_model
 from dub_server.model_registry import (
@@ -107,6 +108,123 @@ def test_worker_resolves_only_a_fully_verified_offline_model(tmp_path: Path) -> 
     assert result.stage == "asr"
     assert result.path == models_dir / "asr-test"
     assert len(result.tree_sha256) == 64
+
+
+def test_worker_reuses_full_hash_until_model_identity_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"model.bin": b"locked"}
+    lock, _ = _write_lock(tmp_path, files)
+    models_dir = tmp_path / "models"
+    model_file = models_dir / "asr-test" / "model.bin"
+    _write_model(models_dir / "asr-test", files)
+
+    original_hash = model_registry._hash_regular_file
+    hashed_paths: list[Path] = []
+
+    def counting_hash(path: Path, expected_size: int) -> str:
+        hashed_paths.append(path)
+        return original_hash(path, expected_size)
+
+    monkeypatch.setattr(
+        model_registry,
+        "_supports_mutation_sensitive_ctime",
+        lambda: True,
+    )
+    monkeypatch.setattr(model_registry, "_hash_regular_file", counting_hash)
+
+    first = resolve_verified_model(lock, models_dir, "asr-test", "asr")
+    second = resolve_verified_model(lock, models_dir, "asr-test", "asr")
+
+    assert first.tree_sha256 == second.tree_sha256
+    assert hashed_paths == [model_file]
+
+    status = model_file.stat()
+    os.utime(
+        model_file,
+        ns=(status.st_atime_ns, status.st_mtime_ns + 1_000_000),
+    )
+    resolve_verified_model(lock, models_dir, "asr-test", "asr")
+    assert hashed_paths == [model_file, model_file]
+
+
+def test_worker_hashes_every_lookup_when_ctime_is_not_mutation_sensitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"model.bin": b"locked"}
+    lock, _ = _write_lock(tmp_path, files)
+    models_dir = tmp_path / "models"
+    model_file = models_dir / "asr-test" / "model.bin"
+    _write_model(models_dir / "asr-test", files)
+
+    original_hash = model_registry._hash_regular_file
+    hashed_paths: list[Path] = []
+
+    def counting_hash(path: Path, expected_size: int) -> str:
+        hashed_paths.append(path)
+        return original_hash(path, expected_size)
+
+    monkeypatch.setattr(
+        model_registry,
+        "_supports_mutation_sensitive_ctime",
+        lambda: False,
+    )
+    monkeypatch.setattr(model_registry, "_hash_regular_file", counting_hash)
+
+    resolve_verified_model(lock, models_dir, "asr-test", "asr")
+    resolve_verified_model(lock, models_dir, "asr-test", "asr")
+    assert hashed_paths == [model_file, model_file]
+
+    original_status = model_file.stat()
+    model_file.write_bytes(b"broken")
+    os.utime(
+        model_file,
+        ns=(original_status.st_atime_ns, original_status.st_mtime_ns),
+    )
+
+    with pytest.raises(ModelVerificationError, match="SHA-256 mismatch"):
+        resolve_verified_model(lock, models_dir, "asr-test", "asr")
+    assert hashed_paths == [model_file, model_file, model_file]
+
+
+def test_worker_cache_is_invalidated_when_locked_file_digest_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"model.bin": b"locked"}
+    lock, entry = _write_lock(tmp_path, files)
+    models_dir = tmp_path / "models"
+    _write_model(models_dir / "asr-test", files)
+
+    monkeypatch.setattr(
+        model_registry,
+        "_supports_mutation_sensitive_ctime",
+        lambda: True,
+    )
+    resolve_verified_model(lock, models_dir, "asr-test", "asr")
+
+    entry["files"][0]["sha256"] = hashlib.sha256(b"broken").hexdigest()
+    lock.write_text(
+        json.dumps({"schema_version": 1, "models": [entry]}), encoding="utf-8"
+    )
+
+    with pytest.raises(ModelVerificationError, match="SHA-256 mismatch"):
+        resolve_verified_model(lock, models_dir, "asr-test", "asr")
+
+
+def test_worker_cache_never_hides_same_size_model_corruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {"model.bin": b"locked"}
+    lock, _ = _write_lock(tmp_path, files)
+    models_dir = tmp_path / "models"
+    model_file = models_dir / "asr-test" / "model.bin"
+    _write_model(models_dir / "asr-test", files)
+
+    resolve_verified_model(lock, models_dir, "asr-test", "asr")
+    model_file.write_bytes(b"broken")
+
+    with pytest.raises(ModelVerificationError, match="SHA-256 mismatch"):
+        resolve_verified_model(lock, models_dir, "asr-test", "asr")
 
 
 def test_worker_rejects_wrong_stage_without_network(tmp_path: Path) -> None:

@@ -68,6 +68,25 @@ Installer kiểm tra toàn bộ preflight trước khi sửa hệ thống, tự 
 tải và xác minh SHA-256 model, tạo secret, khởi động stack, chạy acceptance cơ
 bản và cài `dub` tại `/usr/local/bin/dub`.
 
+Bootstrap mặc định dùng bộ smoke check production, tận dụng pip cache bên trong
+data root và tự dùng tối đa 16 luồng CPU khi build native. Để chạy thêm toàn bộ
+unit test ngay trên máy cài đặt, dùng chế độ chậm `full`:
+
+```bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/latest/download/install.sh | sudo env DUB_INSTALL_TEST_MODE=full bash
+```
+
+Có thể giới hạn số luồng compile bằng `DUB_BUILD_JOBS`; giá trị phải là số
+nguyên dương. Cả hai biến chỉ ảnh hưởng cold bootstrap, không thay đổi model
+hoặc checksum của artifact đã cài.
+
+Installer ghi số giây của bootstrap, cài model, acceptance và toàn bộ lượt chạy
+vào `install-state.json` dưới khóa `performance`. Trong worker Linux, model vẫn
+được băm SHA-256 đầy đủ trước lần dùng đầu tiên; các stage/job tiếp theo chỉ dùng
+fast-path khi danh sách file và toàn bộ metadata chống sửa đổi không đổi. Cache
+này mất khi worker khởi động lại. Tokenizer dịch cũng dùng LRU hữu hạn, còn tiến
+độ TTS/timing được gộp theo phần nghìn nhưng checkpoint từng block vẫn được ghi.
+
 Kiểm tra sau cài:
 
 ```bash

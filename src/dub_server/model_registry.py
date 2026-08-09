@@ -14,6 +14,8 @@ import json
 import os
 import re
 import stat
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -28,6 +30,7 @@ _MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _REPOSITORY_PATTERN = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z"
 )
+_VERIFICATION_CACHE_LIMIT = 32
 
 
 class ModelRegistryError(ValueError):
@@ -80,6 +83,19 @@ class VerifiedModel:
     @property
     def stage(self) -> str:
         return str(self.entry["stage"])
+
+
+@dataclass(frozen=True, slots=True)
+class _VerificationCacheEntry:
+    """Identity of a model tree that was fully hashed in this process."""
+
+    identity: tuple[tuple[object, ...], ...]
+
+
+_verification_cache: OrderedDict[tuple[str, ...], _VerificationCacheEntry] = (
+    OrderedDict()
+)
+_verification_cache_lock = threading.RLock()
 
 
 def read_model_catalog(path: Path) -> dict[str, Any]:
@@ -334,10 +350,21 @@ def _walk_regular_tree(root: Path) -> tuple[set[str], set[str]]:
     return files, directories
 
 
-def verify_model_directory(manifest: LockedModel, model_path: Path) -> VerifiedModel:
-    """Fully verify a local model tree without any network access."""
+def _expected_directories(expected_files: set[str]) -> set[str]:
+    directories: set[str] = set()
+    for file_path in expected_files:
+        for parent in PurePosixPath(file_path).parents:
+            normalized = parent.as_posix()
+            if normalized != ".":
+                directories.add(normalized)
+    return directories
 
-    observed_files, observed_directories = _walk_regular_tree(model_path)
+
+def _validate_tree_allowlist(
+    manifest: LockedModel,
+    observed_files: set[str],
+    observed_directories: set[str],
+) -> None:
     expected_files = {item.path for item in manifest.files}
     if observed_files != expected_files:
         missing = sorted(expected_files - observed_files)
@@ -347,12 +374,7 @@ def verify_model_directory(manifest: LockedModel, model_path: Path) -> VerifiedM
             f"missing={missing}, unexpected={unexpected}"
         )
 
-    expected_directories: set[str] = set()
-    for file_path in expected_files:
-        for parent in PurePosixPath(file_path).parents:
-            normalized = parent.as_posix()
-            if normalized != ".":
-                expected_directories.add(normalized)
+    expected_directories = _expected_directories(expected_files)
     if observed_directories != expected_directories:
         unexpected = sorted(observed_directories - expected_directories)
         missing = sorted(expected_directories - observed_directories)
@@ -360,6 +382,81 @@ def verify_model_directory(manifest: LockedModel, model_path: Path) -> VerifiedM
             f"Model {manifest.model_id} directory allowlist mismatch; "
             f"missing={missing}, unexpected={unexpected}"
         )
+
+
+def _status_identity(path: Path, relative: str) -> tuple[object, ...]:
+    """Return mutation-sensitive metadata without following symlinks."""
+
+    try:
+        status = path.lstat()
+    except FileNotFoundError as error:
+        raise ModelVerificationError(f"Model artifact disappeared: {path}") from error
+    return (
+        relative,
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _supports_mutation_sensitive_ctime() -> bool:
+    """Return whether ``st_ctime`` records metadata changes on this platform.
+
+    POSIX defines ``st_ctime`` as the last metadata-change time, so an owner can
+    restore ``st_mtime`` with ``utime`` but cannot restore ``st_ctime``.  Python
+    exposes file creation time through the same field on Windows, which makes a
+    metadata-only verification cache unsafe there.
+    """
+
+    return os.name == "posix"
+
+
+def _model_tree_identity(
+    manifest: LockedModel, model_path: Path
+) -> tuple[tuple[object, ...], ...]:
+    """Build a cheap exact identity for a previously verified model tree.
+
+    On platforms where ``st_ctime`` is mutation-sensitive, the worker performs
+    one complete SHA-256 verification per process. Subsequent stages/jobs may
+    reuse it only while the root, directory allowlist, file allowlist and
+    mutation-sensitive metadata are unchanged. Other platforms always perform
+    a complete hash and never use this identity as an integrity decision.
+    """
+
+    observed_files, observed_directories = _walk_regular_tree(model_path)
+    _validate_tree_allowlist(manifest, observed_files, observed_directories)
+
+    records = [_status_identity(model_path, ".")]
+    for relative in sorted(observed_directories):
+        records.append(
+            _status_identity(
+                model_path.joinpath(*PurePosixPath(relative).parts),
+                f"d:{relative}",
+            )
+        )
+    expected_sizes = {item.path: item.size for item in manifest.files}
+    for relative in sorted(observed_files):
+        record = _status_identity(
+            model_path.joinpath(*PurePosixPath(relative).parts),
+            f"f:{relative}",
+        )
+        if record[4] != expected_sizes[relative]:
+            raise ModelVerificationError(
+                f"Model artifact size mismatch for {relative}: "
+                f"expected {expected_sizes[relative]}, got {record[4]}"
+            )
+        records.append(record)
+    return tuple(records)
+
+
+def verify_model_directory(manifest: LockedModel, model_path: Path) -> VerifiedModel:
+    """Fully verify a local model tree without any network access."""
+
+    observed_files, observed_directories = _walk_regular_tree(model_path)
+    _validate_tree_allowlist(manifest, observed_files, observed_directories)
 
     actual_records: list[tuple[str, int, str]] = []
     for locked_file in manifest.files:
@@ -419,7 +516,13 @@ def resolve_verified_model(
     model_id: str,
     expected_stage: str,
 ) -> VerifiedModel:
-    """Resolve and completely verify one worker-selected model offline."""
+    """Resolve an offline model, fully hashing it once per worker process.
+
+    On POSIX, a warm lookup reuses the completed verification only when a cheap
+    exact tree identity still matches. Any replacement, metadata mutation,
+    extra path, missing path or changed catalog pin falls back to full SHA-256.
+    Platforms where ``st_ctime`` is not mutation-sensitive hash every lookup.
+    """
 
     catalog = read_model_catalog(lock_path)
     manifest = parse_model_manifest(find_model_entry(catalog, model_id))
@@ -428,4 +531,43 @@ def resolve_verified_model(
             f"Model {model_id} belongs to stage {manifest.stage}, not {expected_stage}"
         )
     destination = model_destination(models_dir, manifest)
-    return verify_model_directory(manifest, destination)
+    if not _supports_mutation_sensitive_ctime():
+        return verify_model_directory(manifest, destination)
+
+    cache_key = (
+        os.path.abspath(lock_path),
+        os.path.abspath(models_dir),
+        manifest.model_id,
+        manifest.stage,
+        manifest.revision,
+        manifest.relative_path.as_posix(),
+        manifest.tree_sha256,
+        compute_tree_sha256(
+            (item.path, item.size, item.sha256) for item in manifest.files
+        ),
+    )
+    identity_before = _model_tree_identity(manifest, destination)
+    with _verification_cache_lock:
+        cached = _verification_cache.get(cache_key)
+        if cached is not None and cached.identity == identity_before:
+            _verification_cache.move_to_end(cache_key)
+            return VerifiedModel(
+                entry=manifest.entry,
+                path=destination,
+                tree_sha256=manifest.tree_sha256,
+            )
+        _verification_cache.pop(cache_key, None)
+
+    verified = verify_model_directory(manifest, destination)
+    identity_after = _model_tree_identity(manifest, destination)
+    if identity_after != identity_before:
+        raise ModelVerificationError(
+            f"Model {manifest.model_id} changed during complete verification"
+        )
+
+    with _verification_cache_lock:
+        _verification_cache[cache_key] = _VerificationCacheEntry(identity_after)
+        _verification_cache.move_to_end(cache_key)
+        while len(_verification_cache) > _VERIFICATION_CACHE_LIMIT:
+            _verification_cache.popitem(last=False)
+    return verified

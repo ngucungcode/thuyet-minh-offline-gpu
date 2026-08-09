@@ -19,7 +19,7 @@ from dub_server.narration import (
     SynthesizedNarration,
     TTS_SILENCE_TRIM_VERSION,
 )
-from dub_server.phase4_stage import Phase4Stage
+from dub_server.phase4_stage import Phase4Stage, _next_block_progress
 from dub_server.state import JobStage, JobStatus, StateStore
 from dub_server.timing import FittedNarrationBlock, TimingProfile, TimingQuality
 from dub_server.translation_artifact import (
@@ -31,6 +31,26 @@ from dub_server.translation_artifact import (
 
 MODEL_SHA = "a" * 64
 SOURCE_SHA = "b" * 64
+
+
+def test_block_progress_coalesces_large_jobs_without_losing_completion() -> None:
+    last_persisted = 735
+    emitted: list[int] = []
+    for completed in range(1, 10_001):
+        mapped = _next_block_progress(
+            completed=completed,
+            total=10_000,
+            range_start=735,
+            range_size=115,
+            last_persisted=last_persisted,
+        )
+        if mapped is not None:
+            emitted.append(mapped)
+            last_persisted = mapped
+
+    assert emitted == sorted(set(emitted))
+    assert len(emitted) == 115
+    assert emitted[-1] == 850
 
 
 def _write_wav(

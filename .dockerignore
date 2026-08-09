@@ -13,6 +13,17 @@ tests/
 data/
 models/
 state/
+**/node_modules/
+.artifacts/
+.pytest-tmp-*/
+.review-tmp-*/
+.tmp-test-bin/
+web/.next/
+web/.vinext/
+web/dist/
+web/.wrangler/
+web/outputs/
+web/work/
 *.log
 .env
 .env.*
