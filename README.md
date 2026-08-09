@@ -28,7 +28,7 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Trình cài production `v0.3.1` hỗ trợ đường triển khai native sau:
+Trình cài production `v0.3.2` hỗ trợ đường triển khai native sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
@@ -213,11 +213,11 @@ chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu 
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.0` lên `v0.3.1`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.1` lên `v0.3.2`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.1/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.2/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -233,7 +233,7 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.1/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.2/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
@@ -255,10 +255,10 @@ nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.3.1` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.3.2` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.1/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.2/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
