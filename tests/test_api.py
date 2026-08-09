@@ -9,6 +9,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -26,7 +27,7 @@ from dub_server.domain import (
     MediaQuery,
     ReleaseCandidate,
 )
-from dub_server.media_probe import FfprobeMediaProbe
+from dub_server.media_probe import FfprobeMediaProbe, MediaProbeError
 from dub_server.state import ActiveJobExists, JobStage, JobStatus, StateStore
 
 
@@ -202,6 +203,7 @@ class FakeMediaProbe:
         media_kind: MediaKind = MediaKind.MOVIE,
         year: int | None = None,
         require_h264_passthrough: bool = False,
+        allow_hevc_transcode: bool = False,
     ) -> MediaAsset:
         self.paths.append(path)
         return MediaAsset(
@@ -308,6 +310,8 @@ def _settings(tmp_path: Path) -> Settings:
         incoming_dir=tmp_path / "incoming",
         jobs_dir=tmp_path / "jobs",
         output_dir=tmp_path / "output",
+        gpu_report_path=tmp_path / "state" / "gpu-health.json",
+        gpu_report_max_age_seconds=5.0,
         prowlarr_api_key_file=None,
         qbittorrent_password_file=None,
         opensubtitles_api_key_file=None,
@@ -317,6 +321,54 @@ def _settings(tmp_path: Path) -> Settings:
         default_tts_model_id="tts-fast",
         sse_poll_seconds=0.05,
         acquisition_monitor_seconds=30.0,
+    )
+
+
+def _settings_with_model_vram(
+    tmp_path: Path,
+    *,
+    minimum_vram_mib: int,
+) -> Settings:
+    settings = _settings(tmp_path)
+    catalog = json.loads(settings.models_lock_path.read_text(encoding="utf-8"))
+    for model in catalog["models"]:
+        if model["id"] == settings.default_asr_model_id:
+            model["minimum_vram_mib"] = minimum_vram_mib
+            break
+    settings.models_lock_path.write_text(json.dumps(catalog), encoding="utf-8")
+    return settings
+
+
+def _write_ready_gpu_report(
+    settings: Settings,
+    *,
+    memory_total_mib: int,
+    heartbeat_at: datetime,
+    name: str = "Test GPU",
+    compute_capability: str = "8.6",
+) -> None:
+    settings.gpu_report_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.gpu_report_path.write_text(
+        json.dumps(
+            {
+                "ready": True,
+                "enforced": True,
+                "selected_gpu_uuid": "GPU-logical-0",
+                "gpus": [
+                    {
+                        "uuid": "GPU-logical-0",
+                        "name": name,
+                        "driver_version": "570.26",
+                        "memory_total_mib": memory_total_mib,
+                        "compute_capability": compute_capability,
+                    }
+                ],
+                "errors": [],
+                "warnings": [],
+                "worker_heartbeat_at": heartbeat_at.isoformat(),
+            }
+        ),
+        encoding="utf-8",
     )
 
 
@@ -352,6 +404,7 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     assert health.status_code == 200
     assert health.json()["status"] == "degraded"
     assert health.json()["database"]["journal_mode"] == "wal"
+    assert health.json()["gpu"]["support_tier"] is None
     assert capabilities.json()["offline_inference"] is True
     assert capabilities.json()["drm_supported"] is False
     assert capabilities.json()["local_upload"] == {
@@ -365,6 +418,38 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     }
     assert models.json()["models"][0]["id"] == "asr-small"
     assert models.json()["models"][0]["valid"] is False
+
+
+@pytest.mark.parametrize(
+    ("name", "compute_capability", "expected_tier"),
+    [
+        ("NVIDIA RTX 3090", "8.6", "supported"),
+        ("Tesla V100-SXM2-32GB", "7.0", "maintenance-limited"),
+        ("NVIDIA CMP 170HX", "8.0", "experimental"),
+    ],
+)
+def test_health_exposes_selected_gpu_support_tier(
+    tmp_path: Path,
+    monkeypatch,
+    name: str,
+    compute_capability: str,
+    expected_tier: str,
+) -> None:
+    settings = _settings(tmp_path)
+    _write_ready_gpu_report(
+        settings,
+        memory_total_mib=24 * 1024,
+        heartbeat_at=datetime.now(UTC),
+        name=name,
+        compute_capability=compute_capability,
+    )
+    client, _, _ = _client(tmp_path, monkeypatch, settings=settings)
+
+    with client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["gpu"]["support_tier"] == expected_tier
 
 
 def _upload_request(
@@ -451,6 +536,83 @@ def test_local_mkv_upload_accepts_h264_passthrough_before_creating_job(
     assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
 
 
+def test_local_mkv_upload_accepts_hevc_for_video_transcode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, store, _ = _client(
+        tmp_path,
+        monkeypatch,
+        media_probe=_codec_media_probe("hevc"),
+    )
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        client.put(f"/v1/uploads/{upload_id}/media", content=b"hevc mkv bytes")
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert finalized.status_code == 202
+    assert finalized.json()["details"]["selected_media"]["video_codec"] == "hevc"
+    assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
+
+
+def test_retained_hevc_upload_finalizes_after_server_upgrade_without_reupload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class UpgradeAwareProbe(FakeMediaProbe):
+        upgraded = False
+
+        async def probe(self, path: Path, **kwargs) -> MediaAsset:
+            self.paths.append(path)
+            if not self.upgraded:
+                raise MediaProbeError(
+                    "unsupported_media",
+                    "Luồng hình chính dùng codec HEVC; cần H.264/AVC để xuất MP4 "
+                    "không mã hóa lại",
+                    retryable=False,
+                )
+            return MediaAsset(
+                path=path,
+                title=path.stem,
+                duration_us=self.duration_us,
+                source_language=str(kwargs["source_language"]),
+                media_kind=MediaKind.MOVIE,
+                fps=24.0,
+                audio_stream_index=1,
+                video_stream_index=0,
+                video_codec="hevc",
+            )
+
+    probe = UpgradeAwareProbe()
+    client, store, _ = _client(tmp_path, monkeypatch, media_probe=probe)
+    media_bytes = b"retained hevc bytes"
+    with client:
+        created = client.post("/v1/uploads", json=_upload_request())
+        upload_id = created.json()["id"]
+        uploaded = client.put(
+            f"/v1/uploads/{upload_id}/media",
+            content=media_bytes,
+        )
+        rejected = client.post(f"/v1/uploads/{upload_id}/finalize")
+        retained = client.get(f"/v1/uploads/{upload_id}")
+        probe.upgraded = True
+        finalized = client.post(f"/v1/uploads/{upload_id}/finalize")
+
+    assert uploaded.status_code == 200
+    assert rejected.status_code == 422
+    assert retained.status_code == 200
+    assert retained.json()["media_sha256"] == hashlib.sha256(media_bytes).hexdigest()
+    assert finalized.status_code == 202
+    assert finalized.json()["id"] == upload_id
+    assert finalized.json()["details"]["selected_media"]["video_codec"] == "hevc"
+    assert probe.paths == [
+        tmp_path / "incoming" / upload_id / "source.mkv",
+        tmp_path / "incoming" / upload_id / "source.mkv",
+    ]
+    assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
+
+
 def test_local_upload_ignores_embedded_cover_before_h264_video(
     tmp_path: Path,
     monkeypatch,
@@ -473,8 +635,8 @@ def test_local_upload_ignores_embedded_cover_before_h264_video(
     assert store.get_job(upload_id).status is JobStatus.READY_OFFLINE
 
 
-@pytest.mark.parametrize("codec_name", ["vp8", "hevc", "ffv1"])
-def test_local_mkv_upload_rejects_non_h264_before_creating_job(
+@pytest.mark.parametrize("codec_name", ["vp8", "ffv1"])
+def test_local_mkv_upload_rejects_unsupported_video_before_creating_job(
     tmp_path: Path,
     monkeypatch,
     codec_name: str,
@@ -496,7 +658,7 @@ def test_local_mkv_upload_rejects_non_h264_before_creating_job(
         "code": "unsupported_media",
         "message": (
             f"Luồng hình chính dùng codec {codec_name.upper()}; cần H.264/AVC "
-            "để xuất MP4 không mã hóa lại"
+            "hoặc HEVC/H.265 để xuất MP4"
         ),
         "retryable": False,
     }
@@ -1804,6 +1966,63 @@ def test_job_rejects_unknown_or_wrong_stage_model(
     assert unknown.status_code == 422
     assert unknown.json()["detail"]["code"] == "invalid_model_selection"
     assert wrong_stage.status_code == 422
+
+
+def test_model_selection_rejects_insufficient_fresh_gpu_vram_for_job_and_upload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = _settings_with_model_vram(tmp_path, minimum_vram_mib=8192)
+    _write_ready_gpu_report(
+        settings,
+        memory_total_mib=6144,
+        heartbeat_at=datetime.now(UTC),
+    )
+    client, _, _ = _client(tmp_path, monkeypatch, settings=settings)
+
+    with client:
+        upload = client.post("/v1/uploads", json=_upload_request())
+        job = client.post(
+            "/v1/jobs",
+            json={"release_id": "release-1", "rights_confirmed": True},
+        )
+
+    for response in (upload, job):
+        assert response.status_code == 422
+        assert response.json()["detail"] == {
+            "code": "model_vram_insufficient",
+            "message": (
+                "Model asr-small cần tối thiểu 8192 MiB VRAM nhưng GPU logical 0 "
+                "chỉ có 6144 MiB"
+            ),
+            "retryable": False,
+        }
+
+
+@pytest.mark.parametrize("report_state", ["missing", "stale"])
+def test_model_selection_without_fresh_gpu_report_remains_compatible(
+    tmp_path: Path,
+    monkeypatch,
+    report_state: str,
+) -> None:
+    settings = _settings_with_model_vram(tmp_path, minimum_vram_mib=8192)
+    if report_state == "stale":
+        _write_ready_gpu_report(
+            settings,
+            memory_total_mib=6144,
+            heartbeat_at=datetime.now(UTC) - timedelta(seconds=6),
+        )
+    client, _, _ = _client(tmp_path, monkeypatch, settings=settings)
+
+    with client:
+        upload = client.post("/v1/uploads", json=_upload_request())
+        job = client.post(
+            "/v1/jobs",
+            json={"release_id": "release-1", "rights_confirmed": True},
+        )
+
+    assert upload.status_code == 201
+    assert job.status_code == 202
 
 
 def test_only_one_active_gpu_job_can_be_created(tmp_path: Path, monkeypatch) -> None:

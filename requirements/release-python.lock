@@ -1,7 +1,7 @@
-# Exact Docker runtime dependencies. Keep this file synchronized with
-# project.dependencies + project.optional-dependencies.gpu in pyproject.toml.
-# torch is installed first from the pinned CUDA 12.8 wheel index; the public
-# version pin below makes the runtime contract and SBOM drift-check explicit.
+# Direct Python runtime dependencies shared by the supported Docker and native
+# release profiles. This is an SBOM input, not an installer requirements file.
+# Keep it synchronized with project.dependencies plus the gpu and native
+# optional-dependency groups in pyproject.toml.
 fastapi==0.139.2
 httpx==0.28.1
 pydantic-settings==2.14.2
@@ -19,3 +19,4 @@ soundfile==0.13.1
 soxr==1.0.0
 torch==2.8.0
 transformers==4.57.6
+supervisor==4.3.0

@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
 # llama.cpp is built from an immutable source commit with CUDA kernels for the
-# RTX 3090 (sm_86). The runtime directory is self-contained and is copied into
-# the final offline worker image.
+# closed support matrix. Real cubins cover every supported generation and the
+# final PTX target preserves forward JIT compatibility without accepting an
+# untested architecture in the runtime preflight.
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04@sha256:81d4dd36435f4ccf0aafb111c6b09182084f0a3ff044ffa5b74bbeb7c5a5fd33 AS llama-builder
 
 ARG LLAMA_CPP_COMMIT=9d9a6d29f6b981cc7f41983d26e56485c6af1811
+ARG LLAMA_CUDA_ARCHITECTURES="70-real;75-real;80-real;86-real;89-real;90-real;90-virtual"
 ARG TIGER_SOURCE_COMMIT=9f18d4a10a7137e1ce8052cfb62215179f1287b6
 ARG VIENEU_SOURCE_COMMIT=4002d8d6749d516b446c012f5e6729b7661529d2
 
@@ -29,7 +31,7 @@ RUN git init -q . \
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_BUILD_RPATH_USE_ORIGIN=ON \
-        -DCMAKE_CUDA_ARCHITECTURES=86 \
+        -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHITECTURES}" \
         -DGGML_CUDA=ON \
         -DLLAMA_CURL=OFF \
         -DLLAMA_BUILD_UI=OFF \
@@ -78,9 +80,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DUB_INCOMING_DIR=/data/incoming \
     DUB_JOBS_DIR=/data/jobs \
     DUB_OUTPUT_DIR=/data/output \
-    DUB_DEFAULT_TRANSLATION_MODEL_ID=mt-gemma4-31b-q4 \
+    DUB_DEFAULT_ASR_MODEL_ID=asr-faster-whisper-small \
+    DUB_DEFAULT_TRANSLATION_MODEL_ID=mt-gemma4-e2b-q4 \
     DUB_DEFAULT_SEPARATION_MODEL_ID=separation-tiger-dnr \
-    DUB_DEFAULT_TTS_MODEL_ID=tts-vieneu-v2 \
+    DUB_DEFAULT_TTS_MODEL_ID=tts-piper-vi-vais1000-medium \
     DUB_TTS_SUPPORT_MODEL_ID=tts-neucodec-onnx-int8 \
     DUB_TIGER_SOURCE_DIR=/opt/tiger \
     DUB_VIENEU_ENTRYPOINT=/opt/vieneu/vieneu-offline.py \
@@ -116,6 +119,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3.12 -m pip install --break-system-packages \
         --index-url https://download.pytorch.org/whl/cu128 \
         torch==2.8.0 \
+    && python3.12 -c 'import torch; flags=set(torch._C._cuda_getArchFlags().split()); assert "sm_70" in flags, f"PyTorch wheel lost Volta support: {sorted(flags)}"' \
     && python3.12 -m pip install --break-system-packages \
         --requirement requirements/docker-gpu.lock \
     && python3.12 -m pip check

@@ -57,7 +57,7 @@ from .domain import (
 )
 from .media_probe import FfprobeMediaProbe, MediaProbe, MediaProbeError
 from .transcript import TranscriptError, parse_subtitle_file
-from .gpu import inspect_gpu, read_gpu_report
+from .gpu import NvidiaGpu, gpu_support_tier, inspect_gpu, read_gpu_report
 from .opensubtitles import (
     DEFAULT_OPENSUBTITLES_API_ROOT,
     normalize_opensubtitles_api_root,
@@ -175,6 +175,59 @@ class CoordinatorPort(Protocol):
 
 _LOGGER = logging.getLogger(__name__)
 _WEB_STATIC_ROOT = Path(__file__).resolve().with_name("web_static")
+
+
+def _with_gpu_support_tier(report: dict[str, Any]) -> dict[str, Any]:
+    """Add the selected logical GPU's release support tier to health data."""
+
+    payload = dict(report)
+    payload["support_tier"] = None
+    if payload.get("ready") is not True:
+        return payload
+    raw_gpus = payload.get("gpus")
+    if not isinstance(raw_gpus, list) or not raw_gpus:
+        return payload
+
+    selected_uuid = payload.get("selected_gpu_uuid")
+    raw_selected = next(
+        (
+            item
+            for item in raw_gpus
+            if isinstance(item, dict)
+            and isinstance(selected_uuid, str)
+            and item.get("uuid") == selected_uuid
+        ),
+        raw_gpus[0],
+    )
+    if not isinstance(raw_selected, dict):
+        return payload
+
+    required_text = (
+        raw_selected.get("uuid"),
+        raw_selected.get("name"),
+        raw_selected.get("driver_version"),
+        raw_selected.get("compute_capability"),
+    )
+    memory_total_mib = raw_selected.get("memory_total_mib")
+    if (
+        not all(isinstance(value, str) and value for value in required_text)
+        or not isinstance(memory_total_mib, int)
+        or isinstance(memory_total_mib, bool)
+    ):
+        return payload
+
+    try:
+        selected_gpu = NvidiaGpu(
+            uuid=raw_selected["uuid"],
+            name=raw_selected["name"],
+            driver_version=raw_selected["driver_version"],
+            memory_total_mib=memory_total_mib,
+            compute_capability=raw_selected["compute_capability"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return payload
+    payload["support_tier"] = gpu_support_tier(selected_gpu)
+    return payload
 
 
 async def _monitor_acquisition_jobs(
@@ -1098,7 +1151,21 @@ def _acquisition_error_status(error: AcquisitionError) -> int:
 def _validate_model_selection(
     selection: ModelSelection,
     catalog: ModelCatalog,
+    *,
+    gpu_report: dict[str, Any] | None = None,
 ) -> None:
+    available_vram_mib: int | None = None
+    if gpu_report is not None and gpu_report.get("ready") is True:
+        gpus = gpu_report.get("gpus")
+        if isinstance(gpus, list) and gpus and isinstance(gpus[0], dict):
+            reported_vram = gpus[0].get("memory_total_mib")
+            if (
+                isinstance(reported_vram, int)
+                and not isinstance(reported_vram, bool)
+                and reported_vram > 0
+            ):
+                available_vram_mib = reported_vram
+
     by_id = {entry.id: entry for entry in catalog.models}
     requested = {
         "asr": selection.asr,
@@ -1117,6 +1184,23 @@ def _validate_model_selection(
                     "code": "invalid_model_selection",
                     "message": (
                         f"Model {model_id} không thuộc lựa chọn {expected_stage}"
+                    ),
+                    "retryable": False,
+                },
+            )
+        if (
+            available_vram_mib is not None
+            and entry.minimum_vram_mib is not None
+            and entry.minimum_vram_mib > available_vram_mib
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "model_vram_insufficient",
+                    "message": (
+                        f"Model {model_id} cần tối thiểu "
+                        f"{entry.minimum_vram_mib} MiB VRAM nhưng GPU logical 0 "
+                        f"chỉ có {available_vram_mib} MiB"
                     ),
                     "retryable": False,
                 },
@@ -1666,9 +1750,11 @@ def create_app(
             catalog_status = "missing_or_invalid"
             model_count = 0
 
-        gpu_report = read_gpu_report(
-            configured_settings.gpu_report_path,
-            max_age_seconds=configured_settings.gpu_report_max_age_seconds,
+        gpu_report = _with_gpu_support_tier(
+            read_gpu_report(
+                configured_settings.gpu_report_path,
+                max_age_seconds=configured_settings.gpu_report_max_age_seconds,
+            )
         )
 
         healthy = database_status == "ok"
@@ -2093,7 +2179,14 @@ def create_app(
             ),
             tts=(payload.models.tts or configured_settings.default_tts_model_id),
         )
-        _validate_model_selection(effective_models, catalog)
+        _validate_model_selection(
+            effective_models,
+            catalog,
+            gpu_report=read_gpu_report(
+                configured_settings.gpu_report_path,
+                max_age_seconds=configured_settings.gpu_report_max_age_seconds,
+            ),
+        )
         frozen_request = UploadCreateRequest.model_validate(
             {
                 **payload.model_dump(mode="json"),
@@ -2322,6 +2415,7 @@ def create_app(
                     source_language=session.request.source_language,
                     title=Path(session.request.media_filename).stem,
                     require_h264_passthrough=True,
+                    allow_hevc_transcode=True,
                 )
             except MediaProbeError as exc:
                 raise _upload_error(
@@ -2721,7 +2815,14 @@ def create_app(
             ),
             tts=(payload.models.tts or configured_settings.default_tts_model_id),
         )
-        _validate_model_selection(effective_models, catalog)
+        _validate_model_selection(
+            effective_models,
+            catalog,
+            gpu_report=read_gpu_report(
+                configured_settings.gpu_report_path,
+                max_age_seconds=configured_settings.gpu_report_max_age_seconds,
+            ),
+        )
 
         active_jobs = store.list_active_jobs(limit=1)
         if active_jobs:

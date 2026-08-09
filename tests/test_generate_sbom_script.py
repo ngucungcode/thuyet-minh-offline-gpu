@@ -26,6 +26,8 @@ def test_script_resolves_web_lock_outside_project_cwd(tmp_path: Path) -> None:
             str(native),
             "--output",
             str(output),
+            "--python-lock",
+            str(project_root / "requirements" / "release-python.lock"),
         ],
         cwd=tmp_path,
         env=environment,
@@ -41,3 +43,5 @@ def test_script_resolves_web_lock_outside_project_cwd(tmp_path: Path) -> None:
     assert "npm:next@16.2.12" in refs
     assert "npm:react@19.2.6" in refs
     assert "npm:vinext@0.0.50" in refs
+    assert "python:torch@2.8.0" in refs
+    assert not any(ref.startswith("python:pytest@") for ref in refs)

@@ -5,9 +5,12 @@
 1. Mở `http://127.0.0.1:8080/` qua SSH tunnel, chọn tab **Tải file lên**.
 2. Chọn video `.mp4` hoặc `.mkv`. Phụ đề `.srt` là tùy chọn; khi có SRT phải
    chọn một ngôn ngữ nguồn cụ thể thay vì **Tự động**.
-   Đuôi file chỉ là bước kiểm tra đầu tiên: luồng hình đầu tiên phải là H.264/AVC
-   để passthrough sang MP4. Server trả `unsupported_media` khi finalize đối với
-   HEVC, VP8, FFV1 hoặc cover-art được đặt làm luồng hình đầu tiên.
+   Đuôi file chỉ là bước kiểm tra đầu tiên. Luồng hình chính H.264/AVC được
+   passthrough sang MP4; HEVC/H.265 SDR được mã hóa lại riêng phần hình sang H.264/AVC
+   bằng CPU nên sẽ chậm hơn. HEVC HDR10, HLG và Dolby Vision bị từ chối để không xuất
+   sai màu khi chưa có tone-map được kiểm thử. Server trả `unsupported_media` đối với
+   VP8, FFV1, MPEG-4 Part 2 hoặc khi không có luồng hình chính hợp lệ; cover-art
+   không được xem là luồng hình chính.
 3. Chọn model/giọng và chế độ căn thời gian. **Nhịp tự nhiên** là mặc định: bản
    dịch được viết gọn theo thời lượng, giọng được giữ gần 1,0×, có thể mượn tối
    đa 0,8 giây khoảng lặng lân cận và không tăng quá 1,20×. **Khớp nghiêm ngặt**

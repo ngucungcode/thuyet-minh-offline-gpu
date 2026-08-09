@@ -39,6 +39,7 @@ def build_cyclonedx_sbom(
     native_lock_path: Path,
     *,
     web_lock_path: Path | None = None,
+    python_lock_path: Path | None = None,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
     generated_at: datetime | None = None,
     serial_number: str | None = None,
@@ -47,18 +48,25 @@ def build_cyclonedx_sbom(
 
     models_lock = _read_lock(models_lock_path, expected_collection="models")
     native_lock = _read_lock(native_lock_path, expected_collection="components")
+    _validate_native_lock(native_lock["components"])
     timestamp = generated_at or datetime.now(UTC)
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
     else:
         timestamp = timestamp.astimezone(UTC)
 
-    distribution_list = tuple(
-        importlib.metadata.distributions()
-        if distributions is None
-        else distributions
-    )
-    python_components = _python_components(distribution_list)
+    if python_lock_path is None:
+        distribution_list = tuple(
+            importlib.metadata.distributions()
+            if distributions is None
+            else distributions
+        )
+        python_components = _python_components(distribution_list)
+        application_version = _application_version(distribution_list)
+    else:
+        distribution_list = ()
+        python_components = _python_lock_components(python_lock_path)
+        application_version = __version__
     model_components = _model_components(models_lock["models"])
     native_components = _native_components(native_lock["components"])
     web_components: list[dict[str, Any]] = []
@@ -94,6 +102,19 @@ def build_cyclonedx_sbom(
                 "value": _file_sha256(web_lock_path),
             }
         )
+    if python_lock_path is not None:
+        lock_properties.extend(
+            (
+                {
+                    "name": "thuyetminh:python-runtime-lock-sha256",
+                    "value": _file_sha256(python_lock_path),
+                },
+                {
+                    "name": "thuyetminh:python-runtime-dependency-coverage",
+                    "value": "direct-only",
+                },
+            )
+        )
 
     return {
         "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
@@ -107,7 +128,7 @@ def build_cyclonedx_sbom(
                 "type": "application",
                 "bom-ref": application_ref,
                 "name": "thuyet-minh-offline-gpu",
-                "version": _application_version(distribution_list),
+                "version": application_version,
                 "licenses": [{"license": {"id": "GPL-3.0-or-later"}}],
             },
             "tools": {
@@ -115,7 +136,7 @@ def build_cyclonedx_sbom(
                     {
                         "type": "application",
                         "name": "stdlib-sbom-generator",
-                        "version": "2",
+                        "version": "4",
                     }
                 ]
             },
@@ -135,6 +156,7 @@ def write_cyclonedx_sbom(
     native_lock_path: Path,
     *,
     web_lock_path: Path | None = None,
+    python_lock_path: Path | None = None,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
     generated_at: datetime | None = None,
     serial_number: str | None = None,
@@ -145,6 +167,7 @@ def write_cyclonedx_sbom(
         models_lock_path,
         native_lock_path,
         web_lock_path=web_lock_path,
+        python_lock_path=python_lock_path,
         distributions=distributions,
         generated_at=generated_at,
         serial_number=serial_number,
@@ -206,6 +229,46 @@ def _read_web_lock(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _validate_native_lock(components: Mapping[str, Any]) -> None:
+    """Validate CUDA metadata whose meaning must remain unambiguous in SBOMs."""
+
+    for name, raw in components.items():
+        if not isinstance(raw, dict):
+            continue
+        cuda_keys = {
+            "cuda_version",
+            "cuda_supported_architectures",
+            "cuda_default_build_architecture",
+            "cuda_architectures",
+        }
+        if not cuda_keys.intersection(raw):
+            continue
+        if "cuda_architectures" in raw:
+            raise SbomError(
+                f"Component {name} dùng trường cuda_architectures mơ hồ; "
+                "hãy tách supported và default build architecture"
+            )
+        cuda_version = raw.get("cuda_version")
+        if not isinstance(cuda_version, str) or not cuda_version.strip():
+            raise SbomError(f"Component {name} có cuda_version không hợp lệ")
+        supported = raw.get("cuda_supported_architectures")
+        if (
+            not isinstance(supported, list)
+            or not supported
+            or any(type(value) is not int or value < 10 for value in supported)
+            or supported != sorted(set(supported))
+        ):
+            raise SbomError(
+                f"Component {name} có cuda_supported_architectures không hợp lệ"
+            )
+        default = raw.get("cuda_default_build_architecture")
+        if type(default) is not int or default not in supported:
+            raise SbomError(
+                f"Component {name} có cuda_default_build_architecture "
+                "không thuộc ma trận hỗ trợ"
+            )
+
+
 def _python_components(
     distributions: Iterable[importlib.metadata.Distribution],
 ) -> list[dict[str, Any]]:
@@ -243,6 +306,77 @@ def _python_components(
             ]
         by_ref[component["bom-ref"]] = component
     return list(by_ref.values())
+
+
+def _python_lock_components(path: Path) -> list[dict[str, Any]]:
+    """Inventory exact direct runtime pins without reading the active venv."""
+
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SbomError(f"Không thể đọc Python runtime lock: {path}") from exc
+
+    requirement_pattern = re.compile(
+        r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+        r"(?:\[(?P<extras>[A-Za-z0-9._,-]+)\])?"
+        r"==(?P<version>[^\s;@]+)$"
+    )
+    components: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line_number, raw_line in enumerate(lines, start=1):
+        requirement = raw_line.strip()
+        if not requirement or requirement.startswith("#"):
+            continue
+        matched = requirement_pattern.fullmatch(requirement)
+        if matched is None:
+            raise SbomError(
+                "Python runtime lock chỉ chấp nhận dependency ghim chính xác "
+                f"name==version; dòng {line_number}: {requirement}"
+            )
+        name = matched.group("name")
+        version = matched.group("version")
+        normalized = _NORMALIZE_NAME_RE.sub("-", name).lower()
+        if normalized in seen:
+            raise SbomError(f"Python runtime lock có package trùng: {normalized}")
+        seen.add(normalized)
+        properties = [
+            {
+                "name": "thuyetminh:source",
+                "value": "python-runtime-lock",
+            },
+            {
+                "name": "thuyetminh:python:requirement",
+                "value": requirement,
+            },
+        ]
+        extras = matched.group("extras")
+        if extras:
+            properties.append(
+                {
+                    "name": "thuyetminh:python:extras",
+                    "value": json.dumps(
+                        sorted(set(extras.split(","))),
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+        components.append(
+            {
+                "type": "library",
+                "bom-ref": f"python:{normalized}@{version}",
+                "name": name,
+                "version": version,
+                "purl": (
+                    f"pkg:pypi/{quote(normalized, safe='-')}@"
+                    f"{quote(version, safe='.+-')}"
+                ),
+                "scope": "required",
+                "properties": properties,
+            }
+        )
+    if not components:
+        raise SbomError(f"Python runtime lock không chứa dependency: {path}")
+    return components
 
 
 def _model_components(models: list[Any]) -> list[dict[str, Any]]:
@@ -342,7 +476,8 @@ def _native_components(components: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "source",
                     "commit",
                     "cuda_version",
-                    "cuda_architectures",
+                    "cuda_supported_architectures",
+                    "cuda_default_build_architecture",
                     "runtime_path",
                 ),
             ),

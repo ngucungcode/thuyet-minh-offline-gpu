@@ -348,6 +348,62 @@ def test_tiger_runner_uses_only_local_paths_and_forces_offline_environment(
     assert result.metrics["offline"] is True
 
 
+@pytest.mark.parametrize(
+    ("parent_visibility", "expected_visibility"),
+    [
+        (None, "0"),
+        ("0", "0"),
+        (
+            "GPU-9f14c10e-56c2-4d79-a9a8-runtime-pin",
+            "GPU-9f14c10e-56c2-4d79-a9a8-runtime-pin",
+        ),
+    ],
+)
+def test_tiger_subprocess_preserves_parent_gpu_visibility_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_visibility: str | None,
+    expected_visibility: str,
+) -> None:
+    if parent_visibility is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", parent_visibility)
+
+    model = tmp_path / "model"
+    model.mkdir()
+    source = tmp_path / "source.wav"
+    _write_wav(source)
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess_environments: list[dict[str, str]] = []
+
+    async def process_factory(*command: str, **kwargs: object):
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        subprocess_environments.append(environment)
+        return CompletingProcess(Path(command[command.index("--output") + 1]))
+
+    runner = TigerDnrSubprocessRunner(
+        model_path=model,
+        model_id="tiger",
+        model_tree_sha256=MODEL_HASH,
+        cuda_device=0,
+        process_factory=process_factory,
+    )
+    asyncio.run(
+        runner.run(
+            SeparationBackendRequest(
+                source,
+                work,
+                work / "accompaniment.wav",
+            )
+        )
+    )
+
+    assert subprocess_environments[0]["CUDA_VISIBLE_DEVICES"] == expected_visibility
+
+
 def test_tiger_runner_reports_bounded_chunk_progress(tmp_path: Path) -> None:
     model = tmp_path / "model"
     model.mkdir()
@@ -552,6 +608,14 @@ def test_tiger_runner_requires_an_existing_model_and_verified_tree_hash(
             model_path=model,
             model_id="tiger",
             model_tree_sha256="not-verified",
+        )
+
+    with pytest.raises(ValueError, match="logical 0"):
+        TigerDnrSubprocessRunner(
+            model_path=model,
+            model_id="tiger",
+            model_tree_sha256=MODEL_HASH,
+            cuda_device=1,
         )
 
 

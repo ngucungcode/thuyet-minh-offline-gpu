@@ -21,6 +21,12 @@ import typer
 
 from . import __version__
 from .config import Settings
+from .gpu import (
+    GPU_SUPPORT_EXPERIMENTAL,
+    GpuPreflightError,
+    gpu_support_tier,
+    inspect_gpu,
+)
 
 
 if sys.platform == "win32":
@@ -87,6 +93,11 @@ _MODEL_PROFILES: dict[str, tuple[str, ...]] = {
         "tts-neucodec-onnx-int8",
         "tts-vieneu-v2",
     ),
+}
+_PROFILE_MINIMUM_VRAM_MIB = {
+    "minimal": 6_144,
+    "balanced": 8_192,
+    "maximum": 22_528,
 }
 
 
@@ -638,21 +649,38 @@ def doctor(
             add(command, "ok" if found else "error", found or "Không tìm thấy")
         nvidia_smi = shutil.which("nvidia-smi")
         if nvidia_smi:
-            result = subprocess.run(
-                [
-                    nvidia_smi,
-                    "--query-gpu=name,memory.total,compute_cap",
-                    "--format=csv,noheader",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            add(
-                "gpu",
-                "ok" if result.returncode == 0 else "error",
-                (result.stdout or result.stderr).strip(),
-            )
+            gpu_settings = Settings()
+            try:
+                gpu_report = inspect_gpu(
+                    require_gpu=True,
+                    expected_gpu_uuid=gpu_settings.selected_gpu_uuid,
+                    expected_cuda_architecture=(
+                        gpu_settings.selected_cuda_architecture
+                    ),
+                )
+            except GpuPreflightError as exc:
+                report = exc.report
+                detail = "; ".join((*report.errors, *report.warnings))
+                add("gpu", "error", detail or "GPU preflight thất bại")
+            else:
+                selected = gpu_report.gpus[0]
+                architecture = selected.compute_capability.replace(".", "")
+                detail = (
+                    f"{selected.name}; sm_{architecture}; "
+                    f"{selected.memory_total_mib} MiB VRAM; "
+                    f"PyTorch {gpu_report.torch.version}; "
+                    f"CTranslate2 {gpu_report.ctranslate2.version}"
+                )
+                add(
+                    "gpu",
+                    "warning" if gpu_report.warnings else "ok",
+                    detail
+                    + (
+                        f"; {'; '.join(gpu_report.warnings)}"
+                        if gpu_report.warnings
+                        else ""
+                    ),
+                )
     else:
         add(
             "native-runtime",
@@ -867,8 +895,11 @@ def list_model_profiles(
             for model_id in model_ids
         )
         minimum_vram = max(
-            int(entries[model_id].get("minimum_vram_mib", 0) or 0)
-            for model_id in model_ids
+            _PROFILE_MINIMUM_VRAM_MIB[name],
+            *(
+                int(entries[model_id].get("minimum_vram_mib", 0) or 0)
+                for model_id in model_ids
+            ),
         )
         profiles.append(
             {
@@ -889,27 +920,38 @@ def recommend_model_profile(
     """Đề xuất profile model theo VRAM hiện có."""
 
     detected = vram_mib
-    if detected is None and shutil.which("nvidia-smi"):
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        values = [
-            int(line.strip())
-            for line in result.stdout.splitlines()
-            if line.strip().isdigit()
-        ]
-        if values:
-            detected = max(values)
+    support_tier: str | None = None
+    gpu_payload: dict[str, Any] | None = None
+    detection_warning: str | None = None
+    if detected is None:
+        settings = Settings()
+        try:
+            report = inspect_gpu(
+                require_gpu=True,
+                expected_gpu_uuid=settings.selected_gpu_uuid,
+                expected_cuda_architecture=settings.selected_cuda_architecture,
+            )
+            selected_gpu = report.gpus[0]
+        except (GpuPreflightError, IndexError) as error:
+            detection_warning = (
+                "GPU logical 0 chưa vượt qua preflight; chọn cấu hình an toàn nhất"
+            )
+            if isinstance(error, GpuPreflightError) and error.report.errors:
+                detection_warning = f"{detection_warning}: {error.report.errors[0]}"
+        else:
+            detected = selected_gpu.memory_total_mib
+            support_tier = gpu_support_tier(selected_gpu)
+            gpu_payload = {
+                "uuid": selected_gpu.uuid,
+                "name": selected_gpu.name,
+                "compute_capability": selected_gpu.compute_capability,
+            }
     if detected is None:
         profile = "minimal"
-        reason = "Không đọc được VRAM; chọn cấu hình an toàn nhất"
+        reason = detection_warning or "Không đọc được VRAM; chọn cấu hình an toàn nhất"
+    elif support_tier == GPU_SUPPORT_EXPERIMENTAL:
+        profile = "minimal"
+        reason = "CMP 170HX chỉ được hỗ trợ thử nghiệm với profile minimal"
     elif detected >= 22_528:
         profile = "maximum"
         reason = "Đủ VRAM cho Gemma 4 31B Q4"
@@ -923,6 +965,8 @@ def recommend_model_profile(
         {
             "profile": profile,
             "vram_mib": detected,
+            "gpu": gpu_payload,
+            "support_tier": support_tier,
             "reason": reason,
             "models": list(_MODEL_PROFILES[profile]),
         }
@@ -951,6 +995,36 @@ def install_model_profile(
     settings = Settings()
     selected_lock = lock_path or settings.models_lock_path
     selected_dir = models_dir or settings.models_dir
+    try:
+        gpu_report = inspect_gpu(
+            require_gpu=True,
+            expected_gpu_uuid=settings.selected_gpu_uuid,
+            expected_cuda_architecture=settings.selected_cuda_architecture,
+        )
+        selected_gpu = gpu_report.gpus[0]
+    except (GpuPreflightError, IndexError) as exc:
+        message = (
+            "; ".join(exc.report.errors)
+            if isinstance(exc, GpuPreflightError) and exc.report.errors
+            else "không xác định được GPU logical 0"
+        )
+        typer.echo(f"Không thể xác minh GPU trước khi cài profile: {message}", err=True)
+        raise typer.Exit(code=1) from exc
+    support_tier = gpu_support_tier(selected_gpu)
+    required_vram_mib = _PROFILE_MINIMUM_VRAM_MIB[profile]
+    if support_tier == GPU_SUPPORT_EXPERIMENTAL and profile != "minimal":
+        typer.echo(
+            "CMP 170HX chỉ được hỗ trợ thử nghiệm với profile minimal",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if selected_gpu.memory_total_mib < required_vram_mib:
+        typer.echo(
+            f"Profile {profile} cần ít nhất {required_vram_mib} MiB VRAM; "
+            f"GPU logical 0 chỉ có {selected_gpu.memory_total_mib} MiB",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     installed: list[dict[str, Any]] = []
     for model_id in _MODEL_PROFILES[profile]:
         typer.echo(f"Đang cài {model_id}...", err=True)

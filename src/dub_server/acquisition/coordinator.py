@@ -292,6 +292,8 @@ class AcquisitionCoordinator:
             ),
             media_kind=media_kind,
             year=_optional_year(job.spec.get("year")),
+            require_h264_passthrough=True,
+            allow_hevc_transcode=True,
         )
         current = self._store.get_job(job.id)
         if current.status in {JobStatus.CANCELLING, JobStatus.CANCELLED}:

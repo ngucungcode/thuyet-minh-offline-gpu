@@ -26,9 +26,23 @@ from dub_server.state import JobStage, JobStatus, StateStore
 class FakeMediaProbe:
     def __init__(self) -> None:
         self.paths: list[Path] = []
+        self.export_policies: list[tuple[bool, bool]] = []
 
-    async def probe(self, path: Path, *, source_language: str, title=None, media_kind=None, year=None):
+    async def probe(
+        self,
+        path: Path,
+        *,
+        source_language: str,
+        title=None,
+        media_kind=None,
+        year=None,
+        require_h264_passthrough: bool = False,
+        allow_hevc_transcode: bool = False,
+    ):
         self.paths.append(path)
+        self.export_policies.append(
+            (require_h264_passthrough, allow_hevc_transcode)
+        )
         return MediaAsset(
             path=path,
             title=title or path.stem,
@@ -37,6 +51,7 @@ class FakeMediaProbe:
             media_kind=media_kind,
             year=year,
             fps=24.0,
+            video_codec="h264",
         )
 
 
@@ -210,6 +225,7 @@ def test_completed_download_chooses_largest_video_and_best_confident_subtitle(tm
 
     assert result.status is JobStatus.READY_OFFLINE
     assert result.stage is JobStage.SUBTITLE
+    assert probe.export_policies == [(True, True)]
     assert result.details["transcript_source"] == "subtitle"
     assert result.details["selected_subtitle"]["subtitle_id"] == "high-95"
     assert Path(result.details["source_subtitle_path"]).is_file()
@@ -567,6 +583,116 @@ def test_ffprobe_media_probe_accepts_h264_mkv_for_mp4_passthrough(
 
     assert asset.video_codec == "h264"
     assert asset.video_stream_index == 0
+
+
+def test_ffprobe_media_probe_accepts_hevc_when_transcode_is_enabled(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "feature-hevc.mkv"
+    media.write_bytes(b"fixture")
+    probe_commands: list[tuple[str, ...]] = []
+
+    async def runner(command):
+        probe_commands.append(tuple(command))
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {"index": 0, "codec_name": "hevc", "codec_type": "video"},
+                {"index": 1, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    asset = asyncio.run(
+        FfprobeMediaProbe(runner=runner).probe(
+            media,
+            source_language="en",
+            require_h264_passthrough=True,
+            allow_hevc_transcode=True,
+        )
+    )
+
+    assert asset.video_codec == "hevc"
+    show_entries = probe_commands[0][probe_commands[0].index("-show_entries") + 1]
+    assert "stream_side_data_list=side_data_type" in show_entries
+    assert ":stream_side_data=" not in show_entries
+
+
+@pytest.mark.parametrize(
+    "video_metadata",
+    [
+        {"color_transfer": "smpte2084"},
+        {"color_transfer": "arib-std-b67"},
+        {"side_data_list": [{"side_data_type": "DOVI configuration record"}]},
+    ],
+    ids=["hdr10", "hlg", "dolby-vision"],
+)
+def test_ffprobe_media_probe_rejects_hevc_hdr_without_tonemapping(
+    tmp_path: Path,
+    video_metadata: dict[str, object],
+) -> None:
+    media = tmp_path / "feature-hevc-hdr.mkv"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_name": "hevc",
+                    "codec_type": "video",
+                    **video_metadata,
+                },
+                {"index": 1, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    with pytest.raises(MediaProbeError) as raised:
+        asyncio.run(
+            FfprobeMediaProbe(runner=runner).probe(
+                media,
+                source_language="en",
+                require_h264_passthrough=True,
+                allow_hevc_transcode=True,
+            )
+        )
+
+    assert raised.value.code == "unsupported_media"
+    assert "HDR/HLG/Dolby Vision" in raised.value.message_vi
+
+
+@pytest.mark.parametrize("codec_name", ["vp8", "ffv1"])
+def test_ffprobe_media_probe_rejects_unsupported_codec_with_hevc_fallback(
+    tmp_path: Path,
+    codec_name: str,
+) -> None:
+    media = tmp_path / f"feature-{codec_name}.mkv"
+    media.write_bytes(b"fixture")
+
+    async def runner(command):
+        payload = {
+            "format": {"duration": "5"},
+            "streams": [
+                {"index": 0, "codec_name": codec_name, "codec_type": "video"},
+                {"index": 1, "codec_name": "aac", "codec_type": "audio"},
+            ],
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    with pytest.raises(MediaProbeError) as raised:
+        asyncio.run(
+            FfprobeMediaProbe(runner=runner).probe(
+                media,
+                source_language="en",
+                require_h264_passthrough=True,
+                allow_hevc_transcode=True,
+            )
+        )
+
+    assert raised.value.code == "unsupported_media"
+    assert "H.264/AVC hoặc HEVC/H.265" in raised.value.message_vi
 
 
 @pytest.mark.parametrize("codec_name", ["vp8", "hevc", "ffv1"])

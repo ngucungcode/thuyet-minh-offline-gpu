@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +12,9 @@ import pytest
 
 from dub_server.gpu import (
     ComponentStatus,
+    CudaDeviceIdentity,
     GpuPreflightError,
+    _normalize_nvidia_gpu_uuid,
     inspect_gpu,
     read_gpu_report,
     write_gpu_report,
@@ -33,6 +36,29 @@ def successful_ctranslate2() -> ComponentStatus:
     return ComponentStatus(True, "4.8.1", compute_types=("float16", "int8_float16"))
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+        (
+            "gpu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+        (
+            uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+    ],
+)
+def test_normalize_nvidia_gpu_uuid(value: object | None, expected: str | None) -> None:
+    assert _normalize_nvidia_gpu_uuid(value) == expected
+
+
 def test_gpu_preflight_accepts_eligible_gpu() -> None:
     report = inspect_gpu(
         command_runner=lambda _: completed("GPU-test, NVIDIA RTX Test, 570.26, 16384, 8.9\n"),
@@ -44,6 +70,171 @@ def test_gpu_preflight_accepts_eligible_gpu() -> None:
     assert report.gpus[0].memory_total_mib == 16384
     assert report.ctranslate2.compute_types == ("float16", "int8_float16")
     assert report.model_dump()["gpus"][0]["uuid"] == "GPU-test"
+
+
+def test_gpu_preflight_binds_native_runtime_to_expected_uuid_and_architecture() -> None:
+    report = inspect_gpu(
+        command_runner=lambda _: completed(
+            "GPU-selected, NVIDIA RTX Test, 570.26, 24576, 8.6\n"
+        ),
+        torch_probe=successful_torch,
+        ctranslate2_probe=successful_ctranslate2,
+        expected_gpu_uuid="GPU-selected",
+        expected_cuda_architecture="sm_86",
+    )
+
+    assert report.ready is True
+
+
+@pytest.mark.parametrize(
+    ("expected_uuid", "expected_architecture", "message"),
+    [
+        ("GPU-other", "sm_86", "does not match installed runtime UUID"),
+        ("GPU-selected", "sm_80", "does not match installed runtime sm_80"),
+    ],
+)
+def test_gpu_preflight_rejects_runtime_gpu_binding_mismatch(
+    expected_uuid: str,
+    expected_architecture: str,
+    message: str,
+) -> None:
+    with pytest.raises(GpuPreflightError) as captured:
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                "GPU-selected, NVIDIA RTX Test, 570.26, 24576, 8.6\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+            expected_gpu_uuid=expected_uuid,
+            expected_cuda_architecture=expected_architecture,
+        )
+
+    assert any(message in item for item in captured.value.report.errors)
+
+
+@pytest.mark.parametrize(
+    "compute_capability",
+    ("7.0", "7.5", "8.0", "8.6", "8.9", "9.0"),
+)
+def test_gpu_preflight_accepts_only_the_release_cuda_architectures(
+    compute_capability: str,
+) -> None:
+    report = inspect_gpu(
+        command_runner=lambda _: completed(
+            f"GPU-logical-0, NVIDIA Test GPU, 570.26, 6144, {compute_capability}\n"
+        ),
+        torch_probe=successful_torch,
+        ctranslate2_probe=successful_ctranslate2,
+    )
+
+    assert report.ready is True
+    assert report.minimum_vram_mib == 6144
+    assert report.gpus[0].compute_capability == compute_capability
+
+
+@pytest.mark.parametrize(
+    "compute_capability",
+    ("6.0", "6.1", "8.7", "9.1", "10.0"),
+)
+def test_gpu_preflight_rejects_pascal_and_unknown_cuda_architectures(
+    compute_capability: str,
+) -> None:
+    with pytest.raises(GpuPreflightError) as captured:
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                f"GPU-logical-0, NVIDIA Test GPU, 570.26, 24576, {compute_capability}\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+        )
+
+    assert captured.value.report.ready is False
+    assert any(
+        compute_capability in warning
+        for warning in captured.value.report.warnings
+    )
+
+
+def test_gpu_preflight_rejects_one_mib_below_the_release_vram_floor() -> None:
+    with pytest.raises(GpuPreflightError) as captured:
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                "GPU-logical-0, NVIDIA Test GPU, 570.26, 6143, 8.6\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+        )
+
+    assert captured.value.report.minimum_vram_mib == 6144
+    assert any("6143" in warning for warning in captured.value.report.warnings)
+
+
+def test_gpu_preflight_fails_when_logical_gpu_zero_is_unsupported() -> None:
+    rows = (
+        "GPU-logical-0, NVIDIA Pascal GPU, 570.26, 24576, 6.1\n"
+        "GPU-logical-1, NVIDIA Ampere GPU, 570.26, 24576, 8.6\n"
+    )
+
+    with pytest.raises(GpuPreflightError) as captured:
+        inspect_gpu(
+            command_runner=lambda _: completed(rows),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+        )
+
+    assert captured.value.report.ready is False
+    assert captured.value.report.gpus[0].uuid == "GPU-logical-0"
+    assert any(
+        "GPU-logical-0" in warning
+        for warning in captured.value.report.warnings
+    )
+
+
+def test_gpu_preflight_uses_supported_logical_gpu_zero_despite_other_gpus() -> None:
+    rows = (
+        "GPU-logical-0, NVIDIA Ampere GPU, 570.26, 6144, 8.0\n"
+        "GPU-logical-1, NVIDIA Pascal GPU, 570.26, 24576, 6.1\n"
+    )
+
+    report = inspect_gpu(
+        command_runner=lambda _: completed(rows),
+        torch_probe=successful_torch,
+        ctranslate2_probe=successful_ctranslate2,
+    )
+
+    assert report.ready is True
+    assert report.gpus[0].uuid == "GPU-logical-0"
+    assert any("GPU-logical-1" in warning for warning in report.warnings)
+
+
+def test_gpu_preflight_uses_pytorch_identity_after_cuda_device_remap() -> None:
+    selected_uuid = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+    rows = (
+        "GPU-physical-0, NVIDIA Large GPU, 570.26, 24576, 8.6\n"
+        f"GPU-{selected_uuid}, NVIDIA Small GPU, 570.26, 7168, 8.0\n"
+    )
+    selected_by_torch = ComponentStatus(
+        True,
+        "2.8.0",
+        "CUDA 12.8; NVIDIA Small GPU; matmul checksum=256",
+        device=CudaDeviceIdentity(
+            uuid=str(selected_uuid),  # PyTorch UUID text can omit the GPU- prefix.
+            name="NVIDIA Small GPU",
+            memory_total_mib=7000,
+            compute_capability="8.0",
+        ),
+    )
+
+    report = inspect_gpu(
+        command_runner=lambda _: completed(rows),
+        torch_probe=lambda: selected_by_torch,
+        ctranslate2_probe=successful_ctranslate2,
+    )
+
+    assert report.ready is True
+    assert report.selected_gpu_uuid == f"GPU-{selected_uuid}"
+    assert report.gpus[0].uuid == f"GPU-{selected_uuid}"
+    assert report.gpus[0].memory_total_mib == 7000
 
 
 @pytest.mark.parametrize(

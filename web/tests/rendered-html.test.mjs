@@ -48,6 +48,8 @@ test("server-renders the Vietnamese GPU dashboard", async () => {
   const html = await response.text();
   assert.match(html, /<html lang="vi">/i);
   assert.match(html, /<title>Lồng Tiếng GPU Studio<\/title>/i);
+  assert.match(html, /THUYẾT MINH NGOẠI TUYẾN · NVIDIA CUDA/);
+  assert.doesNotMatch(html, /THUYẾT MINH NGOẠI TUYẾN · RTX/);
   assert.match(html, /Biến một bản phim thành bản thuyết minh Việt/);
   assert.match(html, /Chỉ nội dung bạn có quyền sử dụng/);
   assert.match(html, /Tự động nhận diện/);
@@ -63,14 +65,38 @@ test("server-renders the Vietnamese GPU dashboard", async () => {
 });
 
 test("keeps the dashboard API contract local-first", async () => {
-  const [page, layout, route, packageJson] = await Promise.all([
+  const [page, styles, layout, route, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/v1/[...path]/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /api<Health>\("\/health"\)/);
+  assert.match(page, /gpus\?: GpuDevice\[\]/);
+  assert.match(page, /support_tier\?: GpuSupportTier \| null/);
+  assert.match(page, /const gpuDevices = health\?\.gpu\?\.gpus \?\? \[\]/);
+  assert.match(page, /const gpuReady = health\?\.gpu\?\.ready === true/);
+  assert.match(page, /health\?\.status === "ok" && gpuReady/);
+  assert.match(page, /const gpuWarnings = \(health\?\.gpu\?\.warnings \?\? \[\]\)/);
+  assert.match(page, /maintenance-limited Volta sm_70/);
+  assert.match(page, /experimental CMP 170HX support/);
+  assert.match(page, /const gpuSupportTier = health\?\.gpu\?\.support_tier \?\? null/);
+  assert.match(page, /"maintenance-limited": "Bảo trì giới hạn"/);
+  assert.match(page, /experimental: "Thử nghiệm"/);
+  assert.doesNotMatch(page, /gpuWarnings\.some/);
+  assert.match(page, /Mức hỗ trợ: \{gpuSupportTier \? gpuSupportTierLabel\[gpuSupportTier\]/);
+  assert.match(page, /className="gpu-health-warnings"/);
+  assert.match(page, /Máy xử lý có cảnh báo/);
+  assert.match(page, /gpuDevices\.map\(\(gpu, index\)/);
+  assert.match(page, /formatGpuMemory\(gpu\.memory_total_mib\)/);
+  assert.match(page, /!gpuReady \|\|/);
+  assert.match(page, /GPU chưa sẵn sàng/);
+  assert.doesNotMatch(page, /THUYẾT MINH NGOẠI TUYẾN · RTX/);
+  assert.match(styles, /\.health-pill\.degraded \.pulse/);
+  assert.match(styles, /\.gpu-device-list/);
+  assert.match(styles, /\.gpu-health-warnings/);
   assert.match(page, /api<\{ items: Job\[\] \}>\("\/jobs\?limit=20/);
   assert.match(page, /rights_confirmed: true/);
   assert.match(page, /useState<"natural" \| "strict">\("natural"\)/);
@@ -132,8 +158,10 @@ test("validates local files and exposes detailed cancellable upload progress", a
   assert.match(page, /fileExtension\(file\.name\) !== "\.srt"/);
   assert.match(page, /Video phải là tệp MP4 hoặc MKV/);
   assert.match(page, /Phụ đề thủ công phải là tệp SRT/);
-  assert.match(page, /Luồng hình chính của MP4\/MKV phải là H\.264\/AVC/);
-  assert.match(page, /Ảnh bìa nhúng và\s+thumbnail được tự động bỏ qua/);
+  assert.match(page, /H\.264\/AVC được giữ nguyên không mã hóa lại/);
+  assert.match(page, /HEVC SDR được tự động\s+chuyển mã sang H\.264\/AVC/);
+  assert.match(page, /AV1, VP9, VP8 và FFV1 bị từ chối/);
+  assert.match(page, /Ảnh bìa nhúng và thumbnail được tự động bỏ qua/);
   assert.match(page, /file\.size <= 0/);
   assert.match(page, /phase: "preparing"/);
   assert.match(page, /"media",\s*0,\s*overallTotal/);

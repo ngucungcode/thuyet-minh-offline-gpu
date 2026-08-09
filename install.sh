@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 main() {
-INSTALLER_VERSION="0.3.2"
+INSTALLER_VERSION="0.3.3"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
 SOURCE_REF="v${INSTALLER_VERSION}"
@@ -11,6 +11,7 @@ INSTALL_DIR=""
 DATA_DIR=""
 DATA_DIR_EXPLICIT=false
 MODEL_PROFILE="auto"
+GPU_DEVICE=""
 START_STACK=true
 AUTOSTART_MODE="auto"
 ACCEPTANCE_MODE="basic"
@@ -18,7 +19,7 @@ ASSUME_YES=false
 DRY_RUN=false
 MIGRATE_EXISTING=false
 UPGRADE_EXISTING=false
-COMPATIBLE_UPGRADE_FROM="0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1"
+COMPATIBLE_UPGRADE_FROM="0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2"
 MIGRATED_RUNTIME_REUSABLE=false
 MIGRATION_BACKUP_PATH=""
 MIGRATION_ACTIVE=false
@@ -109,6 +110,7 @@ Tùy chọn:
   --install-dir PATH         Mặc định /workspace/thuyet-minh-offline hoặc /opt/...
   --data-dir PATH            Mặc định <install-dir>/var
   --profile PROFILE          auto, maximum, balanced, minimal hoặc none
+  --gpu-device INDEX|UUID    Chọn host GPU sẽ trở thành CUDA logical device 0
   --start | --no-start       Khởi động stack sau cài; mặc định --start
   --autostart MODE           auto, systemd, provider hoặc none
   --acceptance MODE          basic, full hoặc none; mặc định basic
@@ -146,6 +148,11 @@ while (($#)); do
     --profile)
       [[ $# -ge 2 ]] || die "--profile cần một giá trị"
       MODEL_PROFILE="$2"
+      shift 2
+      ;;
+    --gpu-device)
+      [[ $# -ge 2 ]] || die "--gpu-device cần host GPU index hoặc UUID"
+      GPU_DEVICE="$2"
       shift 2
       ;;
     --start)
@@ -204,6 +211,11 @@ case "${ACCEPTANCE_MODE}" in
   basic|full|none) ;;
   *) die "Acceptance phải là basic, full hoặc none" ;;
 esac
+if [[ -n "${GPU_DEVICE}" ]]; then
+  [[ "${GPU_DEVICE}" =~ ^[0-9]+$ || "${GPU_DEVICE}" =~ ^GPU-[A-Za-z0-9-]+$ ]] \
+    || die "--gpu-device phải là index không âm hoặc NVIDIA UUID dạng GPU-..."
+  export CUDA_VISIBLE_DEVICES="${GPU_DEVICE}"
+fi
 
 if [[ -v DUB_NATIVE_ROOT ]]; then
   die "Không truyền DUB_NATIVE_ROOT qua environment; hãy dùng --data-dir"
@@ -258,6 +270,32 @@ if [[ -e "${pending_migration_journal}" || -L "${pending_migration_journal}" ]];
   die "Phát hiện migration dang dở tại ${pending_migration_journal}. Installer dừng fail-closed; không xóa journal hoặc source/backup trước khi phục hồi"
 fi
 
+# On rerun/upgrade, preserve the physical GPU already bound to the native
+# runtime before any CUDA probe. An explicit --gpu-device is the only supported
+# way to override this persisted selection.
+existing_native_env="${INSTALL_DIR}/.env.native"
+if [[ -z "${GPU_DEVICE}" \
+  && ( -e "${existing_native_env}" || -L "${existing_native_env}" ) ]]; then
+  [[ -f "${existing_native_env}" && ! -L "${existing_native_env}" ]] \
+    || die ".env.native hiện có phải là file thường, không được là symlink"
+  [[ "$(stat -c '%u' -- "${existing_native_env}")" == "0" ]] \
+    || die ".env.native hiện không thuộc root; hãy kiểm tra và chown root:root trước khi nâng cấp"
+  persisted_gpu_uuid="$(sed -n 's/^DUB_SELECTED_GPU_UUID=//p' \
+    "${existing_native_env}" | tail -n 1)"
+  persisted_visible_device="$(sed -n 's/^CUDA_VISIBLE_DEVICES=//p' \
+    "${existing_native_env}" | tail -n 1)"
+  persisted_gpu_device="${persisted_gpu_uuid:-${persisted_visible_device}}"
+  if [[ -n "${persisted_gpu_device}" ]]; then
+    [[ "${persisted_gpu_device}" =~ ^GPU-[A-Za-z0-9-]+$ ]] \
+      || die "GPU đã pin trong .env.native không phải NVIDIA UUID hợp lệ"
+    if [[ -n "${persisted_gpu_uuid}" && -n "${persisted_visible_device}" \
+      && "${persisted_gpu_uuid}" != "${persisted_visible_device}" ]]; then
+      die "UUID GPU trong .env.native không nhất quán"
+    fi
+    export CUDA_VISIBLE_DEVICES="${persisted_gpu_device}"
+  fi
+fi
+
 if [[ ! -r /etc/os-release ]]; then
   die "Không đọc được /etc/os-release"
 fi
@@ -278,26 +316,86 @@ if not ((3, 11) <= sys.version_info[:2] < (3, 13)):
 PY
 command -v nvidia-smi >/dev/null || die "Không tìm thấy NVIDIA driver/nvidia-smi"
 [[ -x /usr/local/cuda/bin/nvcc ]] || die "Không tìm thấy CUDA toolkit tại /usr/local/cuda"
+nvcc_release="$(
+  /usr/local/cuda/bin/nvcc --version \
+    | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+    | tail -n 1
+)"
+[[ "${nvcc_release}" == "12.8" ]] \
+  || die "Release này yêu cầu CUDA toolkit 12.8; hiện có ${nvcc_release:-không xác định}"
 
-gpu_report="$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader,nounits)" \
-  || die "Không đọc được thông tin GPU"
-gpu_name="$(printf '%s\n' "${gpu_report}" | head -n 1 | cut -d, -f1 | xargs)"
-vram_mib="$(printf '%s\n' "${gpu_report}" | awk -F, 'NR == 1 {gsub(/ /, "", $2); print int($2)}')"
-compute_cap="$(printf '%s\n' "${gpu_report}" | awk -F, 'NR == 1 {gsub(/ /, "", $3); print $3}')"
-[[ "${vram_mib}" =~ ^[0-9]+$ ]] || die "VRAM GPU không hợp lệ"
-[[ "${compute_cap}" == "8.6" ]] \
-  || die "Bản native hiện khóa CUDA sm_86; GPU có compute capability ${compute_cap}"
-python3 - <<'PY'
+driver_report="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits)" \
+  || die "Không đọc được NVIDIA driver"
+driver_version="$(printf '%s\n' "${driver_report}" | head -n 1 | xargs)"
+if [[ ! "${driver_version}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+  die "Phiên bản NVIDIA driver không hợp lệ: ${driver_version}"
+fi
+driver_major="${BASH_REMATCH[1]}"
+driver_minor="${BASH_REMATCH[2]}"
+if ((10#${driver_major} < 570 \
+  || (10#${driver_major} == 570 && 10#${driver_minor} < 26))); then
+  die "Cần NVIDIA driver 570.26 trở lên; hiện có ${driver_version}"
+fi
+torch_gpu_report="$(python3 - <<'PY'
 try:
     import torch
 except Exception as exc:
     raise SystemExit(f"Không import được PyTorch GPU từ image nhà cung cấp: {exc}")
-if not torch.cuda.is_available():
+if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
     raise SystemExit("PyTorch không thấy CUDA GPU")
+properties = torch.cuda.get_device_properties(0)
+name = " ".join(str(properties.name).split())
+if not name:
+    raise SystemExit("PyTorch trả về tên GPU logical 0 rỗng")
+memory_mib = int(properties.total_memory) // (1024 * 1024)
+major, minor = torch.cuda.get_device_capability(0)
+raw_device_uuid = getattr(properties, "uuid", None)
+device_uuid = "" if raw_device_uuid is None else str(raw_device_uuid).strip()
+if device_uuid:
+    if device_uuid.casefold().startswith("gpu-"):
+        device_uuid = f"GPU-{device_uuid[4:]}"
+    else:
+        device_uuid = f"GPU-{device_uuid}"
+with torch.inference_mode():
+    left = torch.ones((256, 256), device="cuda", dtype=torch.float16)
+    result = left @ left
+    torch.cuda.synchronize()
+    checksum = float(result[0, 0].item())
+if checksum != 256.0:
+    raise SystemExit(f"PyTorch FP16 CUDA smoke sai checksum: {checksum}")
+print(f"{name}\t{memory_mib}\t{major}.{minor}\t{device_uuid}")
 PY
-
+)" || die "PyTorch không xác minh được GPU logical CUDA 0"
+IFS=$'\t' read -r gpu_name vram_mib compute_cap gpu_uuid <<<"${torch_gpu_report}"
+[[ "${vram_mib}" =~ ^[0-9]+$ ]] || die "VRAM GPU logical 0 không hợp lệ"
+[[ "${gpu_uuid}" =~ ^GPU-[A-Za-z0-9-]+$ ]] \
+  || die "PyTorch không trả về UUID GPU logical 0 hợp lệ; không thể pin runtime đa GPU an toàn"
+if [[ ! "${compute_cap}" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+  die "Compute capability GPU không hợp lệ: ${compute_cap}"
+fi
+compute_major="${BASH_REMATCH[1]}"
+compute_minor="${BASH_REMATCH[2]}"
+cuda_arch="$((10#${compute_major} * 10 + 10#${compute_minor}))"
+case "${cuda_arch}" in
+  70|75|80|86|89|90) ;;
+  *)
+    die "GPU ${gpu_name} (sm_${cuda_arch}) không nằm trong ma trận hỗ trợ sm_70, sm_75, sm_80, sm_86, sm_89, sm_90"
+    ;;
+esac
+gpu_support_tier="supported"
+if [[ "${cuda_arch}" == "70" ]]; then
+  gpu_support_tier="maintenance-limited"
+elif [[ "${gpu_name,,}" == *cmp*170*hx* ]]; then
+  gpu_support_tier="experimental"
+fi
+nvcc_architectures="$(/usr/local/cuda/bin/nvcc --list-gpu-arch 2>/dev/null)" \
+  || die "Không đọc được danh sách kiến trúc từ nvcc"
+printf '%s\n' "${nvcc_architectures}" | grep -Fxq -- "compute_${cuda_arch}" \
+  || die "CUDA toolkit hiện tại không thể build cho sm_${cuda_arch}"
 if [[ "${MODEL_PROFILE}" == "auto" ]]; then
-  if ((vram_mib >= 22528)); then
+  if [[ "${gpu_support_tier}" == "experimental" ]]; then
+    MODEL_PROFILE="minimal"
+  elif ((vram_mib >= 22528)); then
     MODEL_PROFILE="maximum"
   elif ((vram_mib >= 8192)); then
     MODEL_PROFILE="balanced"
@@ -305,8 +403,15 @@ if [[ "${MODEL_PROFILE}" == "auto" ]]; then
     MODEL_PROFILE="minimal"
   fi
 fi
+if [[ "${gpu_support_tier}" == "experimental" \
+  && "${MODEL_PROFILE}" != "minimal" && "${MODEL_PROFILE}" != "none" ]]; then
+  die "CMP 170HX hiện chỉ hỗ trợ profile minimal hoặc none"
+fi
 if [[ "${MODEL_PROFILE}" == "maximum" && "${vram_mib}" -lt 22528 ]]; then
   die "Profile maximum cần ít nhất 22 GiB VRAM; hiện có ${vram_mib} MiB"
+fi
+if [[ "${MODEL_PROFILE}" == "balanced" && "${vram_mib}" -lt 8192 ]]; then
+  die "Profile balanced cần ít nhất 8 GiB VRAM; hiện có ${vram_mib} MiB"
 fi
 if [[ "${MODEL_PROFILE}" != "none" && "${vram_mib}" -lt 6144 ]]; then
   die "Pipeline TIGER-DnR cần tối thiểu 6 GiB VRAM"
@@ -328,11 +433,17 @@ required_kib=$((required_disk_gib * 1024 * 1024))
   || die "Profile ${MODEL_PROFILE} cần ít nhất ${required_disk_gib} GiB trống"
 
 log "Installer ${INSTALLER_VERSION}"
-log "GPU: ${gpu_name}, ${vram_mib} MiB VRAM, sm_${compute_cap/./}"
+log "GPU: ${gpu_name}, ${vram_mib} MiB VRAM, sm_${cuda_arch}, driver ${driver_version}"
 log "Source: ${REPOSITORY_URL}@${SOURCE_REF}"
 log "Cài tại: ${INSTALL_DIR}"
 log "Dữ liệu: ${DATA_DIR}"
 log "Profile: ${MODEL_PROFILE}; acceptance: ${ACCEPTANCE_MODE}"
+
+if [[ "${gpu_support_tier}" == "experimental" ]]; then
+  log "Cảnh báo: CMP 170HX được hỗ trợ ở mức thử nghiệm; cần chạy acceptance thật trước production"
+elif [[ "${gpu_support_tier}" == "maintenance-limited" ]]; then
+  log "Cảnh báo: Volta sm_70 thuộc nhánh bảo trì giới hạn CUDA 12.x"
+fi
 
 if [[ "${DRY_RUN}" == true ]]; then
   log "Dry-run đạt; chưa thay đổi hệ thống"
@@ -431,7 +542,7 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
       if ! migrate_git_release_upgrade \
         "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" \
         "${DATA_DIR_EXPLICIT}" "${INSTALLER_VERSION}" \
-        "${COMPATIBLE_UPGRADE_FROM}"; then
+        "${COMPATIBLE_UPGRADE_FROM}" "sm_${cuda_arch}"; then
         if [[ -d "${staging_dir}" ]]; then
           rm -rf -- "${staging_dir}"
         fi
@@ -470,7 +581,8 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
     # shellcheck disable=SC1090
     source "${migration_helper}"
     if ! migrate_legacy_install \
-      "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" "${DATA_DIR_EXPLICIT}"; then
+      "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" \
+      "${DATA_DIR_EXPLICIT}" legacy "sm_${cuda_arch}"; then
       if [[ -d "${staging_dir}" ]]; then
         rm -rf -- "${staging_dir}"
       fi
@@ -493,12 +605,79 @@ PROJECT_ROOT="${INSTALL_DIR}"
   || die "Source không đầy đủ tại ${PROJECT_ROOT}"
 
 ENV_FILE="${PROJECT_ROOT}/.env.native"
+if [[ -e "${ENV_FILE}" || -L "${ENV_FILE}" ]]; then
+  [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] \
+    || die ".env.native phải là file thường, không được là symlink"
+  [[ "$(stat -c '%u' -- "${ENV_FILE}")" == "0" ]] \
+    || die ".env.native hiện không thuộc root; hãy kiểm tra và chown root:root trước khi nâng cấp"
+fi
+case "${MODEL_PROFILE}" in
+  maximum)
+    default_asr_model="asr-faster-whisper-large-v3-turbo"
+    default_translation_model="mt-gemma4-31b-q4"
+    default_tts_model="tts-vieneu-v2"
+    ;;
+  balanced)
+    default_asr_model="asr-faster-whisper-small"
+    default_translation_model="mt-gemma4-e2b-q4"
+    default_tts_model="tts-vieneu-v2"
+    ;;
+  minimal)
+    default_asr_model="asr-faster-whisper-small"
+    default_translation_model="mt-gemma4-e2b-q4"
+    default_tts_model="tts-piper-vi-vais1000-medium"
+    ;;
+  none)
+    default_asr_model=""
+    default_translation_model=""
+    default_tts_model=""
+    ;;
+esac
+
+upsert_native_env_value() {
+  local key="$1"
+  local value="$2"
+  local temporary
+  [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] \
+    || die ".env.native không còn là file thường an toàn"
+  temporary="$(mktemp "${PROJECT_ROOT}/.env.native.edit.XXXXXX")"
+  awk -v assignment="${key}=" \
+    'index($0, assignment) != 1 { print }' "${ENV_FILE}" >"${temporary}"
+  printf '%s=%s\n' "${key}" "${value}" >>"${temporary}"
+  chown root:root "${temporary}"
+  chmod 0600 "${temporary}"
+  [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] \
+    || die ".env.native đã thay đổi trong khi cập nhật"
+  mv -Tf -- "${temporary}" "${ENV_FILE}"
+}
+
+migrate_legacy_model_default() {
+  local key="$1"
+  local legacy_value="$2"
+  local target_value="$3"
+  local current_value
+  current_value="$(sed -n "s/^${key}=//p" "${ENV_FILE}" | tail -n 1)"
+  if [[ -z "${current_value}" || "${current_value}" == "${legacy_value}" ]]; then
+    upsert_native_env_value "${key}" "${target_value}"
+  elif [[ "${current_value}" != "${target_value}" ]]; then
+    log "Giữ cấu hình model tùy chỉnh ${key}=${current_value}"
+  fi
+}
+
 if [[ ! -e "${ENV_FILE}" ]]; then
   temporary_env="$(mktemp "${PROJECT_ROOT}/.env.native.XXXXXX")"
   cp "${PROJECT_ROOT}/.env.native.example" "${temporary_env}"
+  if [[ "${MODEL_PROFILE}" != "none" ]]; then
+    sed -i \
+      -e "s|^DUB_DEFAULT_ASR_MODEL_ID=.*$|DUB_DEFAULT_ASR_MODEL_ID=${default_asr_model}|" \
+      -e "s|^DUB_DEFAULT_TRANSLATION_MODEL_ID=.*$|DUB_DEFAULT_TRANSLATION_MODEL_ID=${default_translation_model}|" \
+      -e "s|^DUB_DEFAULT_TTS_MODEL_ID=.*$|DUB_DEFAULT_TTS_MODEL_ID=${default_tts_model}|" \
+      "${temporary_env}"
+  fi
   printf '\nDUB_NATIVE_ROOT=%s\n' "${DATA_DIR}" >>"${temporary_env}"
-  install -m 0600 -o root -g root "${temporary_env}" "${ENV_FILE}"
-  rm -f -- "${temporary_env}"
+  chown root:root "${temporary_env}"
+  chmod 0600 "${temporary_env}"
+  mv -T -- "${temporary_env}" "${ENV_FILE}"
 else
   configured_data="$(sed -n 's/^DUB_NATIVE_ROOT=//p' "${ENV_FILE}" | tail -n 1)"
   if [[ -n "${configured_data}" && "${DATA_DIR_EXPLICIT}" != true \
@@ -510,8 +689,32 @@ else
   if [[ -n "${configured_data}" && "${configured_data}" != "${DATA_DIR}" ]]; then
     die ".env.native đã dùng DUB_NATIVE_ROOT=${configured_data}; không tự ghi đè"
   fi
+  if [[ "${MODEL_PROFILE}" != "none" ]]; then
+    # v0.3.2 copied maximum defaults for every profile. Rewrite only missing or
+    # exact legacy values; administrator-owned custom selections are preserved.
+    migrate_legacy_model_default \
+      DUB_DEFAULT_ASR_MODEL_ID \
+      asr-faster-whisper-large-v3-turbo \
+      "${default_asr_model}"
+    migrate_legacy_model_default \
+      DUB_DEFAULT_TRANSLATION_MODEL_ID \
+      mt-gemma4-31b-q4 \
+      "${default_translation_model}"
+    migrate_legacy_model_default \
+      DUB_DEFAULT_TTS_MODEL_ID \
+      tts-vieneu-v2 \
+      "${default_tts_model}"
+  fi
   chmod 0600 "${ENV_FILE}"
 fi
+
+# Bind every native process and the architecture-specific llama.cpp binary to
+# the exact physical GPU selected by PyTorch during preflight. UUID pinning is
+# stable across reboots and host PCI/index reordering.
+upsert_native_env_value CUDA_VISIBLE_DEVICES "${gpu_uuid}"
+upsert_native_env_value DUB_SELECTED_GPU_UUID "${gpu_uuid}"
+upsert_native_env_value DUB_SELECTED_CUDA_ARCHITECTURE "sm_${cuda_arch}"
+chmod 0600 "${ENV_FILE}"
 
 # shellcheck disable=SC1091
 source "${PROJECT_ROOT}/scripts/native-common.sh"
@@ -526,6 +729,7 @@ state_file="${DUB_NATIVE_ROOT}/install-state.json"
 fingerprint="$(
   cd -- "${PROJECT_ROOT}"
   {
+    printf 'cuda_architecture=sm_%s\n' "${cuda_arch}"
     sha256sum \
       pyproject.toml \
       .env.native.example \
@@ -559,7 +763,8 @@ fi
 if [[ "${bootstrap_required}" == true ]]; then
   log "Bootstrap runtime native và chạy smoke check production"
   stage_started_seconds=${SECONDS}
-  "${PROJECT_ROOT}/scripts/native-bootstrap.sh"
+  DUB_LLAMA_CUDA_ARCHITECTURES="${cuda_arch}" \
+    "${PROJECT_ROOT}/scripts/native-bootstrap.sh"
   bootstrap_seconds=$((SECONDS - stage_started_seconds))
   bootstrap_performed=true
 else
@@ -754,6 +959,13 @@ jq -n \
   --arg fingerprint "${fingerprint}" \
   --arg installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg migration_backup "${MIGRATION_BACKUP_PATH}" \
+  --arg gpu_name "${gpu_name}" \
+  --arg gpu_uuid "${gpu_uuid}" \
+  --arg gpu_driver_version "${driver_version}" \
+  --arg gpu_compute_capability "${compute_cap}" \
+  --arg gpu_cuda_architecture "sm_${cuda_arch}" \
+  --arg gpu_support_tier "${gpu_support_tier}" \
+  --argjson gpu_vram_mib "${vram_mib}" \
   --argjson bootstrap_performed "${bootstrap_performed}" \
   --argjson bootstrap_seconds "${bootstrap_seconds}" \
   --argjson model_install_seconds "${model_install_seconds}" \
@@ -762,6 +974,13 @@ jq -n \
   --argjson models "${models_json}" \
   '{schema_version:1, installer_version:$installer_version, commit:$commit,
     profile:$profile, models:$models, bootstrap_fingerprint:$fingerprint,
+    gpu:{name:$gpu_name,
+      uuid:(if $gpu_uuid == "" then null else $gpu_uuid end),
+      driver_version:$gpu_driver_version,
+      vram_mib:$gpu_vram_mib,
+      compute_capability:$gpu_compute_capability,
+      cuda_architecture:$gpu_cuda_architecture,
+      support_tier:$gpu_support_tier},
     performance:{bootstrap_performed:$bootstrap_performed,
       bootstrap_seconds:$bootstrap_seconds,
       model_install_seconds:$model_install_seconds,
