@@ -156,17 +156,20 @@ prepare_installed_release() {
 # must preserve the persistent runtime and support a complete rollback.
 upgrade_root="${TEST_ROOT}/upgrade-current"
 upgrade_stage="${TEST_ROOT}/upgrade-stage"
-create_git_project "${upgrade_root}" 0.3.0 old
-create_git_project "${upgrade_stage}" 0.3.1 new
+create_git_project "${upgrade_root}" 0.3.1 old
+create_git_project "${upgrade_stage}" 0.3.2 new
 # The target release changes application behavior around the persistent
 # runtime without changing its locked dependencies.
 # This must not force an in-place venv rebuild, but the full fingerprint still
 # needs to record that the release contents changed.
 printf '\n# provider stack control changed in the target release\n' \
   >>"${upgrade_stage}/scripts/native-stack.sh"
-git -C "${upgrade_stage}" add scripts/native-stack.sh
+printf '\n# cold-install bootstrap procedure changed in the target release\n' \
+  >>"${upgrade_stage}/scripts/native-bootstrap.sh"
+git -C "${upgrade_stage}" add \
+  scripts/native-bootstrap.sh scripts/native-stack.sh
 git -C "${upgrade_stage}" commit --amend --no-edit -q
-prepare_installed_release "${upgrade_root}" 0.3.0 model-bytes
+prepare_installed_release "${upgrade_root}" 0.3.1 model-bytes
 job_checkpoint="${upgrade_root}/var/data/jobs/job-upgrade/checkpoint.json"
 mkdir -p "$(dirname -- "${job_checkpoint}")"
 printf '%s\n' \
@@ -188,7 +191,7 @@ new_compatibility_fingerprint="$(
 [[ "${old_runtime_fingerprint}" != "${new_runtime_fingerprint}" ]] \
   || fail "Full runtime fingerprint không phản ánh source release mới"
 [[ "${old_compatibility_fingerprint}" == "${new_compatibility_fingerprint}" ]] \
-  || fail "Thay đổi provider control plane bị coi nhầm là runtime không tương thích"
+  || fail "Thay đổi bootstrap/control plane bị coi nhầm là runtime không tương thích"
 export MIGRATION_TEST_STACK_STATE="${TEST_ROOT}/upgrade-stack.running"
 export MIGRATION_TEST_EVENTS="${TEST_ROOT}/upgrade-stack.events"
 export MIGRATION_EXPECTED_JOURNAL="${upgrade_root}.migration-state.json"
@@ -196,7 +199,7 @@ touch "${MIGRATION_TEST_STACK_STATE}"
 
 migrate_git_release_upgrade \
   "${upgrade_root}" "${upgrade_stage}" "${upgrade_root}/var" false \
-  0.3.1 "0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0"
+  0.3.2 "0.3.1"
 
 [[ "$(<"${upgrade_root}/SOURCE_MARKER")" == new ]] \
   || fail "Source release mới chưa active"

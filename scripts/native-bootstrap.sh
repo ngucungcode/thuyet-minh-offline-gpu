@@ -18,6 +18,31 @@ fi
 source "${SCRIPT_DIR}/native-common.sh"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+INSTALL_TEST_MODE="${DUB_INSTALL_TEST_MODE:-smoke}"
+case "${INSTALL_TEST_MODE}" in
+  smoke|full) ;;
+  *)
+    echo "DUB_INSTALL_TEST_MODE phải là smoke hoặc full" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -z "${DUB_BUILD_JOBS:-}" ]]; then
+  detected_build_jobs="$(nproc)"
+  if ((detected_build_jobs > 16)); then
+    detected_build_jobs=16
+  fi
+  export DUB_BUILD_JOBS="${detected_build_jobs}"
+elif [[ ! "${DUB_BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "DUB_BUILD_JOBS phải là số nguyên dương" >&2
+  exit 2
+fi
+
+PIP_CACHE_DIR="${DUB_NATIVE_ROOT}/cache/pip"
+install -d -m 0755 -o root -g root "${DUB_NATIVE_ROOT}/cache"
+install -d -m 0700 -o root -g root "${PIP_CACHE_DIR}"
+export PIP_CACHE_DIR
+
 "${PYTHON_BIN}" - <<'PY'
 import sys
 if not ((3, 11, 0, "candidate", 1) <= sys.version_info < (3, 13)):
@@ -151,10 +176,28 @@ ln -sfn "${PROWLARR_TARGET}" "${DUB_NATIVE_ROOT}/opt/prowlarr"
 if [[ ! -x "${DUB_VENV_DIR}/bin/python" ]]; then
   "${PYTHON_BIN}" -m venv --system-site-packages "${DUB_VENV_DIR}"
 fi
-"${DUB_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check -e "${PROJECT_ROOT}[managed-gpu,native,test]"
+runtime_extras="managed-gpu,native"
+if [[ "${INSTALL_TEST_MODE}" == full ]]; then
+  runtime_extras="${runtime_extras},test"
+fi
+"${DUB_VENV_DIR}/bin/python" -m pip install --disable-pip-version-check \
+  -e "${PROJECT_ROOT}[${runtime_extras}]"
 
+"${DUB_VENV_DIR}/bin/python" -m pip check
 "${DUB_VENV_DIR}/bin/python" -m compileall -q "${PROJECT_ROOT}/src"
-"${DUB_VENV_DIR}/bin/python" -m pytest "${PROJECT_ROOT}/tests"
+"${DUB_VENV_DIR}/bin/python" - <<'PY'
+import ctranslate2
+import faster_whisper
+import onnxruntime
+import transformers
+
+import dub_server.api
+import dub_server.cli
+import dub_server.worker
+PY
+if [[ "${INSTALL_TEST_MODE}" == full ]]; then
+  "${DUB_VENV_DIR}/bin/python" -m pytest "${PROJECT_ROOT}/tests"
+fi
 
 chown -R "${DUB_NATIVE_USER}:${DUB_NATIVE_USER}" \
   "${DUB_NATIVE_ROOT}/state" \

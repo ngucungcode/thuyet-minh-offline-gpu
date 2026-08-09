@@ -283,11 +283,13 @@ with path.open("rb") as handle:
 project = document.get("project")
 if not isinstance(project, dict):
     raise SystemExit("pyproject.toml thiếu bảng project")
-# Release metadata is intentionally excluded. The environment example and the
-# native stack control script are also excluded because neither changes the
-# persistent Python/native runtime; the new source supplies those files after
-# the atomic switch. Dependencies, build configuration, entrypoints, tools,
-# model locks and native runtime files remain gated.
+# Release metadata is intentionally excluded. The environment example, native
+# bootstrap procedure and native stack control script are also excluded because
+# none of them changes an already-installed Python/native runtime; the new
+# source supplies those files after the atomic switch. Persistent dependencies,
+# build configuration, entrypoints, model locks and native runtime files remain
+# gated. A bootstrap change that alters a persistent artifact must also update
+# its owning lock or dependency manifest.
 project.pop("version", None)
 print(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 PY
@@ -296,7 +298,6 @@ PY
       printf '%s\n' "${project_manifest}" || exit 1
       sha256sum \
         config/models.lock.json \
-        scripts/native-bootstrap.sh \
         scripts/native-common.sh \
         scripts/install-llama-cpp.sh \
         scripts/vieneu-offline.py || exit 1

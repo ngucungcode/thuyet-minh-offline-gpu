@@ -103,6 +103,22 @@ class _StageCancelled(Exception):
     pass
 
 
+def _next_block_progress(
+    *,
+    completed: int,
+    total: int,
+    range_start: int,
+    range_size: int,
+    last_persisted: int,
+) -> int | None:
+    """Coalesce per-block database events to visible progress changes."""
+
+    if total <= 0:
+        return None
+    mapped = range_start + round(min(max(completed, 0), total) * range_size / total)
+    return mapped if mapped > last_persisted else None
+
+
 def build_audio_separator(
     model: VerifiedModel,
     *,
@@ -653,7 +669,7 @@ class Phase4Stage:
             payload["timing_profile"] = timing_profile.value
             self._store.save_checkpoint(job_id, JobStage.TTS, payload)
 
-        self._set_status(
+        running = self._set_status(
             job_id,
             JobStatus.SYNTHESIZING,
             JobStage.TTS,
@@ -667,6 +683,7 @@ class Phase4Stage:
                 "tts_block_count": len(translation.result.segments),
             },
         )
+        last_persisted_progress = running.progress_permille
         blocks_by_ordinal = {
             int(item["ordinal"]): dict(item)
             for item in payload["blocks"]
@@ -711,18 +728,24 @@ class Phase4Stage:
                     translation.result.segments
                 )
                 self._store.save_checkpoint(job_id, JobStage.TTS, payload)
-                mapped = 735 + round(
-                    len(blocks_by_ordinal) * 115 / len(translation.result.segments)
+                mapped = _next_block_progress(
+                    completed=len(blocks_by_ordinal),
+                    total=len(translation.result.segments),
+                    range_start=735,
+                    range_size=115,
+                    last_persisted=last_persisted_progress,
                 )
-                self._update_progress(
-                    job_id,
-                    mapped,
-                    {
-                        "phase4_step": "tts",
-                        "tts_completed_blocks": len(blocks_by_ordinal),
-                        "tts_block_count": len(translation.result.segments),
-                    },
-                )
+                if mapped is not None:
+                    self._update_progress(
+                        job_id,
+                        mapped,
+                        {
+                            "phase4_step": "tts",
+                            "tts_completed_blocks": len(blocks_by_ordinal),
+                            "tts_block_count": len(translation.result.segments),
+                        },
+                    )
+                    last_persisted_progress = mapped
         finally:
             if synthesizer is not None:
                 await synthesizer.close()
@@ -935,7 +958,7 @@ class Phase4Stage:
         elif "timing_profile" not in payload:
             payload["timing_profile"] = timing_profile.value
             self._store.save_checkpoint(job_id, JobStage.TIMING, payload)
-        self._set_status(
+        running = self._set_status(
             job_id,
             JobStatus.TIMING,
             JobStage.TIMING,
@@ -943,6 +966,7 @@ class Phase4Stage:
             force_reset=True,
             detail_updates={"phase4_step": "timing"},
         )
+        last_persisted_progress = running.progress_permille
         fitted_by_ordinal: dict[int, FittedNarrationBlock] = {}
         records_by_ordinal: dict[int, dict[str, Any]] = {}
         for raw in payload.get("blocks", []):
@@ -1014,16 +1038,25 @@ class Phase4Stage:
             ):
                 payload.pop(key, None)
             self._store.save_checkpoint(job_id, JobStage.TIMING, payload)
-            self._update_progress(
-                job_id,
-                850 + round(len(fitted_by_ordinal) * 50 / len(raw_blocks)),
-                {
-                    "phase4_step": "timing",
-                    "timing_completed_blocks": len(fitted_by_ordinal),
-                    "timing_block_count": len(raw_blocks),
-                    "timing_profile": timing_profile.value,
-                },
+            mapped = _next_block_progress(
+                completed=len(fitted_by_ordinal),
+                total=len(raw_blocks),
+                range_start=850,
+                range_size=50,
+                last_persisted=last_persisted_progress,
             )
+            if mapped is not None:
+                self._update_progress(
+                    job_id,
+                    mapped,
+                    {
+                        "phase4_step": "timing",
+                        "timing_completed_blocks": len(fitted_by_ordinal),
+                        "timing_block_count": len(raw_blocks),
+                        "timing_profile": timing_profile.value,
+                    },
+                )
+                last_persisted_progress = mapped
 
         fitted_blocks = [fitted_by_ordinal[index] for index in range(len(raw_blocks))]
         artifacts_valid = await self._valid_timeline_artifacts(payload, job_id=job_id)

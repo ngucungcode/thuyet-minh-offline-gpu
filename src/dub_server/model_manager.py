@@ -38,9 +38,10 @@ def _write_verification_receipt(
 ) -> None:
     """Publish a small API-facing receipt outside the locked model tree.
 
-    Workers still hash every locked file before inference. The receipt only
-    lets the control plane report the last successful explicit verification
-    without re-reading gigabytes on every list request.
+    Workers never trust this receipt: they hash every locked file on first use
+    in each process and may then cache only while the model mount is read-only.
+    The receipt only lets the control plane report the last successful explicit
+    verification without re-reading gigabytes on every list request.
     """
 
     model_id = verified.model_id

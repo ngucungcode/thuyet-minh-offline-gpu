@@ -92,3 +92,68 @@ def test_readme_uses_the_short_release_installer() -> None:
         "releases/latest/download/install.sh | sudo bash"
     ) in readme
     assert "--profile auto --start --yes" not in readme
+
+
+def test_installer_does_not_hash_profile_models_twice() -> None:
+    installer = (PROJECT_ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert 'native-model.sh" install "${model_id}"' in installer
+    assert 'native-model.sh" verify "${model_id}"' not in installer
+
+
+def test_native_bootstrap_defaults_to_cached_smoke_checks() -> None:
+    bootstrap = (PROJECT_ROOT / "scripts" / "native-bootstrap.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'INSTALL_TEST_MODE="${DUB_INSTALL_TEST_MODE:-smoke}"' in bootstrap
+    assert 'runtime_extras="managed-gpu,native"' in bootstrap
+    assert 'runtime_extras="${runtime_extras},test"' in bootstrap
+    assert 'if [[ "${INSTALL_TEST_MODE}" == full ]]' in bootstrap
+    assert ' -m pip check' in bootstrap
+    assert 'PIP_CACHE_DIR="${DUB_NATIVE_ROOT}/cache/pip"' in bootstrap
+    assert "detected_build_jobs > 16" in bootstrap
+
+
+def test_docker_build_cache_excludes_local_build_artifacts() -> None:
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    project = tomllib.loads(
+        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    locked_requirements = [
+        line.strip()
+        for line in (
+            PROJECT_ROOT / "requirements" / "docker-gpu.lock"
+        ).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    expected_requirements = [
+        *project["dependencies"],
+        *(
+            requirement
+            for requirement in project["optional-dependencies"]["gpu"]
+            if not requirement.startswith("torch==")
+        ),
+    ]
+
+    assert "--mount=type=cache,target=/root/.cache/pip,sharing=locked" in dockerfile
+    assert "PIP_NO_CACHE_DIR" not in dockerfile
+    assert locked_requirements == expected_requirements
+    assert dockerfile.index("COPY requirements/docker-gpu.lock") < dockerfile.index(
+        "COPY src ./src"
+    )
+    assert dockerfile.index("--requirement requirements/docker-gpu.lock") < (
+        dockerfile.index("COPY src ./src")
+    )
+    assert "pip install --break-system-packages --no-deps ." in dockerfile
+    for ignored_path in (
+        "**/node_modules/",
+        ".artifacts/",
+        ".pytest-tmp-*/",
+        ".review-tmp-*/",
+        "web/.next/",
+        "web/.vinext/",
+        "web/dist/",
+    ):
+        assert ignored_path in dockerignore

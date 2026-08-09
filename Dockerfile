@@ -71,7 +71,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     DUB_DATABASE_PATH=/state/jobs.sqlite3 \
     DUB_MODELS_LOCK_PATH=/app/config/models.lock.json \
@@ -108,6 +107,19 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# PyTorch's CUDA 12.8 wheels are installed explicitly. The remaining project
+# dependencies live in a source-independent lock layer. Editing application
+# code or bumping only the package version therefore never reinstalls the
+# multi-gigabyte GPU environment.
+COPY requirements/docker-gpu.lock ./requirements/docker-gpu.lock
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3.12 -m pip install --break-system-packages \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.8.0 \
+    && python3.12 -m pip install --break-system-packages \
+        --requirement requirements/docker-gpu.lock \
+    && python3.12 -m pip check
+
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY src ./src
 COPY config ./config
@@ -116,13 +128,8 @@ COPY --from=llama-builder /opt/tiger /opt/tiger
 COPY --from=llama-builder /opt/vieneu/source /opt/vieneu/source
 COPY scripts/vieneu-offline.py /opt/vieneu/vieneu-offline.py
 
-# PyTorch's CUDA 12.8 wheels are installed explicitly. The remaining project
-# dependencies, including pinned CTranslate2/faster-whisper, come from the gpu
-# optional dependency group in pyproject.toml.
-RUN python3.12 -m pip install --break-system-packages \
-        --index-url https://download.pytorch.org/whl/cu128 \
-        torch==2.8.0 \
-    && python3.12 -m pip install --break-system-packages '.[gpu]' \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3.12 -m pip install --break-system-packages --no-deps . \
     && python3.12 -m pip check \
     && chmod 0555 /opt/vieneu/vieneu-offline.py \
     && mkdir -p /config /models /state /data/incoming /data/jobs /data/output \
