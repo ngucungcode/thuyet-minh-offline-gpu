@@ -81,10 +81,11 @@ nguyên dương. Cả hai biến chỉ ảnh hưởng cold bootstrap, không tha
 hoặc checksum của artifact đã cài.
 
 Installer ghi số giây của bootstrap, cài model, acceptance và toàn bộ lượt chạy
-vào `install-state.json` dưới khóa `performance`. Trong worker Linux, model vẫn
-được băm SHA-256 đầy đủ trước lần dùng đầu tiên; các stage/job tiếp theo chỉ dùng
-fast-path khi danh sách file và toàn bộ metadata chống sửa đổi không đổi. Cache
-này mất khi worker khởi động lại. Tokenizer dịch cũng dùng LRU hữu hạn, còn tiến
+vào `install-state.json` dưới khóa `performance`. Trên model mount Linux chỉ-đọc,
+worker vẫn băm SHA-256 đầy đủ trước lần dùng đầu tiên; các stage/job tiếp theo chỉ
+dùng fast-path khi danh sách file và metadata không đổi. Thư mục model có thể ghi
+luôn được băm đầy đủ ở mỗi lần dùng. Cache mất khi worker khởi động lại. Tokenizer
+dịch cũng dùng LRU hữu hạn, còn tiến
 độ TTS/timing được gộp theo phần nghìn nhưng checkpoint từng block vẫn được ghi.
 
 Kiểm tra sau cài:

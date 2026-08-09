@@ -402,16 +402,22 @@ def _status_identity(path: Path, relative: str) -> tuple[object, ...]:
     )
 
 
-def _supports_mutation_sensitive_ctime() -> bool:
-    """Return whether ``st_ctime`` records metadata changes on this platform.
+def _supports_safe_verification_cache(model_path: Path) -> bool:
+    """Allow metadata reuse only on an explicitly read-only POSIX mount.
 
-    POSIX defines ``st_ctime`` as the last metadata-change time, so an owner can
-    restore ``st_mtime`` with ``utime`` but cannot restore ``st_ctime``.  Python
-    exposes file creation time through the same field on Windows, which makes a
-    metadata-only verification cache unsafe there.
+    Writable filesystems can preserve a same-size file's complete stat identity
+    when two writes land inside one timestamp quantum. A read-only mount is the
+    integrity boundary that makes metadata reuse safe for the offline worker;
+    native/writable layouts deliberately perform complete SHA-256 every time.
     """
 
-    return os.name == "posix"
+    read_only_flag = getattr(os, "ST_RDONLY", None)
+    if os.name != "posix" or not isinstance(read_only_flag, int):
+        return False
+    try:
+        return bool(os.statvfs(model_path).f_flag & read_only_flag)
+    except OSError:
+        return False
 
 
 def _model_tree_identity(
@@ -419,11 +425,10 @@ def _model_tree_identity(
 ) -> tuple[tuple[object, ...], ...]:
     """Build a cheap exact identity for a previously verified model tree.
 
-    On platforms where ``st_ctime`` is mutation-sensitive, the worker performs
-    one complete SHA-256 verification per process. Subsequent stages/jobs may
-    reuse it only while the root, directory allowlist, file allowlist and
-    mutation-sensitive metadata are unchanged. Other platforms always perform
-    a complete hash and never use this identity as an integrity decision.
+    On a read-only POSIX model mount, the worker performs one complete SHA-256
+    verification per process. Subsequent stages/jobs may reuse it only while
+    the root, directory allowlist, file allowlist and mutation-sensitive
+    metadata are unchanged. Writable and unsupported filesystems always hash.
     """
 
     observed_files, observed_directories = _walk_regular_tree(model_path)
@@ -518,10 +523,10 @@ def resolve_verified_model(
 ) -> VerifiedModel:
     """Resolve an offline model, fully hashing it once per worker process.
 
-    On POSIX, a warm lookup reuses the completed verification only when a cheap
-    exact tree identity still matches. Any replacement, metadata mutation,
-    extra path, missing path or changed catalog pin falls back to full SHA-256.
-    Platforms where ``st_ctime`` is not mutation-sensitive hash every lookup.
+    On a read-only POSIX mount, a warm lookup reuses the completed verification
+    only when a cheap exact tree identity still matches. Any replacement,
+    metadata mutation, extra path, missing path or changed catalog pin falls
+    back to full SHA-256. Writable/unsupported filesystems hash every lookup.
     """
 
     catalog = read_model_catalog(lock_path)
@@ -531,7 +536,7 @@ def resolve_verified_model(
             f"Model {model_id} belongs to stage {manifest.stage}, not {expected_stage}"
         )
     destination = model_destination(models_dir, manifest)
-    if not _supports_mutation_sensitive_ctime():
+    if not _supports_safe_verification_cache(destination):
         return verify_model_directory(manifest, destination)
 
     cache_key = (

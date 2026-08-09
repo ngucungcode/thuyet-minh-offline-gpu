@@ -128,8 +128,8 @@ def test_worker_reuses_full_hash_until_model_identity_changes(
 
     monkeypatch.setattr(
         model_registry,
-        "_supports_mutation_sensitive_ctime",
-        lambda: True,
+        "_supports_safe_verification_cache",
+        lambda _path: True,
     )
     monkeypatch.setattr(model_registry, "_hash_regular_file", counting_hash)
 
@@ -148,7 +148,7 @@ def test_worker_reuses_full_hash_until_model_identity_changes(
     assert hashed_paths == [model_file, model_file]
 
 
-def test_worker_hashes_every_lookup_when_ctime_is_not_mutation_sensitive(
+def test_worker_hashes_every_lookup_when_model_mount_is_writable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     files = {"model.bin": b"locked"}
@@ -166,8 +166,8 @@ def test_worker_hashes_every_lookup_when_ctime_is_not_mutation_sensitive(
 
     monkeypatch.setattr(
         model_registry,
-        "_supports_mutation_sensitive_ctime",
-        lambda: False,
+        "_supports_safe_verification_cache",
+        lambda _path: False,
     )
     monkeypatch.setattr(model_registry, "_hash_regular_file", counting_hash)
 
@@ -197,8 +197,8 @@ def test_worker_cache_is_invalidated_when_locked_file_digest_changes(
 
     monkeypatch.setattr(
         model_registry,
-        "_supports_mutation_sensitive_ctime",
-        lambda: True,
+        "_supports_safe_verification_cache",
+        lambda _path: True,
     )
     resolve_verified_model(lock, models_dir, "asr-test", "asr")
 

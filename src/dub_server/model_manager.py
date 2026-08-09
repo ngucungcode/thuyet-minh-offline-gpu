@@ -39,7 +39,7 @@ def _write_verification_receipt(
     """Publish a small API-facing receipt outside the locked model tree.
 
     Workers never trust this receipt: they hash every locked file on first use
-    in each process and may then use their own mutation-sensitive POSIX cache.
+    in each process and may then cache only while the model mount is read-only.
     The receipt only lets the control plane report the last successful explicit
     verification without re-reading gigabytes on every list request.
     """
