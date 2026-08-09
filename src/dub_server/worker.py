@@ -16,7 +16,7 @@ from .config import Settings, get_settings, load_model_catalog
 from .gpu import GpuPreflightError, GpuPreflightReport, inspect_gpu, write_gpu_report
 from .offline import install_offline_network_guard
 from .phase4_stage import Phase4Stage, build_phase4_stage
-from .state import JobRecord, JobStatus, StateStore
+from .state import InvalidTransition, JobRecord, JobStatus, StateStore
 from .transcription_stage import TranscriptionStage
 from .translation_stage import TranslationStage
 
@@ -83,16 +83,27 @@ def _ensure_selected_models_fit_vram(
         catalog = load_model_catalog(settings.models_lock_path, settings.models_dir)
     except (OSError, ValueError) as error:
         current = store.get_job(record.id)
-        store.update_status(
-            current.id,
-            JobStatus.FAILED,
-            expected_status=current.status,
-            stage=current.stage,
-            details=current.details,
-            error_code="model_catalog_invalid",
-            error_message="Danh mục model cục bộ bị thiếu hoặc không hợp lệ",
-            retryable=True,
-        )
+        try:
+            store.update_status(
+                current.id,
+                JobStatus.FAILED,
+                expected_status=current.status,
+                stage=current.stage,
+                details=current.details,
+                error_code="model_catalog_invalid",
+                error_message="Danh mục model cục bộ bị thiếu hoặc không hợp lệ",
+                retryable=True,
+            )
+        except InvalidTransition:
+            # Cancellation can win after the guard reads the queued record.
+            # Leave the newer state untouched and let the normal cancellation
+            # reconciliation path handle it on the next worker iteration.
+            _print_event(
+                "job.model_guard_stale_state",
+                job_id=current.id,
+                observed_status=current.status.value,
+            )
+            return False
         _print_event(
             "job.rejected_model_catalog",
             job_id=current.id,
@@ -114,24 +125,32 @@ def _ensure_selected_models_fit_vram(
         if minimum_vram_mib is None or minimum_vram_mib <= available_vram_mib:
             continue
         current = store.get_job(record.id)
-        store.update_status(
-            current.id,
-            JobStatus.FAILED,
-            expected_status=current.status,
-            stage=current.stage,
-            details={
-                **current.details,
-                "required_model_id": model_id,
-                "required_vram_mib": minimum_vram_mib,
-                "available_vram_mib": available_vram_mib,
-            },
-            error_code="model_vram_insufficient",
-            error_message=(
-                f"Model {model_id} cần tối thiểu {minimum_vram_mib} MiB VRAM "
-                f"nhưng GPU logical 0 chỉ có {available_vram_mib} MiB"
-            ),
-            retryable=False,
-        )
+        try:
+            store.update_status(
+                current.id,
+                JobStatus.FAILED,
+                expected_status=current.status,
+                stage=current.stage,
+                details={
+                    **current.details,
+                    "required_model_id": model_id,
+                    "required_vram_mib": minimum_vram_mib,
+                    "available_vram_mib": available_vram_mib,
+                },
+                error_code="model_vram_insufficient",
+                error_message=(
+                    f"Model {model_id} cần tối thiểu {minimum_vram_mib} MiB VRAM "
+                    f"nhưng GPU logical 0 chỉ có {available_vram_mib} MiB"
+                ),
+                retryable=False,
+            )
+        except InvalidTransition:
+            _print_event(
+                "job.model_guard_stale_state",
+                job_id=current.id,
+                observed_status=current.status.value,
+            )
+            return False
         _print_event(
             "job.rejected_vram",
             job_id=current.id,

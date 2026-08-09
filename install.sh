@@ -349,7 +349,13 @@ if not name:
     raise SystemExit("PyTorch trả về tên GPU logical 0 rỗng")
 memory_mib = int(properties.total_memory) // (1024 * 1024)
 major, minor = torch.cuda.get_device_capability(0)
-device_uuid = str(getattr(properties, "uuid", "")).strip()
+raw_device_uuid = getattr(properties, "uuid", None)
+device_uuid = "" if raw_device_uuid is None else str(raw_device_uuid).strip()
+if device_uuid:
+    if device_uuid.casefold().startswith("gpu-"):
+        device_uuid = f"GPU-{device_uuid[4:]}"
+    else:
+        device_uuid = f"GPU-{device_uuid}"
 with torch.inference_mode():
     left = torch.ones((256, 256), device="cuda", dtype=torch.float16)
     result = left @ left

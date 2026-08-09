@@ -75,14 +75,18 @@ test("keeps the dashboard API contract local-first", async () => {
 
   assert.match(page, /api<Health>\("\/health"\)/);
   assert.match(page, /gpus\?: GpuDevice\[\]/);
+  assert.match(page, /support_tier\?: GpuSupportTier \| null/);
   assert.match(page, /const gpuDevices = health\?\.gpu\?\.gpus \?\? \[\]/);
   assert.match(page, /const gpuReady = health\?\.gpu\?\.ready === true/);
   assert.match(page, /health\?\.status === "ok" && gpuReady/);
   assert.match(page, /const gpuWarnings = \(health\?\.gpu\?\.warnings \?\? \[\]\)/);
   assert.match(page, /maintenance-limited Volta sm_70/);
   assert.match(page, /experimental CMP 170HX support/);
-  assert.match(page, /gpuReady && !gpuHasWarnings/);
-  assert.match(page, /Mức hỗ trợ: \{gpuSupportTier\}/);
+  assert.match(page, /const gpuSupportTier = health\?\.gpu\?\.support_tier \?\? null/);
+  assert.match(page, /"maintenance-limited": "Bảo trì giới hạn"/);
+  assert.match(page, /experimental: "Thử nghiệm"/);
+  assert.doesNotMatch(page, /gpuWarnings\.some/);
+  assert.match(page, /Mức hỗ trợ: \{gpuSupportTier \? gpuSupportTierLabel\[gpuSupportTier\]/);
   assert.match(page, /className="gpu-health-warnings"/);
   assert.match(page, /Máy xử lý có cảnh báo/);
   assert.match(page, /gpuDevices\.map\(\(gpu, index\)/);
@@ -154,8 +158,10 @@ test("validates local files and exposes detailed cancellable upload progress", a
   assert.match(page, /fileExtension\(file\.name\) !== "\.srt"/);
   assert.match(page, /Video phải là tệp MP4 hoặc MKV/);
   assert.match(page, /Phụ đề thủ công phải là tệp SRT/);
-  assert.match(page, /Luồng hình chính của MP4\/MKV phải là H\.264\/AVC/);
-  assert.match(page, /Ảnh bìa nhúng và\s+thumbnail được tự động bỏ qua/);
+  assert.match(page, /H\.264\/AVC được giữ nguyên không mã hóa lại/);
+  assert.match(page, /HEVC SDR được tự động\s+chuyển mã sang H\.264\/AVC/);
+  assert.match(page, /AV1, VP9, VP8 và FFV1 bị từ chối/);
+  assert.match(page, /Ảnh bìa nhúng và thumbnail được tự động bỏ qua/);
   assert.match(page, /file\.size <= 0/);
   assert.match(page, /phase: "preparing"/);
   assert.match(page, /"media",\s*0,\s*overallTotal/);

@@ -277,6 +277,19 @@ def test_native_llama_build_can_be_overridden_and_is_keyed_by_architecture() -> 
     )
     assert '--arg cuda_architectures "${LLAMA_CUDA_ARCHITECTURES}"' in installer
     assert ".cuda_architectures == $cuda_architectures" in installer
+    assert '[[ -e "${LLAMA_TARGET}" || -L "${LLAMA_TARGET}" ]]' in installer
+    assert 'mv -T -- "${STAGE_DIR}" "${LLAMA_TARGET}"' in installer
+    assert 'ln -sfnT "${LLAMA_TARGET}" "${LLAMA_LINK}"' in installer
+
+
+def test_migration_reads_native_lock_from_the_supplied_project_root() -> None:
+    migration = (PROJECT_ROOT / "installer" / "migrate-legacy.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'python3 - native/components.lock.json <<\'PY\'' in migration
+    assert 'with Path(sys.argv[1]).open(encoding="utf-8") as handle:' in migration
+    assert 'with Path("native/components.lock.json").open' not in migration
 
 
 def test_installer_passes_selected_arch_and_writes_new_profile_defaults() -> None:
@@ -311,6 +324,10 @@ def test_native_installer_preflights_driver_architecture_and_cmp_profile() -> No
 
     assert "--query-gpu=driver_version" in installer
     assert "torch.cuda.get_device_properties(0)" in installer
+    assert 'raw_device_uuid = getattr(properties, "uuid", None)' in installer
+    assert 'device_uuid.casefold().startswith("gpu-")' in installer
+    assert 'device_uuid = f"GPU-{device_uuid[4:]}"' in installer
+    assert 'device_uuid = f"GPU-{device_uuid}"' in installer
     assert "yêu cầu CUDA toolkit 12.8" in installer
     assert "Cần NVIDIA driver 570.26 trở lên" in installer
     assert _shell_case_architectures(installer, "cuda_arch") == (

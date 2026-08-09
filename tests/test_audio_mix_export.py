@@ -521,6 +521,14 @@ def test_verification_uses_track_end_times_not_container_metadata(
         ({"tags": {"DURATION": "00:00:02.250000000"}}, "2.250000"),
         (
             {
+                "codec_name": "h264",
+                "start_time": "1.000000",
+                "tags": {"DURATION": "00:00:03.000000000"},
+            },
+            "2.000000",
+        ),
+        (
+            {
                 "codec_name": "hevc",
                 "start_time": "1.000000",
                 "tags": {"DURATION": "00:00:03.000000000"},

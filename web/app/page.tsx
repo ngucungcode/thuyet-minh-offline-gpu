@@ -12,6 +12,8 @@ type GpuDevice = {
   compute_capability?: string;
 };
 
+type GpuSupportTier = "supported" | "maintenance-limited" | "experimental";
+
 type Health = {
   status: "ok" | "degraded" | "error";
   api_version?: string;
@@ -25,6 +27,7 @@ type Health = {
     minimum_driver?: string;
     minimum_compute_capability?: string;
     minimum_vram_mib?: number;
+    support_tier?: GpuSupportTier | null;
     gpus?: GpuDevice[];
     errors?: string[];
     warnings?: string[];
@@ -1427,22 +1430,26 @@ export default function Home() {
   const gpuWarnings = (health?.gpu?.warnings ?? [])
     .filter((warning): warning is string => typeof warning === "string" && warning.trim().length > 0)
     .map(gpuWarningMessage);
-  const gpuSupportTier = gpuWarnings.some((warning) => warning.includes("hỗ trợ thử nghiệm"))
-    ? "Thử nghiệm"
-    : gpuWarnings.some((warning) => warning.includes("bảo trì giới hạn"))
-      ? "Bảo trì giới hạn"
-      : "Được hỗ trợ";
+  const gpuSupportTier = health?.gpu?.support_tier ?? null;
+  const gpuSupportTierLabel: Record<GpuSupportTier, string> = {
+    supported: "Được hỗ trợ",
+    "maintenance-limited": "Bảo trì giới hạn",
+    experimental: "Thử nghiệm",
+  };
+  const gpuSupportHasRestrictions =
+    gpuSupportTier === "maintenance-limited" || gpuSupportTier === "experimental";
   const apiConnected = health !== null;
   const gpuReady = health?.gpu?.ready === true;
   const gpuHasWarnings = gpuWarnings.length > 0;
-  const processorReady = health?.status === "ok" && gpuReady && !gpuHasWarnings;
+  const processorReady =
+    health?.status === "ok" && gpuReady && !gpuHasWarnings && !gpuSupportHasRestrictions;
   const processorDegraded = apiConnected && !processorReady;
   const healthStateClass = processorReady ? "online" : processorDegraded ? "degraded" : "offline";
   const healthLabel = !apiConnected
     ? "Chưa kết nối API"
     : processorReady
       ? "Máy xử lý sẵn sàng"
-      : gpuReady && gpuHasWarnings
+      : gpuReady && (gpuHasWarnings || gpuSupportHasRestrictions)
         ? "Máy xử lý có cảnh báo"
       : gpuReady
         ? "Máy xử lý cần cấu hình"
@@ -1498,7 +1505,7 @@ export default function Home() {
             thuyết minh hoàn chỉnh — không gửi nội dung lên dịch vụ AI.
           </p>
         </div>
-        <div className={`machine-card ${gpuReady && !gpuHasWarnings ? "ready" : "degraded"}`} aria-label="Trạng thái máy xử lý">
+        <div className={`machine-card ${processorReady ? "ready" : "degraded"}`} aria-label="Trạng thái máy xử lý">
           <span className="machine-label">MÁY XỬ LÝ</span>
           <strong>{gpuHeading}</strong>
           <div className="machine-meta">
@@ -1525,7 +1532,11 @@ export default function Home() {
           )}
           <div className="machine-flags">
             <span className={gpuReady ? "ok" : "warn"}>GPU {gpuReady ? "sẵn sàng" : "chưa sẵn sàng"}</span>
-            {gpuReady && <span className={gpuHasWarnings ? "warn" : "ok"}>Mức hỗ trợ: {gpuSupportTier}</span>}
+            {gpuReady && (
+              <span className={gpuSupportTier === "supported" ? "ok" : "warn"}>
+                Mức hỗ trợ: {gpuSupportTier ? gpuSupportTierLabel[gpuSupportTier] : "Không xác định"}
+              </span>
+            )}
             <span className={health?.database?.status === "ok" ? "ok" : "warn"}>SQLite {health?.database?.journal_mode ?? "?"}</span>
             <span className={health?.acquisition_configured ? "ok" : "warn"}>Nguồn {health?.acquisition_configured ? "đã nối" : "chưa nối"}</span>
             <span className={capabilities?.offline_inference ? "ok" : "warn"}>AI offline</span>
@@ -1686,8 +1697,9 @@ export default function Home() {
                 </label>
               </div>
               <p className="helper-copy">
-                Luồng hình chính của MP4/MKV phải là H.264/AVC. Ảnh bìa nhúng và
-                thumbnail được tự động bỏ qua; HEVC, AV1, VP9, VP8 và FFV1 sẽ bị từ chối.
+                Với MP4/MKV, H.264/AVC được giữ nguyên không mã hóa lại; HEVC SDR được tự động
+                chuyển mã sang H.264/AVC. HEVC HDR10, HLG hoặc Dolby Vision chưa được hỗ trợ;
+                AV1, VP9, VP8 và FFV1 bị từ chối. Ảnh bìa nhúng và thumbnail được tự động bỏ qua.
               </p>
               <div className="upload-file-summary">
                 <span>

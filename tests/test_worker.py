@@ -157,6 +157,101 @@ async def test_worker_rechecks_model_vram_before_loading_the_model(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "catalog_failure",
+    [False, True],
+    ids=["vram-guard", "catalog-guard"],
+)
+async def test_worker_preserves_cancellation_that_races_model_guard_failure(
+    tmp_path,
+    monkeypatch,
+    catalog_failure: bool,
+) -> None:
+    store = StateStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(
+        "release-1",
+        {
+            "rights_confirmed": True,
+            "models": {"asr": "asr-too-large"},
+        },
+        job_id=f"job-race-{catalog_failure}",
+    )
+    store.update_status(job.id, JobStatus.DOWNLOADING)
+    store.update_status(
+        job.id,
+        JobStatus.READY_OFFLINE,
+        stage=JobStage.SUBTITLE,
+        details={"transcript_source": "asr"},
+    )
+    lock_path = tmp_path / "models.lock.json"
+    if catalog_failure:
+        lock_path.write_text("{not-json", encoding="utf-8")
+    else:
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "models": [
+                        {
+                            "id": "asr-too-large",
+                            "stage": "asr",
+                            "backend": "test",
+                            "license": "MIT",
+                            "minimum_vram_mib": 8192,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+    settings = Settings(
+        database_path=tmp_path / "unused.sqlite3",
+        models_lock_path=lock_path,
+        models_dir=tmp_path / "models",
+        incoming_dir=tmp_path / "incoming",
+        jobs_dir=tmp_path / "jobs",
+        output_dir=tmp_path / "output",
+    )
+    original_update_status = store.update_status
+    race_won = False
+
+    def update_status_with_cancel(job_id, status, **kwargs):
+        nonlocal race_won
+        if status is JobStatus.FAILED and not race_won:
+            race_won = True
+            cancelling = store.request_cancel(job_id)
+            original_update_status(
+                job_id,
+                JobStatus.CANCELLING,
+                expected_status=JobStatus.CANCELLING,
+                details={**cancelling.details, "offline_cancel_pending": True},
+                cancel_requested=True,
+            )
+        return original_update_status(job_id, status, **kwargs)
+
+    monkeypatch.setattr(store, "update_status", update_status_with_cancel)
+
+    class ForbiddenStage:
+        async def run(self, _job_id: str):
+            raise AssertionError("A cancellation race must prevent model loading")
+
+    worked = await process_next_transcript_job(
+        store,
+        ForbiddenStage(),  # type: ignore[arg-type]
+        shutdown=threading.Event(),
+        settings=settings,
+        gpu_report=_ready_gpu_report(vram_mib=6144),
+    )
+
+    cancelling = store.get_job(job.id)
+    assert worked is True
+    assert race_won is True
+    assert cancelling.status is JobStatus.CANCELLING
+    assert cancelling.cancel_requested is True
+    assert cancelling.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_worker_finalizes_offline_cancel_only_after_stage_returns(tmp_path) -> None:
     store = StateStore(tmp_path / "jobs.sqlite3")
     job_id = _ready_offline(store)

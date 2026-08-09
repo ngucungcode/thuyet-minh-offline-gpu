@@ -57,7 +57,7 @@ from .domain import (
 )
 from .media_probe import FfprobeMediaProbe, MediaProbe, MediaProbeError
 from .transcript import TranscriptError, parse_subtitle_file
-from .gpu import inspect_gpu, read_gpu_report
+from .gpu import NvidiaGpu, gpu_support_tier, inspect_gpu, read_gpu_report
 from .opensubtitles import (
     DEFAULT_OPENSUBTITLES_API_ROOT,
     normalize_opensubtitles_api_root,
@@ -175,6 +175,59 @@ class CoordinatorPort(Protocol):
 
 _LOGGER = logging.getLogger(__name__)
 _WEB_STATIC_ROOT = Path(__file__).resolve().with_name("web_static")
+
+
+def _with_gpu_support_tier(report: dict[str, Any]) -> dict[str, Any]:
+    """Add the selected logical GPU's release support tier to health data."""
+
+    payload = dict(report)
+    payload["support_tier"] = None
+    if payload.get("ready") is not True:
+        return payload
+    raw_gpus = payload.get("gpus")
+    if not isinstance(raw_gpus, list) or not raw_gpus:
+        return payload
+
+    selected_uuid = payload.get("selected_gpu_uuid")
+    raw_selected = next(
+        (
+            item
+            for item in raw_gpus
+            if isinstance(item, dict)
+            and isinstance(selected_uuid, str)
+            and item.get("uuid") == selected_uuid
+        ),
+        raw_gpus[0],
+    )
+    if not isinstance(raw_selected, dict):
+        return payload
+
+    required_text = (
+        raw_selected.get("uuid"),
+        raw_selected.get("name"),
+        raw_selected.get("driver_version"),
+        raw_selected.get("compute_capability"),
+    )
+    memory_total_mib = raw_selected.get("memory_total_mib")
+    if (
+        not all(isinstance(value, str) and value for value in required_text)
+        or not isinstance(memory_total_mib, int)
+        or isinstance(memory_total_mib, bool)
+    ):
+        return payload
+
+    try:
+        selected_gpu = NvidiaGpu(
+            uuid=raw_selected["uuid"],
+            name=raw_selected["name"],
+            driver_version=raw_selected["driver_version"],
+            memory_total_mib=memory_total_mib,
+            compute_capability=raw_selected["compute_capability"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return payload
+    payload["support_tier"] = gpu_support_tier(selected_gpu)
+    return payload
 
 
 async def _monitor_acquisition_jobs(
@@ -1697,9 +1750,11 @@ def create_app(
             catalog_status = "missing_or_invalid"
             model_count = 0
 
-        gpu_report = read_gpu_report(
-            configured_settings.gpu_report_path,
-            max_age_seconds=configured_settings.gpu_report_max_age_seconds,
+        gpu_report = _with_gpu_support_tier(
+            read_gpu_report(
+                configured_settings.gpu_report_path,
+                max_age_seconds=configured_settings.gpu_report_max_age_seconds,
+            )
         )
 
         healthy = database_status == "ok"

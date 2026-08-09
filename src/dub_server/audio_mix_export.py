@@ -20,6 +20,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from .media_probe import is_hdr_video_stream
+
 
 class MediaExportErrorCode(StrEnum):
     SOURCE_VIDEO_MISSING = "source_video_missing"
@@ -482,7 +484,7 @@ class FfmpegAudioMixExporter:
                 "H.264/AVC hoặc HEVC/H.265",
                 retryable=False,
             )
-        if codec == "hevc" and _is_hdr_video_stream(video):
+        if codec == "hevc" and is_hdr_video_stream(video):
             raise MediaExportError(
                 MediaExportErrorCode.SOURCE_VIDEO_HDR_UNSUPPORTED,
                 "Luồng hình HEVC dùng HDR/HLG/Dolby Vision; bản hiện tại chỉ "
@@ -546,8 +548,12 @@ class FfmpegAudioMixExporter:
                 "-vsync",
                 "0",
             )
-        else:  # Defensive: source probing owns the public typed error.
-            raise ValueError("Unsupported source video codec")
+        else:  # Defensive: source probing owns the normal public typed error.
+            raise MediaExportError(
+                MediaExportErrorCode.SOURCE_VIDEO_CODEC_UNSUPPORTED,
+                "Codec luồng hình nguồn không được hỗ trợ",
+                retryable=False,
+            )
         return (
             self._ffmpeg,
             "-nostdin",
@@ -779,22 +785,6 @@ def _is_visual_attachment(stream: dict[str, object]) -> bool:
     )
 
 
-def _is_hdr_video_stream(stream: dict[str, object]) -> bool:
-    transfer = str(stream.get("color_transfer") or "").strip().lower()
-    if transfer in {"smpte2084", "arib-std-b67"}:
-        return True
-    side_data = stream.get("side_data_list")
-    if not isinstance(side_data, list):
-        return False
-    for item in side_data:
-        if not isinstance(item, dict):
-            continue
-        label = str(item.get("side_data_type") or "").lower()
-        if "dovi" in label or "dolby vision" in label:
-            return True
-    return False
-
-
 def _emit_progress(
     callback: ProgressCallback | None,
     processed_us: int,
@@ -857,9 +847,9 @@ def _stream_duration_us(stream: dict[str, object]) -> int | None:
         (seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP)
     )
     # Matroska's stream DURATION tag is the absolute end timestamp when the
-    # stream starts after zero. HEVC is filtered through PTS-STARTPTS, so the
-    # replacement audio must use the corresponding span rather than that end
-    # timestamp; otherwise the reset video ends before the padded audio.
+    # stream starts after zero. FFmpeg normalizes the selected output video's
+    # timestamp origin for both stream copy and filtered transcode, so the
+    # replacement audio must use the corresponding span rather than that end.
     start_us = _time_us(stream.get("start_time"), positive=False)
     duration_us = end_us - start_us if start_us is not None else end_us
     return duration_us if duration_us > 0 else None

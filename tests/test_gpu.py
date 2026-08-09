@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from dub_server.gpu import (
     ComponentStatus,
     CudaDeviceIdentity,
     GpuPreflightError,
+    _normalize_nvidia_gpu_uuid,
     inspect_gpu,
     read_gpu_report,
     write_gpu_report,
@@ -32,6 +34,29 @@ def successful_torch() -> ComponentStatus:
 
 def successful_ctranslate2() -> ComponentStatus:
     return ComponentStatus(True, "4.8.1", compute_types=("float16", "int8_float16"))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+        (
+            "gpu-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+        (
+            uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+    ],
+)
+def test_normalize_nvidia_gpu_uuid(value: object | None, expected: str | None) -> None:
+    assert _normalize_nvidia_gpu_uuid(value) == expected
 
 
 def test_gpu_preflight_accepts_eligible_gpu() -> None:
@@ -183,16 +208,17 @@ def test_gpu_preflight_uses_supported_logical_gpu_zero_despite_other_gpus() -> N
 
 
 def test_gpu_preflight_uses_pytorch_identity_after_cuda_device_remap() -> None:
+    selected_uuid = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
     rows = (
         "GPU-physical-0, NVIDIA Large GPU, 570.26, 24576, 8.6\n"
-        "GPU-physical-1, NVIDIA Small GPU, 570.26, 7168, 8.0\n"
+        f"GPU-{selected_uuid}, NVIDIA Small GPU, 570.26, 7168, 8.0\n"
     )
     selected_by_torch = ComponentStatus(
         True,
         "2.8.0",
         "CUDA 12.8; NVIDIA Small GPU; matmul checksum=256",
         device=CudaDeviceIdentity(
-            uuid="GPU-physical-1",
+            uuid=str(selected_uuid),  # PyTorch UUID text can omit the GPU- prefix.
             name="NVIDIA Small GPU",
             memory_total_mib=7000,
             compute_capability="8.0",
@@ -206,8 +232,8 @@ def test_gpu_preflight_uses_pytorch_identity_after_cuda_device_remap() -> None:
     )
 
     assert report.ready is True
-    assert report.selected_gpu_uuid == "GPU-physical-1"
-    assert report.gpus[0].uuid == "GPU-physical-1"
+    assert report.selected_gpu_uuid == f"GPU-{selected_uuid}"
+    assert report.gpus[0].uuid == f"GPU-{selected_uuid}"
     assert report.gpus[0].memory_total_mib == 7000
 
 

@@ -73,8 +73,10 @@ for architecture in "${requested_architectures[@]}"; do
   fi
 done
 
-if [[ -x "${LLAMA_TARGET}/llama-server" ]]; then
-  if "${LLAMA_TARGET}/llama-server" --version 2>&1 | grep -Fq "${LLAMA_COMMIT:0:7}" \
+if [[ -e "${LLAMA_TARGET}" || -L "${LLAMA_TARGET}" ]]; then
+  if [[ -d "${LLAMA_TARGET}" && ! -L "${LLAMA_TARGET}" \
+      && -x "${LLAMA_TARGET}/llama-server" ]] \
+      && "${LLAMA_TARGET}/llama-server" --version 2>&1 | grep -Fq "${LLAMA_COMMIT:0:7}" \
       && jq -e \
         --arg commit "${LLAMA_COMMIT}" \
         --arg cuda_version "${LLAMA_CUDA_VERSION}" \
@@ -82,7 +84,7 @@ if [[ -x "${LLAMA_TARGET}/llama-server" ]]; then
         '.commit == $commit and .cuda_version == $cuda_version and
           .cuda_architectures == $cuda_architectures' \
         "${LLAMA_TARGET}/build-receipt.json" >/dev/null 2>&1; then
-    ln -sfn "${LLAMA_TARGET}" "${LLAMA_LINK}"
+    ln -sfnT "${LLAMA_TARGET}" "${LLAMA_LINK}"
     exit 0
   fi
   echo "Thu muc llama.cpp dich da ton tai nhung receipt khong khop: ${LLAMA_TARGET}" >&2
@@ -138,5 +140,5 @@ jq -n \
   >"${STAGE_DIR}/build-receipt.json"
 chown -R root:root "${STAGE_DIR}"
 chmod -R a-w "${STAGE_DIR}"
-mv "${STAGE_DIR}" "${LLAMA_TARGET}"
-ln -sfn "${LLAMA_TARGET}" "${LLAMA_LINK}"
+mv -T -- "${STAGE_DIR}" "${LLAMA_TARGET}"
+ln -sfnT "${LLAMA_TARGET}" "${LLAMA_LINK}"

@@ -299,8 +299,9 @@ PY
     native_components_manifest="$(python3 - native/components.lock.json <<'PY'
 import json
 from pathlib import Path
+import sys
 
-with Path("native/components.lock.json").open(encoding="utf-8") as handle:
+with Path(sys.argv[1]).open(encoding="utf-8") as handle:
     document = json.load(handle)
 components = document.get("components")
 if not isinstance(components, dict):

@@ -347,6 +347,8 @@ def _write_ready_gpu_report(
     *,
     memory_total_mib: int,
     heartbeat_at: datetime,
+    name: str = "Test GPU",
+    compute_capability: str = "8.6",
 ) -> None:
     settings.gpu_report_path.parent.mkdir(parents=True, exist_ok=True)
     settings.gpu_report_path.write_text(
@@ -358,10 +360,10 @@ def _write_ready_gpu_report(
                 "gpus": [
                     {
                         "uuid": "GPU-logical-0",
-                        "name": "Test GPU",
+                        "name": name,
                         "driver_version": "570.26",
                         "memory_total_mib": memory_total_mib,
-                        "compute_capability": "8.6",
+                        "compute_capability": compute_capability,
                     }
                 ],
                 "errors": [],
@@ -405,6 +407,7 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     assert health.status_code == 200
     assert health.json()["status"] == "degraded"
     assert health.json()["database"]["journal_mode"] == "wal"
+    assert health.json()["gpu"]["support_tier"] is None
     assert capabilities.json()["offline_inference"] is True
     assert capabilities.json()["drm_supported"] is False
     assert capabilities.json()["local_upload"] == {
@@ -418,6 +421,38 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     }
     assert models.json()["models"][0]["id"] == "asr-small"
     assert models.json()["models"][0]["valid"] is False
+
+
+@pytest.mark.parametrize(
+    ("name", "compute_capability", "expected_tier"),
+    [
+        ("NVIDIA RTX 3090", "8.6", "supported"),
+        ("Tesla V100-SXM2-32GB", "7.0", "maintenance-limited"),
+        ("NVIDIA CMP 170HX", "8.0", "experimental"),
+    ],
+)
+def test_health_exposes_selected_gpu_support_tier(
+    tmp_path: Path,
+    monkeypatch,
+    name: str,
+    compute_capability: str,
+    expected_tier: str,
+) -> None:
+    settings = _settings(tmp_path)
+    _write_ready_gpu_report(
+        settings,
+        memory_total_mib=24 * 1024,
+        heartbeat_at=datetime.now(UTC),
+        name=name,
+        compute_capability=compute_capability,
+    )
+    client, _, _ = _client(tmp_path, monkeypatch, settings=settings)
+
+    with client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["gpu"]["support_tier"] == expected_tier
 
 
 def _upload_request(

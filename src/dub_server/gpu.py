@@ -121,6 +121,19 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(numbers)
 
 
+def _normalize_nvidia_gpu_uuid(value: object | None) -> str | None:
+    """Return CUDA UUID values in the canonical nvidia-smi ``GPU-...`` form."""
+
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    if normalized.casefold().startswith("gpu-"):
+        return f"GPU-{normalized[4:]}"
+    return f"GPU-{normalized}"
+
+
 def _parse_nvidia_smi(output: str) -> tuple[NvidiaGpu, ...]:
     parsed: list[NvidiaGpu] = []
     for row in csv.reader(StringIO(output)):
@@ -163,7 +176,7 @@ def probe_torch_cuda() -> ComponentStatus:
             name=str(properties.name),
             memory_total_mib=int(properties.total_memory) // (1024 * 1024),
             compute_capability=f"{major}.{minor}",
-            uuid=(str(value).strip() if (value := getattr(properties, "uuid", None)) else None),
+            uuid=_normalize_nvidia_gpu_uuid(getattr(properties, "uuid", None)),
         )
         return ComponentStatus(
             True,
@@ -227,12 +240,13 @@ def inspect_gpu(
     elif torch_status.device is not None and gpus:
         identity = torch_status.device
         selected_index: int | None = None
-        if identity.uuid:
+        identity_uuid = _normalize_nvidia_gpu_uuid(identity.uuid)
+        if identity_uuid:
             selected_index = next(
                 (
                     index
                     for index, gpu in enumerate(gpus)
-                    if gpu.uuid.casefold() == identity.uuid.casefold()
+                    if gpu.uuid.casefold() == identity_uuid.casefold()
                 ),
                 None,
             )

@@ -198,7 +198,7 @@ class FfprobeMediaProbe:
             require_h264_passthrough
             and allow_hevc_transcode
             and video_codec == "hevc"
-            and _is_hdr_video_stream(selected_video)
+            and is_hdr_video_stream(selected_video)
         ):
             raise MediaProbeError(
                 "unsupported_media",
@@ -312,7 +312,7 @@ def _is_visual_attachment(stream: dict[str, Any]) -> bool:
     )
 
 
-def _is_hdr_video_stream(stream: dict[str, Any]) -> bool:
+def is_hdr_video_stream(stream: dict[str, Any]) -> bool:
     transfer = str(stream.get("color_transfer") or "").strip().lower()
     if transfer in {"smpte2084", "arib-std-b67"}:
         return True
@@ -412,4 +412,9 @@ def _fps(stream: dict[str, Any]) -> float | None:
     return None
 
 
-__all__ = ["FfprobeMediaProbe", "MediaProbe", "MediaProbeError"]
+__all__ = [
+    "FfprobeMediaProbe",
+    "MediaProbe",
+    "MediaProbeError",
+    "is_hdr_video_stream",
+]
