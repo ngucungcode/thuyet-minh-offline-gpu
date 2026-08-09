@@ -380,8 +380,11 @@ class TigerDnrSubprocessRunner:
             raise ValueError("Thời gian giới hạn phải lớn hơn 0")
         if poll_interval_seconds <= 0 or stop_grace_seconds < 0:
             raise ValueError("Cấu hình theo dõi tiến trình TIGER-DnR không hợp lệ")
-        if cuda_device < 0:
-            raise ValueError("Chỉ số GPU không được âm")
+        if cuda_device != 0:
+            raise ValueError(
+                "TIGER-DnR chỉ chấp nhận GPU logical 0; "
+                "hãy chọn GPU vật lý ở installer/container runtime"
+            )
         local_source_dir: Path | None = None
         if source_dir is not None:
             local_source_dir = Path(source_dir).resolve(strict=False)
@@ -446,7 +449,12 @@ class TigerDnrSubprocessRunner:
         )
         environment = os.environ.copy()
         environment.update(_OFFLINE_ENVIRONMENT)
-        environment["CUDA_VISIBLE_DEVICES"] = str(self._cuda_device)
+        # Keep the GPU visibility contract established by the parent worker.
+        # Native installs pin a physical GPU by UUID, while the NVIDIA
+        # container runtime exposes the selected physical GPU as logical 0.
+        # Replacing an inherited UUID with "0" here would select host GPU 0
+        # when this short-lived subprocess starts outside a container.
+        environment.setdefault("CUDA_VISIBLE_DEVICES", str(self._cuda_device))
         environment["TIGER_DNR_MODEL_PATH"] = os.fspath(self._model_path)
         if self._source_dir is not None:
             existing_python_path = environment.get("PYTHONPATH", "")

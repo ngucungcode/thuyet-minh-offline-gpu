@@ -22,7 +22,15 @@
       "repository": "https://github.com/ggml-org/llama.cpp.git",
       "license": "MIT",
       "cuda_version": "12.8",
-      "cuda_architectures": "86",
+      "cuda_supported_architectures": [
+        70,
+        75,
+        80,
+        86,
+        89,
+        90
+      ],
+      "cuda_default_build_architecture": 86,
       "cmake_flags": [
         "GGML_CUDA=ON",
         "LLAMA_CURL=OFF",

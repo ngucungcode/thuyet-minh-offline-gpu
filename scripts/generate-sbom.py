@@ -35,12 +35,19 @@ def main() -> int:
         type=Path,
         default=PROJECT_ROOT / "web" / "package-lock.json",
     )
+    parser.add_argument(
+        "--python-lock",
+        type=Path,
+        default=None,
+        help="Dùng manifest runtime ghim thay cho Python environment hiện tại",
+    )
     args = parser.parse_args()
     document = write_cyclonedx_sbom(
         args.output,
         args.models_lock,
         args.native_lock,
         web_lock_path=args.web_lock,
+        python_lock_path=args.python_lock,
     )
     print(
         json.dumps(

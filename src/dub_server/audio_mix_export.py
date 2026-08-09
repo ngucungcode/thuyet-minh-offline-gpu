@@ -23,6 +23,8 @@ from typing import Protocol
 
 class MediaExportErrorCode(StrEnum):
     SOURCE_VIDEO_MISSING = "source_video_missing"
+    SOURCE_VIDEO_CODEC_UNSUPPORTED = "source_video_codec_unsupported"
+    SOURCE_VIDEO_HDR_UNSUPPORTED = "source_video_hdr_unsupported"
     ACCOMPANIMENT_MISSING = "accompaniment_missing"
     NARRATION_MISSING = "narration_missing"
     EXPORT_CANCELLED = "media_export_cancelled"
@@ -31,6 +33,7 @@ class MediaExportErrorCode(StrEnum):
     FFPROBE_UNAVAILABLE = "ffprobe_unavailable"
     INVALID_OUTPUT = "invalid_media_output"
     TRACK_LAYOUT_INVALID = "output_track_layout_invalid"
+    VIDEO_CODEC_INVALID = "output_video_codec_invalid"
     AUDIO_CODEC_INVALID = "output_audio_codec_invalid"
     DURATION_MISMATCH = "output_duration_mismatch"
     SYNC_MISMATCH = "output_sync_mismatch"
@@ -100,6 +103,12 @@ class ExportedMedia:
     audio_start_us: int
     audio_codec: str
     size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceVideoInfo:
+    duration_us: int
+    codec: str
 
 
 class CancellationToken(Protocol):
@@ -307,10 +316,11 @@ class FfmpegAudioMixExporter:
 
         try:
             self._check_cancelled(cancellation)
-            visual_duration_us = await self._source_video_duration(
+            source_video_info = await self._source_video_info(
                 source,
                 cancellation=cancellation,
             )
+            visual_duration_us = source_video_info.duration_us
             self._check_cancelled(cancellation)
             command = self._ffmpeg_command(
                 source,
@@ -318,6 +328,7 @@ class FfmpegAudioMixExporter:
                 narration,
                 temporary,
                 visual_duration_us,
+                source_video_info.codec,
             )
             result = await self._runner(
                 command,
@@ -373,13 +384,13 @@ class FfmpegAudioMixExporter:
                 retryable=True,
             ) from error
 
-    async def _source_video_duration(
+    async def _source_video_info(
         self,
         source: Path,
         *,
         cancellation: Cancellation | None,
-    ) -> int:
-        """Resolve the visual span before creating a finite replacement track.
+    ) -> _SourceVideoInfo:
+        """Resolve the visual span and codec before creating the output.
 
         FFmpeg 4.4 cannot always stop filtered audio at the mapped video EOF
         when an unselected source track extends the container. Prefer the first
@@ -397,7 +408,8 @@ class FfmpegAudioMixExporter:
             "-select_streams",
             "V:0",
             "-show_entries",
-            "stream=duration,duration_ts,time_base:stream_tags=DURATION",
+            "stream=codec_name,color_transfer,start_time,duration,duration_ts,time_base:"
+            "stream_tags=DURATION:stream_side_data_list=side_data_type",
             "-of",
             "json",
             os.fspath(source),
@@ -461,7 +473,23 @@ class FfmpegAudioMixExporter:
                 "Không xác định được thời lượng luồng hình nguồn",
                 retryable=True,
             )
-        return duration_us
+        codec = str(video.get("codec_name") or "").strip().lower()
+        if codec not in {"h264", "hevc"}:
+            codec_label = codec.upper() if codec else "không xác định"
+            raise MediaExportError(
+                MediaExportErrorCode.SOURCE_VIDEO_CODEC_UNSUPPORTED,
+                f"Luồng hình chính dùng codec {codec_label}; chỉ hỗ trợ "
+                "H.264/AVC hoặc HEVC/H.265",
+                retryable=False,
+            )
+        if codec == "hevc" and _is_hdr_video_stream(video):
+            raise MediaExportError(
+                MediaExportErrorCode.SOURCE_VIDEO_HDR_UNSUPPORTED,
+                "Luồng hình HEVC dùng HDR/HLG/Dolby Vision; bản hiện tại chỉ "
+                "chuyển mã HEVC SDR để tránh xuất sai màu",
+                retryable=False,
+            )
+        return _SourceVideoInfo(duration_us=duration_us, codec=codec)
 
     def _ffmpeg_command(
         self,
@@ -470,6 +498,7 @@ class FfmpegAudioMixExporter:
         narration: Path,
         temporary: Path,
         visual_duration_us: int,
+        source_video_codec: str,
     ) -> tuple[str, ...]:
         duration = _seconds_text(visual_duration_us)
         settings = self._settings
@@ -494,6 +523,31 @@ class FfmpegAudioMixExporter:
             f"alimiter=limit={limiter:.6f}:attack=5:release=50,"
             f"apad,atrim=duration={duration}[mixed]"
         )
+        if source_video_codec == "h264":
+            video_options = ("-c:v", "copy")
+        elif source_video_codec == "hevc":
+            # Use the software encoder so this path also works on cards without
+            # a usable NVENC block (for example V100 and CMP 170HX).
+            # Reset only the timestamp origin; relative VFR frame intervals are
+            # retained by passthrough sync mode.
+            video_options = (
+                "-filter:v:0",
+                "setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-tag:v",
+                "avc1",
+                "-vsync",
+                "0",
+            )
+        else:  # Defensive: source probing owns the public typed error.
+            raise ValueError("Unsupported source video codec")
         return (
             self._ffmpeg,
             "-nostdin",
@@ -521,8 +575,7 @@ class FfmpegAudioMixExporter:
             "-1",
             "-sn",
             "-dn",
-            "-c:v",
-            "copy",
+            *video_options,
             "-disposition:v:0",
             "default",
             "-c:a",
@@ -636,6 +689,13 @@ class FfmpegAudioMixExporter:
                 retryable=False,
             )
         audio_codec = str(audios[0].get("codec_name", "")).lower()
+        video_codec = str(videos[0].get("codec_name", "")).lower()
+        if video_codec != "h264":
+            raise MediaExportError(
+                MediaExportErrorCode.VIDEO_CODEC_INVALID,
+                "Luồng hình đầu ra không phải H.264/AVC",
+                retryable=False,
+            )
         if audio_codec != "aac":
             raise MediaExportError(
                 MediaExportErrorCode.AUDIO_CODEC_INVALID,
@@ -719,6 +779,22 @@ def _is_visual_attachment(stream: dict[str, object]) -> bool:
     )
 
 
+def _is_hdr_video_stream(stream: dict[str, object]) -> bool:
+    transfer = str(stream.get("color_transfer") or "").strip().lower()
+    if transfer in {"smpte2084", "arib-std-b67"}:
+        return True
+    side_data = stream.get("side_data_list")
+    if not isinstance(side_data, list):
+        return False
+    for item in side_data:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("side_data_type") or "").lower()
+        if "dovi" in label or "dolby vision" in label:
+            return True
+    return False
+
+
 def _emit_progress(
     callback: ProgressCallback | None,
     processed_us: int,
@@ -777,7 +853,16 @@ def _stream_duration_us(stream: dict[str, object]) -> int | None:
         return None
     if not seconds.is_finite() or seconds <= 0:
         return None
-    return int((seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP))
+    end_us = int(
+        (seconds * 1_000_000).to_integral_value(rounding=ROUND_HALF_UP)
+    )
+    # Matroska's stream DURATION tag is the absolute end timestamp when the
+    # stream starts after zero. HEVC is filtered through PTS-STARTPTS, so the
+    # replacement audio must use the corresponding span rather than that end
+    # timestamp; otherwise the reset video ends before the padded audio.
+    start_us = _time_us(stream.get("start_time"), positive=False)
+    duration_us = end_us - start_us if start_us is not None else end_us
+    return duration_us if duration_us > 0 else None
 
 
 def _as_text(value: str | bytes | None) -> str:

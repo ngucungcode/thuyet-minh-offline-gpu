@@ -1,3 +1,3 @@
 """Local NVIDIA GPU video dubbing service."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"

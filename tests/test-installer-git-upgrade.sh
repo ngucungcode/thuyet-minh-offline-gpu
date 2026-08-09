@@ -152,12 +152,45 @@ prepare_installed_release() {
     "${version}" "${commit}" >"${root}/var/install-state.json"
 }
 
+# A runtime built by releases through v0.3.2 is sm_86. Moving the deployment
+# to a different GPU architecture must fail before source or stack mutation.
+gpu_swap_root="${TEST_ROOT}/gpu-swap-current"
+gpu_swap_stage="${TEST_ROOT}/gpu-swap-stage"
+create_git_project "${gpu_swap_root}" 0.3.2 gpu-old
+create_git_project "${gpu_swap_stage}" 0.3.3 gpu-new
+prepare_installed_release "${gpu_swap_root}" 0.3.2 gpu-model
+if migrate_git_release_upgrade \
+  "${gpu_swap_root}" "${gpu_swap_stage}" "${gpu_swap_root}/var" false \
+  0.3.3 "0.3.2" sm_80; then
+  fail "Upgrade tái sử dụng nhầm runtime sm_86 trên GPU sm_80"
+fi
+[[ "$(<"${gpu_swap_root}/SOURCE_MARKER")" == gpu-old ]] \
+  || fail "GPU architecture mismatch đã đổi source hiện tại"
+assert_absent "${gpu_swap_root}.migration-state.json"
+
 # Version-only and application-source changes are compatible. The source swap
 # must preserve the persistent runtime and support a complete rollback.
 upgrade_root="${TEST_ROOT}/upgrade-current"
 upgrade_stage="${TEST_ROOT}/upgrade-stage"
-create_git_project "${upgrade_root}" 0.3.1 old
-create_git_project "${upgrade_stage}" 0.3.2 new
+create_git_project "${upgrade_root}" 0.3.2 old
+create_git_project "${upgrade_stage}" 0.3.3 new
+# v0.3.2 used one ambiguous sm_86 field. The target release separates the
+# supported matrix from the default/actual native build without changing the
+# already-installed sm_86 runtime.
+printf '%s\n' \
+  '{"schema_version":1,"components":{' \
+  '"llama_cpp":{"release":"fixture","cuda_architectures":"86"},' \
+  '"prowlarr":{},"qbittorrent_nox":{}' \
+  '}}' >"${upgrade_root}/native/components.lock.json"
+printf '%s\n' \
+  '{"schema_version":1,"components":{' \
+  '"llama_cpp":{"release":"fixture","cuda_supported_architectures":[70,75,80,86,89,90],"cuda_default_build_architecture":86},' \
+  '"prowlarr":{},"qbittorrent_nox":{}' \
+  '}}' >"${upgrade_stage}/native/components.lock.json"
+git -C "${upgrade_root}" add native/components.lock.json
+git -C "${upgrade_root}" commit --amend --no-edit -q
+git -C "${upgrade_stage}" add native/components.lock.json
+git -C "${upgrade_stage}" commit --amend --no-edit -q
 # The target release changes application behavior around the persistent
 # runtime without changing its locked dependencies.
 # This must not force an in-place venv rebuild, but the full fingerprint still
@@ -166,10 +199,12 @@ printf '\n# provider stack control changed in the target release\n' \
   >>"${upgrade_stage}/scripts/native-stack.sh"
 printf '\n# cold-install bootstrap procedure changed in the target release\n' \
   >>"${upgrade_stage}/scripts/native-bootstrap.sh"
+printf '\n# architecture-aware cold-install build procedure changed\n' \
+  >>"${upgrade_stage}/scripts/install-llama-cpp.sh"
 git -C "${upgrade_stage}" add \
-  scripts/native-bootstrap.sh scripts/native-stack.sh
+  scripts/install-llama-cpp.sh scripts/native-bootstrap.sh scripts/native-stack.sh
 git -C "${upgrade_stage}" commit --amend --no-edit -q
-prepare_installed_release "${upgrade_root}" 0.3.1 model-bytes
+prepare_installed_release "${upgrade_root}" 0.3.2 model-bytes
 job_checkpoint="${upgrade_root}/var/data/jobs/job-upgrade/checkpoint.json"
 mkdir -p "$(dirname -- "${job_checkpoint}")"
 printf '%s\n' \
@@ -191,7 +226,7 @@ new_compatibility_fingerprint="$(
 [[ "${old_runtime_fingerprint}" != "${new_runtime_fingerprint}" ]] \
   || fail "Full runtime fingerprint không phản ánh source release mới"
 [[ "${old_compatibility_fingerprint}" == "${new_compatibility_fingerprint}" ]] \
-  || fail "Thay đổi bootstrap/control plane bị coi nhầm là runtime không tương thích"
+  || fail "Metadata CUDA/bootstrap bị coi nhầm là runtime không tương thích"
 export MIGRATION_TEST_STACK_STATE="${TEST_ROOT}/upgrade-stack.running"
 export MIGRATION_TEST_EVENTS="${TEST_ROOT}/upgrade-stack.events"
 export MIGRATION_EXPECTED_JOURNAL="${upgrade_root}.migration-state.json"
@@ -199,7 +234,7 @@ touch "${MIGRATION_TEST_STACK_STATE}"
 
 migrate_git_release_upgrade \
   "${upgrade_root}" "${upgrade_stage}" "${upgrade_root}/var" false \
-  0.3.2 "0.3.1"
+  0.3.3 "0.3.2"
 
 [[ "$(<"${upgrade_root}/SOURCE_MARKER")" == new ]] \
   || fail "Source release mới chưa active"

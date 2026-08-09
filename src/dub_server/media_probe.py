@@ -36,6 +36,7 @@ class MediaProbe(Protocol):
         media_kind: MediaKind = MediaKind.MOVIE,
         year: int | None = None,
         require_h264_passthrough: bool = False,
+        allow_hevc_transcode: bool = False,
     ) -> MediaAsset: ...
 
 
@@ -112,6 +113,7 @@ class FfprobeMediaProbe:
         media_kind: MediaKind = MediaKind.MOVIE,
         year: int | None = None,
         require_h264_passthrough: bool = False,
+        allow_hevc_transcode: bool = False,
     ) -> MediaAsset:
         media_path = path.resolve(strict=False)
         if not media_path.is_file():
@@ -127,7 +129,7 @@ class FfprobeMediaProbe:
             "-protocol_whitelist",
             "file",
             "-show_entries",
-            "format=duration:format_tags=title:stream=index,codec_name,codec_type,start_time,duration,avg_frame_rate,r_frame_rate:stream_tags=language:stream_disposition=default,attached_pic,timed_thumbnails",
+            "format=duration:format_tags=title:stream=index,codec_name,codec_type,start_time,duration,avg_frame_rate,r_frame_rate,color_transfer:stream_tags=language:stream_disposition=default,attached_pic,timed_thumbnails:stream_side_data_list=side_data_type",
             "-of",
             "json",
             os.fspath(media_path),
@@ -192,12 +194,31 @@ class FfprobeMediaProbe:
             )
         selected_video = content_video_streams[0]
         video_codec = str(selected_video.get("codec_name") or "").strip().lower()
-        if require_h264_passthrough and video_codec != "h264":
-            codec_label = video_codec.upper() if video_codec else "không xác định"
+        if (
+            require_h264_passthrough
+            and allow_hevc_transcode
+            and video_codec == "hevc"
+            and _is_hdr_video_stream(selected_video)
+        ):
             raise MediaProbeError(
                 "unsupported_media",
-                f"Luồng hình chính dùng codec {codec_label}; cần H.264/AVC để xuất "
-                "MP4 không mã hóa lại",
+                "Luồng hình HEVC dùng HDR/HLG/Dolby Vision; bản hiện tại chỉ "
+                "chuyển mã HEVC SDR để tránh xuất sai màu",
+                retryable=False,
+            )
+        export_compatible = video_codec == "h264" or (
+            allow_hevc_transcode and video_codec == "hevc"
+        )
+        if require_h264_passthrough and not export_compatible:
+            codec_label = video_codec.upper() if video_codec else "không xác định"
+            requirement = (
+                "cần H.264/AVC hoặc HEVC/H.265 để xuất MP4"
+                if allow_hevc_transcode
+                else "cần H.264/AVC để xuất MP4 không mã hóa lại"
+            )
+            raise MediaProbeError(
+                "unsupported_media",
+                f"Luồng hình chính dùng codec {codec_label}; {requirement}",
                 retryable=False,
             )
         audio_streams = [
@@ -289,6 +310,22 @@ def _is_visual_attachment(stream: dict[str, Any]) -> bool:
         disposition.get(name) in {1, "1"}
         for name in ("attached_pic", "timed_thumbnails")
     )
+
+
+def _is_hdr_video_stream(stream: dict[str, Any]) -> bool:
+    transfer = str(stream.get("color_transfer") or "").strip().lower()
+    if transfer in {"smpte2084", "arib-std-b67"}:
+        return True
+    side_data = stream.get("side_data_list")
+    if not isinstance(side_data, list):
+        return False
+    for item in side_data:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("side_data_type") or "").lower()
+        if "dovi" in label or "dolby vision" in label:
+            return True
+    return False
 
 
 def _duration_us(value: object) -> int | None:

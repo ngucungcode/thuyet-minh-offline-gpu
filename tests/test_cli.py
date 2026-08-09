@@ -11,6 +11,7 @@ from click import unstyle
 from typer.testing import CliRunner
 
 import dub_server.cli as cli
+from dub_server.gpu import NvidiaGpu
 
 
 runner = CliRunner()
@@ -661,6 +662,97 @@ def test_model_profiles_are_complete(monkeypatch, tmp_path: Path) -> None:
         "maximum",
     ]
     assert all(item["download_bytes"] > 0 for item in payload["profiles"])
+    assert {
+        item["name"]: item["minimum_vram_mib"] for item in payload["profiles"]
+    } == {"minimal": 6144, "balanced": 8192, "maximum": 22528}
+
+
+def _gpu_report(*gpus: NvidiaGpu):
+    return type("GpuReport", (), {"gpus": gpus})()
+
+
+def _gpu(name: str, *, vram_mib: int, capability: str) -> NvidiaGpu:
+    return NvidiaGpu(
+        uuid=f"GPU-{name}",
+        name=name,
+        driver_version="570.26",
+        memory_total_mib=vram_mib,
+        compute_capability=capability,
+    )
+
+
+def test_model_recommendation_uses_logical_cuda_zero_not_largest_host_gpu(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "inspect_gpu",
+        lambda **_kwargs: _gpu_report(
+            _gpu("Tesla T4", vram_mib=16_384, capability="7.5"),
+            _gpu("NVIDIA A100", vram_mib=81_920, capability="8.0"),
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["models", "recommend"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["profile"] == "balanced"
+    assert payload["vram_mib"] == 16_384
+    assert payload["gpu"]["name"] == "Tesla T4"
+
+
+def test_cmp_170hx_is_never_recommended_above_minimal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "inspect_gpu",
+        lambda **_kwargs: _gpu_report(
+            _gpu("NVIDIA CMP 170HX", vram_mib=16_384, capability="8.0")
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["models", "recommend"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["profile"] == "minimal"
+    assert payload["support_tier"] == "experimental"
+
+
+def test_model_profile_install_rejects_vram_floor_before_download(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "inspect_gpu",
+        lambda **_kwargs: _gpu_report(
+            _gpu("Tesla T4", vram_mib=16_384, capability="7.5")
+        ),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["models", "install-profile", "maximum", "--yes"],
+    )
+
+    assert result.exit_code == 1
+    assert "cần ít nhất 22528 MiB VRAM" in result.stderr
+
+
+def test_cmp_170hx_cannot_install_balanced_profile(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "inspect_gpu",
+        lambda **_kwargs: _gpu_report(
+            _gpu("NVIDIA CMP 170HX", vram_mib=16_384, capability="8.0")
+        ),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["models", "install-profile", "balanced", "--yes"],
+    )
+
+    assert result.exit_code == 1
+    assert "chỉ được hỗ trợ thử nghiệm với profile minimal" in result.stderr
 
 
 def test_structured_validation_error_is_human_readable() -> None:

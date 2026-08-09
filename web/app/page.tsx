@@ -4,6 +4,14 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useSta
 
 type JsonObject = Record<string, unknown>;
 
+type GpuDevice = {
+  uuid?: string;
+  name?: string;
+  driver_version?: string;
+  memory_total_mib?: number;
+  compute_capability?: string;
+};
+
 type Health = {
   status: "ok" | "degraded" | "error";
   api_version?: string;
@@ -12,11 +20,14 @@ type Health = {
   acquisition_configured?: boolean;
   coordinator_configured?: boolean;
   gpu?: {
-    name?: string;
-    gpu_name?: string;
-    memory_total_mib?: number;
-    vram_mib?: number;
     ready?: boolean;
+    enforced?: boolean;
+    minimum_driver?: string;
+    minimum_compute_capability?: string;
+    minimum_vram_mib?: number;
+    gpus?: GpuDevice[];
+    errors?: string[];
+    warnings?: string[];
   };
 };
 
@@ -480,6 +491,35 @@ function formatBytes(value?: unknown) {
     unit += 1;
   }
   return `${size.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatGpuMemory(value: unknown) {
+  const memoryMib = nonNegativeNumber(value);
+  if (memoryMib === null) return "VRAM chưa rõ";
+  const memoryGib = memoryMib / 1024;
+  return `${memoryGib.toLocaleString("vi-VN", {
+    minimumFractionDigits: Number.isInteger(memoryGib) ? 0 : 1,
+    maximumFractionDigits: 1,
+  })} GiB VRAM`;
+}
+
+function gpuWarningMessage(value: string) {
+  const warning = value.trim();
+  if (warning.includes("maintenance-limited Volta sm_70")) {
+    return "Volta sm_70 đang ở mức hỗ trợ bảo trì giới hạn.";
+  }
+  if (warning.includes("experimental CMP 170HX support")) {
+    return "CMP 170HX đang ở mức hỗ trợ thử nghiệm; cần nghiệm thu trên card thật trước production.";
+  }
+  return warning
+    .replace(/^logical CUDA device 0:/, "GPU CUDA logical 0:")
+    .replace(/^non-selected NVIDIA device ([0-9]+):/, "GPU NVIDIA không được chọn $1:")
+    .replace(
+      /compute capability ([^ ]+) is not in the supported CUDA architecture matrix/g,
+      "compute capability $1 không thuộc ma trận kiến trúc CUDA được hỗ trợ",
+    )
+    .replace(/driver ([^ ]+) < ([^,]+)/g, "driver $1 thấp hơn $2")
+    .replace(/VRAM ([0-9]+ MiB) < ([0-9]+ MiB)/g, "VRAM $1 thấp hơn $2");
 }
 
 function formatByteRate(value: unknown) {
@@ -1383,9 +1423,37 @@ export default function Home() {
     }
   }
 
-  const gpuName = health?.gpu?.name ?? health?.gpu?.gpu_name ?? "GPU chưa kết nối";
-  const vram = health?.gpu?.memory_total_mib ?? health?.gpu?.vram_mib;
-  const online = health?.status === "ok" || health?.status === "degraded";
+  const gpuDevices = health?.gpu?.gpus ?? [];
+  const gpuWarnings = (health?.gpu?.warnings ?? [])
+    .filter((warning): warning is string => typeof warning === "string" && warning.trim().length > 0)
+    .map(gpuWarningMessage);
+  const gpuSupportTier = gpuWarnings.some((warning) => warning.includes("hỗ trợ thử nghiệm"))
+    ? "Thử nghiệm"
+    : gpuWarnings.some((warning) => warning.includes("bảo trì giới hạn"))
+      ? "Bảo trì giới hạn"
+      : "Được hỗ trợ";
+  const apiConnected = health !== null;
+  const gpuReady = health?.gpu?.ready === true;
+  const gpuHasWarnings = gpuWarnings.length > 0;
+  const processorReady = health?.status === "ok" && gpuReady && !gpuHasWarnings;
+  const processorDegraded = apiConnected && !processorReady;
+  const healthStateClass = processorReady ? "online" : processorDegraded ? "degraded" : "offline";
+  const healthLabel = !apiConnected
+    ? "Chưa kết nối API"
+    : processorReady
+      ? "Máy xử lý sẵn sàng"
+      : gpuReady && gpuHasWarnings
+        ? "Máy xử lý có cảnh báo"
+      : gpuReady
+        ? "Máy xử lý cần cấu hình"
+        : "GPU chưa sẵn sàng";
+  const gpuHeading = gpuDevices.length === 1
+    ? gpuDevices[0].name || "GPU NVIDIA CUDA"
+    : gpuDevices.length > 1
+      ? `${gpuDevices.length} GPU NVIDIA CUDA`
+      : apiConnected
+        ? "GPU chưa sẵn sàng"
+        : "GPU chưa kết nối";
   const subtitleCandidates = asArray<SubtitleCandidate>(selectedJob?.details?.subtitle_candidates);
   const languageCandidates = asArray<LanguageCandidate>(
     selectedJob?.details?.language_detection_candidates ?? selectedJob?.details?.language_candidates,
@@ -1415,33 +1483,63 @@ export default function Home() {
           <a href="#models">Model</a>
           <a href="#integrations">Tích hợp</a>
         </nav>
-        <div className={`health-pill ${online ? "online" : "offline"}`}>
+        <div className={`health-pill ${healthStateClass}`}>
           <span className="pulse" aria-hidden="true" />
-          {online ? "Máy xử lý sẵn sàng" : "Chưa kết nối API"}
+          {healthLabel}
         </div>
       </header>
 
       <section className="hero" id="top">
         <div className="hero-copy">
-          <p className="eyebrow">THUYẾT MINH NGOẠI TUYẾN · RTX</p>
+          <p className="eyebrow">THUYẾT MINH NGOẠI TUYẾN · NVIDIA CUDA</p>
           <h1>Biến một bản phim thành bản thuyết minh Việt.</h1>
           <p className="lead">
             Tách lời diễn viên, giữ nhạc và hiệu ứng, dịch cục bộ rồi dựng lại một track
             thuyết minh hoàn chỉnh — không gửi nội dung lên dịch vụ AI.
           </p>
         </div>
-        <div className="machine-card" aria-label="Trạng thái máy xử lý">
+        <div className={`machine-card ${gpuReady && !gpuHasWarnings ? "ready" : "degraded"}`} aria-label="Trạng thái máy xử lý">
           <span className="machine-label">MÁY XỬ LÝ</span>
-          <strong>{gpuName}</strong>
+          <strong>{gpuHeading}</strong>
           <div className="machine-meta">
-            <span>{vram ? `${Math.round(vram / 1024)} GB VRAM` : "VRAM đang kiểm tra"}</span>
+            <span>{gpuDevices.length ? `${gpuDevices.length} GPU được phát hiện` : "Đang kiểm tra GPU"}</span>
             <span>{validModelCount}/{catalog.models.length} model sẵn sàng</span>
           </div>
+          {gpuDevices.length > 0 && (
+            <div className="gpu-device-list" aria-label="GPU NVIDIA CUDA được phát hiện">
+              {gpuDevices.map((gpu, index) => {
+                const name = gpu.name || `GPU ${index + 1}`;
+                const details = [
+                  gpu.compute_capability ? `CC ${gpu.compute_capability}` : "CC chưa rõ",
+                  formatGpuMemory(gpu.memory_total_mib),
+                  gpu.driver_version ? `driver ${gpu.driver_version}` : null,
+                ].filter(Boolean).join(" · ");
+                return (
+                  <div className="gpu-device" key={gpu.uuid || `${name}-${index}`}>
+                    <span className="gpu-device-name">{name}</span>
+                    <small>{details}</small>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="machine-flags">
+            <span className={gpuReady ? "ok" : "warn"}>GPU {gpuReady ? "sẵn sàng" : "chưa sẵn sàng"}</span>
+            {gpuReady && <span className={gpuHasWarnings ? "warn" : "ok"}>Mức hỗ trợ: {gpuSupportTier}</span>}
             <span className={health?.database?.status === "ok" ? "ok" : "warn"}>SQLite {health?.database?.journal_mode ?? "?"}</span>
             <span className={health?.acquisition_configured ? "ok" : "warn"}>Nguồn {health?.acquisition_configured ? "đã nối" : "chưa nối"}</span>
             <span className={capabilities?.offline_inference ? "ok" : "warn"}>AI offline</span>
           </div>
+          {gpuWarnings.length > 0 && (
+            <div className="gpu-health-warnings" role="status" aria-label="Cảnh báo GPU">
+              <strong>Cảnh báo GPU</strong>
+              <ul>
+                {gpuWarnings.map((warning, index) => (
+                  <li key={`${warning}-${index}`}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="signal" aria-hidden="true">
             {Array.from({ length: 18 }).map((_, index) => (
               <i key={index} style={{ height: `${18 + ((index * 17) % 34)}%` }} />
@@ -1835,6 +1933,7 @@ export default function Home() {
               disabled={
                 submitting ||
                 Boolean(activeJob) ||
+                !gpuReady ||
                 !rightsConfirmed ||
                 (sourceMode === "upload" && (!mediaFile || Boolean(subtitleFile && sourceLanguage === "auto")))
               }
@@ -1846,6 +1945,8 @@ export default function Home() {
                     : "Đang tạo job…"
                   : activeJob
                     ? "GPU đang bận"
+                    : !gpuReady
+                      ? apiConnected ? "GPU chưa sẵn sàng" : "Đang kiểm tra GPU"
                     : sourceMode === "upload" && subtitleFile && sourceLanguage === "auto"
                       ? "Hãy chọn ngôn ngữ của SRT"
                       : "Bắt đầu thuyết minh"

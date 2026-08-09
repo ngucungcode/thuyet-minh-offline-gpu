@@ -12,11 +12,11 @@ from contextlib import suppress
 from typing import Any
 
 from .asr import FasterWhisperRecognizer
-from .config import Settings, get_settings
+from .config import Settings, get_settings, load_model_catalog
 from .gpu import GpuPreflightError, GpuPreflightReport, inspect_gpu, write_gpu_report
 from .offline import install_offline_network_guard
 from .phase4_stage import Phase4Stage, build_phase4_stage
-from .state import JobStatus, StateStore
+from .state import JobRecord, JobStatus, StateStore
 from .transcription_stage import TranscriptionStage
 from .translation_stage import TranslationStage
 
@@ -42,6 +42,105 @@ _PHASE4_QUEUE = (
     JobStatus.MUXING,
     JobStatus.VERIFYING,
 )
+
+
+def _inspect_configured_gpu(settings: Settings) -> GpuPreflightReport:
+    """Inspect logical CUDA 0 and bind it to the native runtime when configured."""
+
+    return inspect_gpu(
+        require_gpu=True,
+        expected_gpu_uuid=settings.selected_gpu_uuid,
+        expected_cuda_architecture=settings.selected_cuda_architecture,
+    )
+
+
+def _selected_model_id(
+    record: JobRecord,
+    key: str,
+    default_model_id: str,
+) -> str:
+    models = record.spec.get("models")
+    selected = models.get(key) if isinstance(models, dict) else None
+    if isinstance(selected, str) and selected.strip():
+        return selected.strip()
+    return default_model_id
+
+
+def _ensure_selected_models_fit_vram(
+    store: StateStore,
+    record: JobRecord,
+    *,
+    settings: Settings | None,
+    report: GpuPreflightReport | None,
+    stages: tuple[str, ...],
+) -> bool:
+    """Fail one queued job before model load when its locked VRAM floor cannot fit."""
+
+    if not stages or settings is None or report is None or not report.gpus:
+        return True
+    available_vram_mib = report.gpus[0].memory_total_mib
+    try:
+        catalog = load_model_catalog(settings.models_lock_path, settings.models_dir)
+    except (OSError, ValueError) as error:
+        current = store.get_job(record.id)
+        store.update_status(
+            current.id,
+            JobStatus.FAILED,
+            expected_status=current.status,
+            stage=current.stage,
+            details=current.details,
+            error_code="model_catalog_invalid",
+            error_message="Danh mục model cục bộ bị thiếu hoặc không hợp lệ",
+            retryable=True,
+        )
+        _print_event(
+            "job.rejected_model_catalog",
+            job_id=current.id,
+            error_type=type(error).__name__,
+        )
+        return False
+    entries = {entry.id: entry for entry in catalog.models}
+    defaults = {
+        "asr": ("asr", settings.default_asr_model_id),
+        "mt": ("translation", settings.default_translation_model_id),
+        "separation": ("separation", settings.default_separation_model_id),
+        "tts": ("tts", settings.default_tts_model_id),
+    }
+    for stage in stages:
+        spec_key, default_model_id = defaults[stage]
+        model_id = _selected_model_id(record, spec_key, default_model_id)
+        entry = entries.get(model_id)
+        minimum_vram_mib = entry.minimum_vram_mib if entry is not None else None
+        if minimum_vram_mib is None or minimum_vram_mib <= available_vram_mib:
+            continue
+        current = store.get_job(record.id)
+        store.update_status(
+            current.id,
+            JobStatus.FAILED,
+            expected_status=current.status,
+            stage=current.stage,
+            details={
+                **current.details,
+                "required_model_id": model_id,
+                "required_vram_mib": minimum_vram_mib,
+                "available_vram_mib": available_vram_mib,
+            },
+            error_code="model_vram_insufficient",
+            error_message=(
+                f"Model {model_id} cần tối thiểu {minimum_vram_mib} MiB VRAM "
+                f"nhưng GPU logical 0 chỉ có {available_vram_mib} MiB"
+            ),
+            retryable=False,
+        )
+        _print_event(
+            "job.rejected_vram",
+            job_id=current.id,
+            model_id=model_id,
+            required_vram_mib=minimum_vram_mib,
+            available_vram_mib=available_vram_mib,
+        )
+        return False
+    return True
 
 
 def _print_event(event: str, **payload: Any) -> None:
@@ -106,6 +205,8 @@ async def process_next_transcript_job(
     stage: TranscriptionStage,
     *,
     shutdown: threading.Event,
+    settings: Settings | None = None,
+    gpu_report: GpuPreflightReport | None = None,
 ) -> bool:
     """Process at most one job and return whether queue work was observed."""
 
@@ -127,6 +228,25 @@ async def process_next_transcript_job(
         if record.details.get("offline_cancel_pending"):
             store.finalize_cancel(record.id)
             _print_event("job.cancelled", job_id=record.id)
+        return True
+
+    transcript_source = record.details.get("transcript_source")
+    subtitle_can_fallback = (
+        record.status is JobStatus.READY_OFFLINE
+        and str(record.spec.get("subtitle_mode", "prefer")) == "prefer"
+    )
+    transcript_stages = (
+        ("asr",)
+        if transcript_source == "asr" or subtitle_can_fallback
+        else ()
+    )
+    if not _ensure_selected_models_fit_vram(
+        store,
+        record,
+        settings=settings,
+        report=gpu_report,
+        stages=transcript_stages,
+    ):
         return True
 
     _print_event(
@@ -155,6 +275,8 @@ async def process_next_translation_job(
     stage: TranslationStage,
     *,
     shutdown: threading.Event,
+    settings: Settings | None = None,
+    gpu_report: GpuPreflightReport | None = None,
 ) -> bool:
     """Process at most one ready/resumable translation job."""
 
@@ -162,6 +284,14 @@ async def process_next_translation_job(
     if not records or shutdown.is_set():
         return False
     record = records[0]
+    if not _ensure_selected_models_fit_vram(
+        store,
+        record,
+        settings=settings,
+        report=gpu_report,
+        stages=("mt",),
+    ):
+        return True
     _print_event(
         "translation.started",
         job_id=record.id,
@@ -187,6 +317,8 @@ async def process_next_phase4_job(
     stage: Phase4Stage,
     *,
     shutdown: threading.Event,
+    settings: Settings | None = None,
+    gpu_report: GpuPreflightReport | None = None,
 ) -> bool:
     """Process at most one ready or checkpointed Phase 4 job."""
 
@@ -194,6 +326,21 @@ async def process_next_phase4_job(
     if not records or shutdown.is_set():
         return False
     record = records[0]
+    phase4_model_stages: tuple[str, ...]
+    if record.status in {JobStatus.MIXING, JobStatus.MUXING, JobStatus.VERIFYING}:
+        phase4_model_stages = ()
+    elif record.status in {JobStatus.SYNTHESIZING, JobStatus.TIMING}:
+        phase4_model_stages = ("tts",)
+    else:
+        phase4_model_stages = ("separation", "tts")
+    if not _ensure_selected_models_fit_vram(
+        store,
+        record,
+        settings=settings,
+        report=gpu_report,
+        stages=phase4_model_stages,
+    ):
+        return True
     _print_event(
         "phase4.started",
         job_id=record.id,
@@ -250,24 +397,30 @@ async def _worker_loop(
                 store,
                 transcription_stage,
                 shutdown=shutdown,
+                settings=settings,
+                gpu_report=report,
             )
             if not worked:
                 worked = await process_next_translation_job(
                     store,
                     translation_stage,
                     shutdown=shutdown,
+                    settings=settings,
+                    gpu_report=report,
                 )
             if not worked:
                 worked = await process_next_phase4_job(
                     store,
                     phase4_stage,
                     shutdown=shutdown,
+                    settings=settings,
+                    gpu_report=report,
                 )
             if shutdown.is_set():
                 break
             if time.monotonic() >= next_gpu_check:
                 try:
-                    report = await asyncio.to_thread(inspect_gpu, require_gpu=True)
+                    report = await asyncio.to_thread(_inspect_configured_gpu, settings)
                 except GpuPreflightError as error:
                     write_gpu_report(settings.gpu_report_path, error.report)
                     _print_event(
@@ -318,7 +471,7 @@ def main() -> None:
 
     settings = get_settings()
     try:
-        report = inspect_gpu(require_gpu=True)
+        report = _inspect_configured_gpu(settings)
     except GpuPreflightError as error:
         report = error.report
         write_gpu_report(settings.gpu_report_path, report)

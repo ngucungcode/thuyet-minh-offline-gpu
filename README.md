@@ -20,7 +20,8 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 - VieNeu v2 hoặc Piper tạo lời thuyết minh tiếng Việt.
 - Chế độ nhịp tự nhiên dịch gọn theo thời lượng, mượn khoảng lặng lân cận và giới hạn
   tốc độ toàn câu ở 1,20×; vẫn có chế độ khớp timestamp nghiêm ngặt khi cần.
-- Ducking, mix và xuất H.264 passthrough + AAC mà không làm thay đổi nhịp luồng hình.
+- Ducking, mix và xuất MP4 H.264 + AAC: nguồn H.264 được passthrough; nguồn HEVC
+  chỉ mã hóa lại phần hình sang H.264 bằng CPU để hoạt động nhất quán trên mọi GPU hỗ trợ.
 - Checkpoint atomic, hủy, retry và tiếp tục sau khi tiến trình khởi động lại.
 - Tiến độ realtime theo stage, tốc độ tải, ETA, segment và số block.
 - Xuất MP4, phụ đề tiếng Việt SRT và timing report JSON.
@@ -28,20 +29,62 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Trình cài production `v0.3.2` hỗ trợ đường triển khai native sau:
+Đường triển khai production native có các yêu cầu sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
-- NVIDIA GPU có compute capability chính xác `8.6` (`sm_86`).
+- NVIDIA GPU thuộc ma trận kiến trúc CUDA bên dưới.
 - Ít nhất 16 GiB RAM.
-- NVIDIA driver hoạt động và `nvidia-smi` nhìn thấy GPU.
-- CUDA toolkit có `nvcc` tại `/usr/local/cuda/bin/nvcc`.
+- NVIDIA driver 570.26 trở lên hoạt động và `nvidia-smi` nhìn thấy GPU.
+- CUDA toolkit 12.8 có `nvcc` tại `/usr/local/cuda/bin/nvcc`.
 - PyTorch CUDA đã được image nhà cung cấp cài sẵn và `torch.cuda.is_available()` trả `True`.
 - Quyền `root` hoặc tài khoản có `sudo`.
 
 Trình cài không thay NVIDIA driver, CUDA toolkit hoặc PyTorch của nhà cung cấp.
 Docker Compose dành cho host có Docker daemon và NVIDIA Container Toolkit là
-đường triển khai nâng cao; image hiện tại cũng được build riêng cho `sm_86`.
+đường triển khai nâng cao.
+
+### Ma trận GPU và kiến trúc CUDA
+
+| CUDA target | GPU tiêu biểu | Trạng thái | Profile khuyến nghị theo VRAM |
+|---|---|---|---|
+| `sm_70` | Tesla V100 16/32 GiB | Hỗ trợ có giới hạn; maintenance-limited | `balanced` với 16 GiB, `maximum` với 32 GiB |
+| `sm_75` | Tesla T4 16 GiB | Hỗ trợ | `balanced` |
+| `sm_80` | NVIDIA A100 40/80 GiB, A30 24 GiB | Hỗ trợ | `maximum` |
+| `sm_86` | NVIDIA A10 24 GiB, A40 48 GiB, GeForce RTX 3090 24 GiB | Hỗ trợ | `maximum` |
+| `sm_89` | NVIDIA L4 24 GiB, L40/L40S 48 GiB | Hỗ trợ | `maximum` |
+| `sm_90` | NVIDIA H100/H200 | Hỗ trợ | `maximum` |
+| `sm_80` | NVIDIA CMP 170HX 8 GiB | Thử nghiệm; chỉ bật khi toàn bộ probe đạt | Chỉ `minimal` |
+
+V100 là nhánh maintenance-limited: dự án chỉ duy trì tương thích và sửa lỗi theo khả
+năng, không cam kết nâng toolchain vượt quá phiên bản CUDA/PyTorch còn hỗ trợ Volta.
+CMP 170HX không được tự động nâng lên `balanced` hoặc `maximum`, kể cả khi driver báo
+dung lượng khác. Installer xác minh driver, CUDA, kernel FP16 PyTorch, CTranslate2 và
+binary native; trước khi dùng production vẫn phải chạy full acceptance trên chính card đó.
+
+Pascal (`sm_60`, `sm_61`, `sm_62`) và kiến trúc cũ hơn không được hỗ trợ. Kiến trúc
+không có trong bảng cũng bị từ chối theo nguyên tắc fail-closed cho đến khi có build và
+báo cáo nghiệm thu riêng; PTX fallback không được xem là bằng chứng tương thích
+production.
+
+Image Docker release dùng CUDA fatbin chứa mã cho `sm_70`, `sm_75`, `sm_80`, `sm_86`,
+`sm_89` và `sm_90`. Cài native chỉ build artifact cho compute capability của GPU đã
+được preflight chọn trên máy đó để giảm thời gian build và kích thước binary; không sao
+chép native binary giữa các máy có kiến trúc khác nhau.
+
+Trên host nhiều GPU, mọi ngưỡng VRAM/profile đều áp dụng cho **CUDA logical device 0**,
+không lấy card lớn nhất và không cộng VRAM. Installer native ghi UUID card đã chọn vào
+`CUDA_VISIBLE_DEVICES` cùng kiến trúc build trong `.env.native`; worker từ chối khởi động
+nếu UUID hoặc kiến trúc không còn khớp sau reboot. Muốn chọn card native cụ thể, thêm
+`--gpu-device HOST_INDEX_OR_GPU_UUID` vào lệnh installer; card được chọn trở thành logical
+device 0 và được pin bằng UUID sau preflight. Với Docker Compose, đặt
+`DUB_GPU_DEVICE_ID` trong `.env` thành host index hoặc UUID NVIDIA; Compose chỉ cấp đúng
+card đó cho worker. Không dùng chung `.env.native` giữa hai máy.
+
+Ma trận trên là hợp đồng build, không thay thế nghiệm thu phần cứng. Trước khi công bố
+một GPU ở trạng thái production, release phải được chạy trên chính phần cứng đó và có
+báo cáo tối thiểu cho preflight, native compile/load, suy luận từng stage, peak VRAM,
+thời gian xử lý và kiểm tra file đầu ra.
 
 ### Profile model
 
@@ -54,7 +97,20 @@ Docker Compose dành cho host có Docker daemon và NVIDIA Container Toolkit là
 | `none` | Không cài model | 20 GiB | Chỉ runtime và dịch vụ |
 
 Các mức trên là dung lượng trống trước khi cài. Hãy dự phòng thêm dung lượng cho
-phim nguồn, artifact trung gian, output và backup nâng cấp.
+phim nguồn, artifact trung gian, output và backup nâng cấp. Profile được chọn theo VRAM
+của một GPU đã qua preflight, không cộng VRAM của nhiều GPU. `auto` chọn `maximum` khi
+có ít nhất 22 GiB, chọn `balanced` khi có từ 8 GiB đến dưới 22 GiB, chọn `minimal` khi có
+từ 6 GiB đến dưới 8 GiB và từ chối cài model nếu thấp hơn 6 GiB. Người vận hành có thể chủ
+động chọn `minimal` để giảm thời gian cài
+và mức dùng tài nguyên; riêng CMP 170HX luôn bị giới hạn ở profile này.
+
+Installer native với `--profile auto` ghi lựa chọn model theo VRAM thực tế vào
+`.env.native`. Docker Compose không có bước chọn profile đó nên mặc định fail-safe với
+`minimal` (Whisper Small, Gemma 4 E2B, TIGER-DnR và Piper), phù hợp mọi card trong
+allowlist có từ 6 GiB VRAM. Máy nhiều VRAM có thể đặt bốn biến
+`DUB_DEFAULT_ASR_MODEL_ID`, `DUB_DEFAULT_TRANSLATION_MODEL_ID`,
+`DUB_DEFAULT_SEPARATION_MODEL_ID` và `DUB_DEFAULT_TTS_MODEL_ID` trong `.env` theo
+profile đã cài; worker vẫn kiểm tra `minimum_vram_mib` ngay trước stage dùng model.
 
 ## Cài nhanh
 
@@ -124,8 +180,12 @@ Giữ phiên SSH này mở, sau đó truy cập:
 Trong dashboard, chọn **Tải file lên**, rồi:
 
 1. Chọn một file video `.mp4` hoặc `.mkv` trên máy của bạn.
-   Luồng hình đầu tiên phải là H.264/AVC để có thể passthrough sang MP4; HEVC,
-   VP8 và FFV1 bị từ chối ngay khi finalize thay vì đợi đến công đoạn xuất.
+   Luồng hình chính H.264/AVC được passthrough nhanh, còn HEVC/H.265 SDR được mã hóa
+   lại riêng phần hình sang H.264/AVC bằng `libx264`; vì vậy nguồn HEVC sẽ xuất chậm hơn.
+   HEVC HDR10, HLG và Dolby Vision bị từ chối cho đến khi có tone-map được kiểm thử,
+   tránh tạo video tối hoặc sai màu.
+   VP8, FFV1 và MPEG-4 Part 2 vẫn bị từ chối ngay khi finalize thay vì đợi đến công
+   đoạn xuất. Cover-art không được xem là luồng hình chính.
 2. Có thể chọn thêm file phụ đề `.srt`; nếu có SRT, hãy chọn đúng ngôn ngữ nguồn.
 3. Giữ **Nhịp tự nhiên** để ưu tiên giọng đều, hoặc chọn **Khớp nghiêm ngặt** nếu
    timestamp gốc quan trọng hơn độ tự nhiên.
@@ -213,11 +273,11 @@ chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu 
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.1` lên `v0.3.2`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.2` lên `v0.3.3`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.2/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.3/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -233,7 +293,7 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.2/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.3/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
@@ -243,9 +303,12 @@ stack này chỉ cần thực hiện một lần khi nâng cấp từ deployment
 
 Trình cài chỉ chấp nhận đường nâng cấp đã khai báo, từ chối worktree bẩn, origin sai
 hoặc còn job đang hoạt động. Source mới được kích hoạt bằng transaction có journal;
-`.env.native`, model, virtualenv và dữ liệu được giữ nguyên. Nếu health check hoặc
-acceptance thất bại, trình cài phục hồi source và trạng thái stack cũ. Backup source
-cũ được giữ lại để kiểm tra thủ công.
+model, virtualenv, dữ liệu, checkpoint và cấu hình tùy chỉnh của quản trị viên được
+giữ nguyên. Trình cài chỉ cập nhật nguyên tử các khóa GPU do nó quản lý và chuyển
+những model mặc định legacy còn nguyên giá trị cũ sang mặc định an toàn của profile;
+giá trị model đã tùy chỉnh không bị thay đổi. Nếu health check hoặc acceptance thất
+bại, trình cài phục hồi source và trạng thái stack cũ. Backup source cũ được giữ lại
+để kiểm tra thủ công.
 
 Job tạo trước `v0.3.0` không có `timing_profile` được giữ ở chế độ `strict`, vì vậy
 nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới mặc định dùng
@@ -255,14 +318,15 @@ nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.3.2` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.3.3` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.2/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.3/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
-thay đổi và không ghi đè `.env.native`. Nếu commit đích khác mà không có
+thay đổi và không ghi đè các giá trị tùy chỉnh trong `.env.native`; liên kết GPU được
+kiểm tra lại rồi lưu nguyên tử. Nếu commit đích khác mà không có
 `--upgrade-existing`, installer dừng trước khi checkout hoặc sửa runtime.
 
 Deployment legacy không có Git cũng bị từ chối theo mặc định. Cờ
@@ -299,7 +363,11 @@ nvidia-smi
 python3 -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
 ```
 
-GPU phải là `sm_86`; runtime hiện không hỗ trợ chung mọi GPU CUDA.
+GPU phải thuộc allowlist `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_89` hoặc `sm_90`,
+đồng thời driver, CUDA toolkit và PyTorch phải tương thích với nhau. Pascal và cũ hơn
+không được hỗ trợ. Với V100, dùng toolchain còn hỗ trợ Volta; với CMP 170HX, chỉ dùng
+profile `minimal` sau khi toàn bộ probe thử nghiệm đạt. Việc `nvidia-smi` nhìn thấy card
+không thay thế smoke test native và nghiệm thu trên phần cứng thật.
 
 - **Stack hoặc dashboard không phản hồi:** chạy `dub stack status`, xem
   `dub stack logs --lines 200`, rồi dùng `dub stack restart`. Tạo lại tunnel và

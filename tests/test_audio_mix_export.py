@@ -24,13 +24,14 @@ def _probe_payload(
     video_start: str = "0.000000",
     audio_start: str = "0.000000",
     audio_codec: str = "aac",
+    video_codec: str = "h264",
     extra_stream: dict[str, object] | None = None,
 ) -> str:
     streams: list[dict[str, object]] = [
         {
             "index": 0,
             "codec_type": "video",
-            "codec_name": "h264",
+            "codec_name": video_codec,
             "start_time": video_start,
             "duration": video_duration or duration,
         },
@@ -64,7 +65,7 @@ class FakeRunner:
         self.ffmpeg_returncode = ffmpeg_returncode
         self.ffmpeg_stderr = ffmpeg_stderr
         self.source_probe_stdout = source_probe_stdout or json.dumps(
-            {"streams": [{"duration": "2.000000"}]}
+            {"streams": [{"codec_name": "h264", "duration": "2.000000"}]}
         )
         self.source_probe_returncode = source_probe_returncode
         self.source_probe_error = source_probe_error
@@ -172,6 +173,122 @@ def test_export_maps_no_source_audio_and_atomically_publishes(tmp_path: Path) ->
     assert "apad" in graph
     assert "alimiter=" in graph
     assert "-shortest" not in command
+
+
+def test_hevc_source_transcodes_only_video_to_h264_and_keeps_timeline(
+    tmp_path: Path,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        source_probe_stdout=json.dumps(
+            {"streams": [{"codec_name": "hevc", "duration": "2.000000"}]}
+        )
+    )
+    progress = []
+
+    def cancellation() -> bool:
+        return False
+
+    artifact = asyncio.run(
+        FfmpegAudioMixExporter(runner=runner).export(
+            source,
+            accompaniment,
+            narration,
+            output,
+            expected_duration_us=2_000_000,
+            cancellation=cancellation,
+            on_progress=progress.append,
+        )
+    )
+
+    assert artifact.path == output.resolve()
+    command = runner.calls[1][0]
+    assert command[command.index("-c:v") + 1] == "libx264"
+    assert command[command.index("-filter:v:0") + 1] == (
+        "setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    )
+    assert command[command.index("-preset") + 1] == "fast"
+    assert command[command.index("-crf") + 1] == "20"
+    assert command[command.index("-pix_fmt") + 1] == "yuv420p"
+    assert command[command.index("-tag:v") + 1] == "avc1"
+    assert command[command.index("-vsync") + 1] == "0"
+    maps = [command[index + 1] for index, item in enumerate(command) if item == "-map"]
+    assert maps == ["0:V:0", "[mixed]"]
+    assert command[command.index("-c:a") + 1] == "aac"
+    assert runner.calls[1][1]["cancellation"] is cancellation
+    assert [item.fraction for item in progress] == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("codec", ["vp8", "ffv1", "mpeg4", ""])
+def test_unsupported_source_video_codec_fails_before_export(
+    tmp_path: Path,
+    codec: str,
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        source_probe_stdout=json.dumps(
+            {"streams": [{"codec_name": codec, "duration": "2.000000"}]}
+        )
+    )
+
+    with pytest.raises(MediaExportError) as captured:
+        asyncio.run(
+            FfmpegAudioMixExporter(runner=runner).export(
+                source,
+                accompaniment,
+                narration,
+                output,
+                expected_duration_us=2_000_000,
+            )
+        )
+
+    assert captured.value.code == MediaExportErrorCode.SOURCE_VIDEO_CODEC_UNSUPPORTED
+    assert captured.value.retryable is False
+    assert len(runner.calls) == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "hdr_metadata",
+    [
+        {"color_transfer": "smpte2084"},
+        {"color_transfer": "arib-std-b67"},
+        {"side_data_list": [{"side_data_type": "DOVI configuration record"}]},
+    ],
+)
+def test_hevc_hdr_fails_before_unsafe_sdr_transcode(
+    tmp_path: Path,
+    hdr_metadata: dict[str, object],
+) -> None:
+    source, accompaniment, narration, output = _inputs(tmp_path)
+    runner = FakeRunner(
+        source_probe_stdout=json.dumps(
+            {
+                "streams": [
+                    {
+                        "codec_name": "hevc",
+                        "duration": "2.000000",
+                        **hdr_metadata,
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(MediaExportError) as captured:
+        asyncio.run(
+            FfmpegAudioMixExporter(runner=runner).export(
+                source,
+                accompaniment,
+                narration,
+                output,
+                expected_duration_us=2_000_000,
+            )
+        )
+
+    assert captured.value.code == MediaExportErrorCode.SOURCE_VIDEO_HDR_UNSUPPORTED
+    assert captured.value.retryable is False
+    assert len(runner.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -331,6 +448,10 @@ def test_verification_rejects_output_video_still_marked_as_cover_art(
             _probe_payload(audio_codec="opus"),
             MediaExportErrorCode.AUDIO_CODEC_INVALID,
         ),
+        (
+            _probe_payload(video_codec="hevc"),
+            MediaExportErrorCode.VIDEO_CODEC_INVALID,
+        ),
     ],
 )
 def test_verification_enforces_duration_sync_and_aac(
@@ -363,7 +484,7 @@ def test_verification_uses_track_end_times_not_container_metadata(
     source, accompaniment, narration, output = _inputs(tmp_path)
     runner = FakeRunner(
         source_probe_stdout=json.dumps(
-            {"streams": [{"duration": "1.920000"}]}
+            {"streams": [{"codec_name": "h264", "duration": "1.920000"}]}
         ),
         probe_stdout=_probe_payload(
             format_duration="2.400000",
@@ -398,6 +519,14 @@ def test_verification_uses_track_end_times_not_container_metadata(
     [
         ({"duration_ts": 180_000, "time_base": "1/90000"}, "2.000000"),
         ({"tags": {"DURATION": "00:00:02.250000000"}}, "2.250000"),
+        (
+            {
+                "codec_name": "hevc",
+                "start_time": "1.000000",
+                "tags": {"DURATION": "00:00:03.000000000"},
+            },
+            "2.000000",
+        ),
     ],
 )
 def test_source_video_duration_supports_timestamp_and_matroska_tag_fallbacks(
@@ -407,7 +536,9 @@ def test_source_video_duration_supports_timestamp_and_matroska_tag_fallbacks(
 ) -> None:
     source, accompaniment, narration, output = _inputs(tmp_path)
     runner = FakeRunner(
-        source_probe_stdout=json.dumps({"streams": [source_stream]}),
+        source_probe_stdout=json.dumps(
+            {"streams": [{"codec_name": "h264", **source_stream}]}
+        ),
         probe_stdout=_probe_payload(duration=duration_text),
     )
 
@@ -424,6 +555,10 @@ def test_source_video_duration_supports_timestamp_and_matroska_tag_fallbacks(
     command = runner.calls[1][0]
     graph = command[command.index("-filter_complex") + 1]
     assert f"atrim=duration={duration_text}" in graph
+    source_probe_command = runner.calls[0][0]
+    show_entries = source_probe_command[source_probe_command.index("-show_entries") + 1]
+    assert "start_time" in show_entries
+    assert "stream_side_data_list=side_data_type" in show_entries
 
 
 @pytest.mark.parametrize(
@@ -572,6 +707,168 @@ FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 
 
+def _has_ffmpeg_encoder(name: str) -> bool:
+    if FFMPEG is None:
+        return False
+    try:
+        result = subprocess.run(
+            [str(FFMPEG), "-hide_banner", "-encoders"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and name in result.stdout
+
+
+@pytest.mark.skipif(
+    FFMPEG is None or FFPROBE is None or not _has_ffmpeg_encoder("libx265"),
+    reason="FFmpeg/ffprobe và libx265 không có trên máy chạy test",
+)
+def test_real_ffmpeg_transcodes_hevc_video_only_and_publishes_h264(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "odd-sized-hevc.mkv"
+    accompaniment = tmp_path / "accompaniment.wav"
+    narration = tmp_path / "narration.wav"
+    output = tmp_path / "dubbed.mp4"
+    subprocess.run(
+        [
+            str(FFMPEG),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=65x63:rate=12:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=330:sample_rate=48000:duration=2",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx265",
+            "-pix_fmt",
+            "yuv444p",
+            "-x265-params",
+            "pools=1:frame-threads=1:log-level=error",
+            "-c:a",
+            "aac",
+            "-output_ts_offset",
+            "1.000",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=45,
+    )
+    source_probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-select_streams",
+            "V:0",
+            "-show_entries",
+            "stream=codec_name,start_time",
+            "-of",
+            "json",
+            str(source),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    source_video = json.loads(source_probe.stdout)["streams"][0]
+    assert source_video["codec_name"] == "hevc"
+    assert float(source_video["start_time"]) >= 0.99
+    for target, frequency in ((accompaniment, 440), (narration, 880)):
+        subprocess.run(
+            [
+                str(FFMPEG),
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={frequency}:sample_rate=48000:duration=2",
+                "-c:a",
+                "pcm_s16le",
+                str(target),
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+
+    artifact = asyncio.run(
+        FfmpegAudioMixExporter(
+            ffmpeg_binary=str(FFMPEG),
+            ffprobe_binary=str(FFPROBE),
+            duration_tolerance_us=120_000,
+            timeout_seconds=45.0,
+        ).export(
+            source,
+            accompaniment,
+            narration,
+            output,
+            expected_duration_us=2_000_000,
+        )
+    )
+
+    assert artifact.path == output.resolve()
+    probe = subprocess.run(
+        [
+            str(FFPROBE),
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,codec_name,width,height,start_time,duration:"
+            "stream_disposition=attached_pic",
+            "-of",
+            "json",
+            str(output),
+        ],
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    assert [(item["codec_type"], item["codec_name"]) for item in streams] == [
+        ("video", "h264"),
+        ("audio", "aac"),
+    ]
+    video, audio = streams
+    assert (video["width"], video["height"]) == (66, 64)
+    assert video["disposition"]["attached_pic"] == 0
+    video_end = float(video.get("start_time", 0)) + float(video["duration"])
+    audio_end = float(audio.get("start_time", 0)) + float(audio["duration"])
+    assert abs(video_end - audio_end) <= 0.12
+
+
 @pytest.mark.skipif(
     FFMPEG is None or FFPROBE is None,
     reason="FFmpeg/ffprobe không có trên máy chạy test",
@@ -603,9 +900,9 @@ def test_real_ffmpeg_ignores_embedded_cover_alongside_content_video(
             "-i",
             "sine=frequency=330:sample_rate=48000:duration=2",
             "-c:v",
-            "mpeg4",
-            "-q:v",
-            "5",
+            "libx264",
+            "-preset",
+            "ultrafast",
             "-c:a",
             "aac",
             str(main),
@@ -762,7 +1059,7 @@ def test_real_ffmpeg_ignores_embedded_cover_alongside_content_video(
     )
     output_streams = json.loads(output_probe.stdout)["streams"]
     assert [(item["codec_type"], item["codec_name"]) for item in output_streams] == [
-        ("video", "mpeg4"),
+        ("video", "h264"),
         ("audio", "aac"),
     ]
     assert output_streams[0]["disposition"]["attached_pic"] == 0
@@ -818,9 +1115,9 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
             "-map_chapters",
             "2",
             "-c:v",
-            "mpeg4",
-            "-q:v",
-            "5",
+            "libx264",
+            "-preset",
+            "ultrafast",
             "-c:a",
             "aac",
             "-timecode",
@@ -921,7 +1218,7 @@ def test_real_ffmpeg_mix_has_one_video_and_one_aac_audio_track(tmp_path: Path) -
     output_payload = json.loads(probe.stdout)
     streams = output_payload["streams"]
     assert [(item["codec_type"], item["codec_name"]) for item in streams] == [
-        ("video", "mpeg4"),
+        ("video", "h264"),
         ("audio", "aac"),
     ]
     assert output_payload.get("chapters", []) == []
@@ -959,9 +1256,9 @@ def test_real_ffmpeg_aligns_replacement_audio_to_shorter_video_track(
             "-map",
             "1:a:0",
             "-c:v",
-            "mpeg4",
-            "-q:v",
-            "5",
+            "libx264",
+            "-preset",
+            "ultrafast",
             "-c:a",
             "aac",
             str(source),

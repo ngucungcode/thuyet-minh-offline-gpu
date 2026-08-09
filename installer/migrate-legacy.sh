@@ -267,6 +267,7 @@ migration_runtime_fingerprint() {
 
 migration_runtime_compatibility_fingerprint() {
   local project_root="$1"
+  local native_components_manifest
   local project_manifest
   (
     set -o pipefail
@@ -284,28 +285,98 @@ project = document.get("project")
 if not isinstance(project, dict):
     raise SystemExit("pyproject.toml thiếu bảng project")
 # Release metadata is intentionally excluded. The environment example, native
-# bootstrap procedure and native stack control script are also excluded because
-# none of them changes an already-installed Python/native runtime; the new
-# source supplies those files after the atomic switch. Persistent dependencies,
-# build configuration, entrypoints, model locks and native runtime files remain
-# gated. A bootstrap change that alters a persistent artifact must also update
-# its owning lock or dependency manifest.
+# bootstrap procedure, architecture-aware llama.cpp installer and native stack
+# control script are also excluded because none of them changes an
+# already-installed runtime during a compatible atomic upgrade. The new source
+# supplies those cold-bootstrap procedures after the switch. Persistent
+# dependencies, build configuration, entrypoints, model locks and native runtime
+# files remain gated. A bootstrap change that alters a persistent artifact must
+# also update its owning lock or dependency manifest.
 project.pop("version", None)
+print(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+PY
+    )" || exit 1
+    native_components_manifest="$(python3 - native/components.lock.json <<'PY'
+import json
+from pathlib import Path
+
+with Path("native/components.lock.json").open(encoding="utf-8") as handle:
+    document = json.load(handle)
+components = document.get("components")
+if not isinstance(components, dict):
+    raise SystemExit("native components lock không hợp lệ")
+llama = components.get("llama_cpp")
+if not isinstance(llama, dict):
+    raise SystemExit("native components lock thiếu llama_cpp")
+
+# The installed CUDA architecture is gated separately against install-state.
+# Releases through v0.3.2 represented the sm_86 bootstrap default with the
+# ambiguous `cuda_architectures` field; newer releases split the supported
+# matrix from the default/actual build. These source-only keys do not change an
+# existing native runtime, while every other component field remains hashed.
+for key in (
+    "cuda_architectures",
+    "cuda_supported_architectures",
+    "cuda_default_build_architecture",
+):
+    llama.pop(key, None)
 print(json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 PY
     )" || exit 1
     {
       printf '%s\n' "${project_manifest}" || exit 1
+      printf '%s\n' "${native_components_manifest}" || exit 1
       sha256sum \
         config/models.lock.json \
         scripts/native-common.sh \
-        scripts/install-llama-cpp.sh \
         scripts/vieneu-offline.py || exit 1
-      find native -maxdepth 1 -type f -print0 \
+      find native -maxdepth 1 -type f ! -name components.lock.json -print0 \
         | sort -z \
         | xargs -0 sha256sum || exit 1
     } | sha256sum | awk '{print $1}'
   )
+}
+
+migration_installed_cuda_architecture() {
+  local project_root="$1"
+  local data_root="$2"
+  local state_path="${data_root}/install-state.json"
+
+  if migration_path_exists "${state_path}"; then
+    [[ -f "${state_path}" && ! -L "${state_path}" ]] || return 1
+    python3 - "${state_path}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+with Path(sys.argv[1]).open(encoding="utf-8") as handle:
+    document = json.load(handle)
+gpu = document.get("gpu")
+architecture = gpu.get("cuda_architecture") if isinstance(gpu, dict) else None
+if architecture is None:
+    # Releases through v0.3.2 only produced a native sm_86 llama.cpp runtime.
+    architecture = "sm_86"
+if not isinstance(architecture, str) or not re.fullmatch(r"sm_[0-9]{2,3}", architecture):
+    raise SystemExit("install-state CUDA architecture không hợp lệ")
+print(architecture)
+PY
+    return
+  fi
+
+  python3 - "${project_root}/native/components.lock.json" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+with Path(sys.argv[1]).open(encoding="utf-8") as handle:
+    document = json.load(handle)
+architecture = document.get("components", {}).get("llama_cpp", {}).get("cuda_architectures")
+if not isinstance(architecture, str) or not re.fullmatch(r"[0-9]{2,3}", architecture):
+    raise SystemExit("không suy ra được CUDA architecture của runtime legacy")
+print(f"sm_{architecture}")
+PY
 }
 
 migration_project_version() {
@@ -368,6 +439,7 @@ migrate_git_release_upgrade() {
   local data_dir_explicit="${4:-false}"
   local expected_target_version="$5"
   local compatible_versions="$6"
+  local expected_cuda_architecture="${7:-}"
   local current_version
   local target_version
   local current_commit
@@ -467,7 +539,7 @@ PY
 
   migrate_legacy_install \
     "${current_root}" "${staged_root}" "${requested_data_dir}" \
-    "${data_dir_explicit}" git
+    "${data_dir_explicit}" git "${expected_cuda_architecture}"
 }
 
 migration_restart_stack() {
@@ -723,6 +795,7 @@ migrate_legacy_install() {
   local requested_data_dir="${3:-${legacy_root}/var}"
   local data_dir_explicit="${4:-false}"
   local source_mode="${5:-legacy}"
+  local expected_cuda_architecture="${6:-}"
   local legacy_parent
   local staged_parent
   local configured_data_dir=""
@@ -739,6 +812,7 @@ migrate_legacy_install() {
   local native_status=0
   local database_path
   local active_jobs
+  local installed_cuda_architecture
   local new_source_active=false
   local item
   local persistent_items=(.venv-native)
@@ -870,6 +944,18 @@ migrate_legacy_install() {
     migration_error "Data root phải là thư mục thực có metadata đọc được"
     return 1
   }
+  if [[ -n "${expected_cuda_architecture}" ]]; then
+    installed_cuda_architecture="$(
+      migration_installed_cuda_architecture "${legacy_root}" "${effective_data_dir}"
+    )" || {
+      migration_error "Không xác định được CUDA architecture của runtime đang cài"
+      return 1
+    }
+    if [[ "${installed_cuda_architecture}" != "${expected_cuda_architecture}" ]]; then
+      migration_error "Runtime ${installed_cuda_architecture} không dùng được trên GPU ${expected_cuda_architecture}; cần cài mới để build lại native artifact"
+      return 1
+    fi
+  fi
 
   if command -v mountpoint >/dev/null; then
     if mountpoint -q -- "${legacy_root}"; then

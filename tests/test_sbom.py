@@ -152,6 +152,93 @@ def test_build_sbom_inventories_python_models_and_native(tmp_path: Path) -> None
     assert root_dependency["dependsOn"] == sorted(by_ref)
 
 
+def test_sbom_distinguishes_supported_and_default_cuda_architectures(
+    tmp_path: Path,
+) -> None:
+    models, native = _write_locks(tmp_path)
+    native.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "components": {
+                    "llama_cpp": {
+                        "release": "b1",
+                        "cuda_version": "12.8",
+                        "cuda_supported_architectures": [70, 75, 80, 86, 89, 90],
+                        "cuda_default_build_architecture": 86,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    document = build_cyclonedx_sbom(models, native, distributions=[])
+
+    assert document["metadata"]["tools"]["components"][0]["version"] == "4"
+    component = next(
+        item
+        for item in document["components"]
+        if item["bom-ref"] == "native:llama_cpp@b1"
+    )
+    properties = {
+        item["name"]: item["value"] for item in component["properties"]
+    }
+    assert properties["thuyetminh:native:cuda-supported-architectures"] == (
+        "[70, 75, 80, 86, 89, 90]"
+    )
+    assert properties[
+        "thuyetminh:native:cuda-default-build-architecture"
+    ] == "86"
+    assert "thuyetminh:native:cuda-architectures" not in properties
+
+
+@pytest.mark.parametrize(
+    ("cuda_metadata", "message"),
+    [
+        ({"cuda_architectures": "86"}, "cuda_architectures mơ hồ"),
+        (
+            {
+                "cuda_supported_architectures": [70, 86],
+                "cuda_default_build_architecture": 75,
+            },
+            "không thuộc ma trận hỗ trợ",
+        ),
+        (
+            {
+                "cuda_supported_architectures": [86, 70],
+                "cuda_default_build_architecture": 86,
+            },
+            "cuda_supported_architectures không hợp lệ",
+        ),
+    ],
+)
+def test_sbom_rejects_ambiguous_cuda_lock_metadata(
+    tmp_path: Path,
+    cuda_metadata: dict[str, object],
+    message: str,
+) -> None:
+    models, native = _write_locks(tmp_path)
+    native.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "components": {
+                    "llama_cpp": {
+                        "release": "b1",
+                        "cuda_version": "12.8",
+                        **cuda_metadata,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SbomError, match=message):
+        build_cyclonedx_sbom(models, native, distributions=[])
+
+
 def test_duplicate_python_distribution_is_deduplicated(tmp_path: Path) -> None:
     models, native = _write_locks(tmp_path)
     document = build_cyclonedx_sbom(
@@ -166,6 +253,65 @@ def test_duplicate_python_distribution_is_deduplicated(tmp_path: Path) -> None:
         component["bom-ref"] == "python:same-package@1"
         for component in document["components"]
     ) == 1
+
+
+def test_python_runtime_lock_replaces_dev_environment_inventory(
+    tmp_path: Path,
+) -> None:
+    models, native = _write_locks(tmp_path)
+    python_lock = tmp_path / "release-python.lock"
+    python_lock.write_text(
+        "# Runtime only\n"
+        "torch==2.8.0\n"
+        "ctranslate2==4.8.1\n"
+        "uvicorn[standard]==0.51.0\n",
+        encoding="utf-8",
+    )
+
+    document = build_cyclonedx_sbom(
+        models,
+        native,
+        python_lock_path=python_lock,
+        distributions=[FakeDistribution("pytest", "9.1.1")],
+    )
+
+    by_ref = {component["bom-ref"]: component for component in document["components"]}
+    assert "python:torch@2.8.0" in by_ref
+    assert "python:ctranslate2@4.8.1" in by_ref
+    assert "python:pytest@9.1.1" not in by_ref
+    assert by_ref["python:uvicorn@0.51.0"]["scope"] == "required"
+    properties = {
+        item["name"]: item["value"]
+        for item in document["metadata"]["properties"]
+    }
+    assert properties["thuyetminh:python-runtime-lock-sha256"] == _file_sha256(
+        python_lock
+    )
+    assert properties[
+        "thuyetminh:python-runtime-dependency-coverage"
+    ] == "direct-only"
+
+
+def test_python_runtime_lock_rejects_unpinned_or_duplicate_requirements(
+    tmp_path: Path,
+) -> None:
+    models, native = _write_locks(tmp_path)
+    python_lock = tmp_path / "release-python.lock"
+    python_lock.write_text("torch>=2.8\n", encoding="utf-8")
+    with pytest.raises(SbomError, match="ghim chính xác"):
+        build_cyclonedx_sbom(
+            models,
+            native,
+            python_lock_path=python_lock,
+        )
+
+    python_lock.write_text("torch==2.8.0\nTorch==2.8.0\n", encoding="utf-8")
+    with pytest.raises(SbomError, match="package trùng"):
+        build_cyclonedx_sbom(
+            models,
+            native,
+            python_lock_path=python_lock,
+        )
 
 
 def test_legacy_license_labels_are_names_not_invalid_spdx_ids(tmp_path: Path) -> None:
@@ -269,6 +415,22 @@ def test_release_sbom_tracks_complete_web_lock() -> None:
         item["name"]: item["value"] for item in release["metadata"]["properties"]
     }
     assert properties["thuyetminh:web-lock-sha256"] == _file_sha256(web_lock)
+    python_lock = project_root / "requirements" / "release-python.lock"
+    assert properties["thuyetminh:python-runtime-lock-sha256"] == _file_sha256(
+        python_lock
+    )
+    assert properties[
+        "thuyetminh:python-runtime-dependency-coverage"
+    ] == "direct-only"
+    actual_python_refs = {
+        component["bom-ref"]
+        for component in release["components"]
+        if component["bom-ref"].startswith("python:")
+    }
+    assert "python:torch@2.8.0" in actual_python_refs
+    assert "python:ctranslate2@4.8.1" in actual_python_refs
+    assert "python:faster-whisper@1.2.1" in actual_python_refs
+    assert not any(ref.startswith("python:pytest@") for ref in actual_python_refs)
     for component in release["components"]:
         for item in component.get("licenses", []):
             assert "id" not in item.get("license", {}), component["bom-ref"]
