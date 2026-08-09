@@ -310,6 +310,8 @@ def _settings(tmp_path: Path) -> Settings:
         incoming_dir=tmp_path / "incoming",
         jobs_dir=tmp_path / "jobs",
         output_dir=tmp_path / "output",
+        gpu_report_path=tmp_path / "state" / "gpu-health.json",
+        gpu_report_max_age_seconds=5.0,
         prowlarr_api_key_file=None,
         qbittorrent_password_file=None,
         opensubtitles_api_key_file=None,
@@ -334,12 +336,7 @@ def _settings_with_model_vram(
             model["minimum_vram_mib"] = minimum_vram_mib
             break
     settings.models_lock_path.write_text(json.dumps(catalog), encoding="utf-8")
-    return settings.model_copy(
-        update={
-            "gpu_report_path": tmp_path / "state" / "gpu-health.json",
-            "gpu_report_max_age_seconds": 5.0,
-        }
-    )
+    return settings
 
 
 def _write_ready_gpu_report(
