@@ -17,6 +17,10 @@ from dub_server.gpu import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_CUDA_ARCHITECTURES = frozenset({70, 75, 80, 86, 89, 90})
 EXPECTED_CUDA_TOOLKIT_VERSIONS = ("12.6", "12.8")
+EXPECTED_CUDA_TOOLKIT_MINIMUM_DRIVERS = {
+    "12.6": (560, 28, 3),
+    "12.8": (570, 26),
+}
 
 
 def _installer_assignment(name: str) -> str:
@@ -245,6 +249,7 @@ def test_cuda_architecture_metadata_and_implementations_do_not_drift() -> None:
         EXPECTED_CUDA_TOOLKIT_VERSIONS
     )
     assert tuple(CUDA_TOOLKIT_MINIMUM_DRIVERS) == EXPECTED_CUDA_TOOLKIT_VERSIONS
+    assert CUDA_TOOLKIT_MINIMUM_DRIVERS == EXPECTED_CUDA_TOOLKIT_MINIMUM_DRIVERS
     assert llama_metadata["cuda_version"] in EXPECTED_CUDA_TOOLKIT_VERSIONS
     assert "nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04@sha256:" in dockerfile
     assert "cuda_architectures" not in llama_metadata

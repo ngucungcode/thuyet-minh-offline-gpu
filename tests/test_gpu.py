@@ -127,7 +127,7 @@ def test_gpu_preflight_rejects_wrong_driver_or_unknown_toolkit(
 
 
 def test_gpu_preflight_rejects_toolkit_changed_after_native_install() -> None:
-    with pytest.raises(GpuPreflightError, match="host CUDA toolkit 12.8"):
+    with pytest.raises(GpuPreflightError, match=r"host CUDA toolkit 12\.8"):
         inspect_gpu(
             command_runner=lambda _: completed(
                 "GPU-test, NVIDIA RTX Test, 570.124.06, 16384, 8.9\n"
