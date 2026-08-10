@@ -26,6 +26,12 @@ def main() -> int:
         default=Path("native/components.lock.json"),
     )
     parser.add_argument(
+        "--native-receipt",
+        type=Path,
+        default=None,
+        help="Build receipt llama.cpp để ghi CUDA/binary thực tế đã cài",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("var/reports/sbom.cdx.json"),
@@ -48,6 +54,7 @@ def main() -> int:
         args.native_lock,
         web_lock_path=args.web_lock,
         python_lock_path=args.python_lock,
+        native_receipt_path=args.native_receipt,
     )
     print(
         json.dumps(

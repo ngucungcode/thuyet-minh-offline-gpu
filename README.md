@@ -35,8 +35,9 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
 - NVIDIA GPU thuộc ma trận kiến trúc CUDA bên dưới.
 - Ít nhất 16 GiB RAM.
-- NVIDIA driver 570.26 trở lên hoạt động và `nvidia-smi` nhìn thấy GPU.
-- CUDA toolkit 12.8 có `nvcc` tại `/usr/local/cuda/bin/nvcc`.
+- CUDA toolkit 12.6 hoặc 12.8 có `nvcc` tại `/usr/local/cuda/bin/nvcc`.
+- NVIDIA driver tối thiểu 560.28.03 với CUDA 12.6 hoặc 570.26 với CUDA 12.8;
+  `nvidia-smi` phải nhìn thấy GPU.
 - PyTorch CUDA đã được image nhà cung cấp cài sẵn và `torch.cuda.is_available()` trả `True`.
 - Quyền `root` hoặc tài khoản có `sudo`.
 
@@ -75,7 +76,7 @@ chép native binary giữa các máy có kiến trúc khác nhau.
 Trên host nhiều GPU, mọi ngưỡng VRAM/profile đều áp dụng cho **CUDA logical device 0**,
 không lấy card lớn nhất và không cộng VRAM. Installer native ghi UUID card đã chọn vào
 `CUDA_VISIBLE_DEVICES` cùng kiến trúc build trong `.env.native`; worker từ chối khởi động
-nếu UUID hoặc kiến trúc không còn khớp sau reboot. Muốn chọn card native cụ thể, thêm
+nếu UUID, kiến trúc hoặc CUDA toolkit không còn khớp sau reboot. Muốn chọn card native cụ thể, thêm
 `--gpu-device HOST_INDEX_OR_GPU_UUID` vào lệnh installer; card được chọn trở thành logical
 device 0 và được pin bằng UUID sau preflight. Với Docker Compose, đặt
 `DUB_GPU_DEVICE_ID` trong `.env` thành host index hoặc UUID NVIDIA; Compose chỉ cấp đúng
@@ -273,11 +274,11 @@ chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu 
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.2` lên `v0.3.3`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.3` lên `v0.3.4`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.3/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.4/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -293,7 +294,7 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.3/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.4/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
@@ -318,10 +319,10 @@ nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.3.3` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.3.4` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.3/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.4/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
@@ -383,7 +384,8 @@ không thay thế smoke test native và nghiệm thu trên phần cứng thật.
 
 - [Workflow web và cấu hình tích hợp](docs/WEB_WORKFLOW.md)
 - [Catalog model bất biến](config/models.lock.json)
-- [SBOM CycloneDX 1.6 của release](release/sbom.cdx.json)
+- [SBOM CycloneDX 1.6 của release](release/sbom.cdx.json); SBOM tạo trên máy đã cài còn
+  xác minh build receipt và ghi CUDA/binary `llama.cpp` thực tế.
 - [Thông báo dependency và model](THIRD_PARTY_NOTICES.md)
 - [Báo lỗi trên GitHub](https://github.com/ngucungcode/thuyet-minh-offline-gpu/issues)
 

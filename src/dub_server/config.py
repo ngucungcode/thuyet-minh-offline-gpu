@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     gpu_report_max_age_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
     selected_gpu_uuid: str | None = None
     selected_cuda_architecture: str | None = None
+    selected_cuda_toolkit_version: str | None = None
     default_asr_model_id: str = "asr-faster-whisper-large-v3-turbo"
     default_translation_model_id: str = "mt-gemma4-31b-q4"
     default_separation_model_id: str = "separation-tiger-dnr"

@@ -657,6 +657,9 @@ def doctor(
                     expected_cuda_architecture=(
                         gpu_settings.selected_cuda_architecture
                     ),
+                    expected_cuda_toolkit_version=(
+                        gpu_settings.selected_cuda_toolkit_version
+                    ),
                 )
             except GpuPreflightError as exc:
                 report = exc.report
@@ -930,6 +933,9 @@ def recommend_model_profile(
                 require_gpu=True,
                 expected_gpu_uuid=settings.selected_gpu_uuid,
                 expected_cuda_architecture=settings.selected_cuda_architecture,
+                expected_cuda_toolkit_version=(
+                    settings.selected_cuda_toolkit_version
+                ),
             )
             selected_gpu = report.gpus[0]
         except (GpuPreflightError, IndexError) as error:
@@ -1000,6 +1006,7 @@ def install_model_profile(
             require_gpu=True,
             expected_gpu_uuid=settings.selected_gpu_uuid,
             expected_cuda_architecture=settings.selected_cuda_architecture,
+            expected_cuda_toolkit_version=settings.selected_cuda_toolkit_version,
         )
         selected_gpu = gpu_report.gpus[0]
     except (GpuPreflightError, IndexError) as exc:
@@ -1776,9 +1783,13 @@ def maintenance_sbom(
 ) -> None:
     """Tạo CycloneDX SBOM từ các lockfile và môi trường đã cài."""
 
+    arguments = ["--output", str(output.expanduser().resolve(strict=False))]
+    native_receipt = Path("/usr/local/lib/llama.cpp/build-receipt.json")
+    if native_receipt.is_file():
+        arguments.extend(("--native-receipt", str(native_receipt)))
     _run_project_script(
         "scripts/generate-sbom.py",
-        ["--output", str(output.expanduser().resolve(strict=False))],
+        arguments,
     )
 
 

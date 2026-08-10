@@ -164,6 +164,7 @@ def test_sbom_distinguishes_supported_and_default_cuda_architectures(
                     "llama_cpp": {
                         "release": "b1",
                         "cuda_version": "12.8",
+                        "cuda_supported_versions": ["12.6", "12.8"],
                         "cuda_supported_architectures": [70, 75, 80, 86, 89, 90],
                         "cuda_default_build_architecture": 86,
                     }
@@ -175,7 +176,7 @@ def test_sbom_distinguishes_supported_and_default_cuda_architectures(
 
     document = build_cyclonedx_sbom(models, native, distributions=[])
 
-    assert document["metadata"]["tools"]["components"][0]["version"] == "4"
+    assert document["metadata"]["tools"]["components"][0]["version"] == "5"
     component = next(
         item
         for item in document["components"]
@@ -187,16 +188,115 @@ def test_sbom_distinguishes_supported_and_default_cuda_architectures(
     assert properties["thuyetminh:native:cuda-supported-architectures"] == (
         "[70, 75, 80, 86, 89, 90]"
     )
+    assert properties["thuyetminh:native:cuda-supported-versions"] == (
+        '["12.6", "12.8"]'
+    )
+    assert properties["thuyetminh:native:cuda-preferred-version"] == "12.8"
+    assert "thuyetminh:native:cuda-build-version" not in properties
     assert properties[
         "thuyetminh:native:cuda-default-build-architecture"
     ] == "86"
     assert "thuyetminh:native:cuda-architectures" not in properties
 
 
+def test_installed_sbom_uses_verified_native_cuda_receipt(tmp_path: Path) -> None:
+    models, native = _write_locks(tmp_path)
+    commit = "d" * 40
+    native.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "components": {
+                    "llama_cpp": {
+                        "release": "b1",
+                        "commit": commit,
+                        "cuda_version": "12.8",
+                        "cuda_supported_versions": ["12.6", "12.8"],
+                        "cuda_supported_architectures": [70, 75, 80, 86, 89, 90],
+                        "cuda_default_build_architecture": 86,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = tmp_path / "llama-runtime"
+    runtime.mkdir()
+    server = runtime / "llama-server"
+    cli = runtime / "llama-cli"
+    server.write_bytes(b"server-cuda-12.6")
+    cli.write_bytes(b"cli-cuda-12.6")
+    receipt = runtime / "build-receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "release": "b1",
+                "commit": commit,
+                "cuda_version": "12.6",
+                "cuda_architectures": "86",
+                "binaries": {
+                    "llama_server_sha256": hashlib.sha256(
+                        server.read_bytes()
+                    ).hexdigest(),
+                    "llama_cli_sha256": hashlib.sha256(
+                        cli.read_bytes()
+                    ).hexdigest(),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    document = build_cyclonedx_sbom(
+        models,
+        native,
+        native_receipt_path=receipt,
+        distributions=[],
+    )
+
+    component = next(
+        item for item in document["components"] if item["name"] == "llama_cpp"
+    )
+    properties = {
+        item["name"]: item["value"] for item in component["properties"]
+    }
+    assert properties["thuyetminh:native:cuda-preferred-version"] == "12.8"
+    assert properties["thuyetminh:native:cuda-build-version"] == "12.6"
+    assert properties["thuyetminh:native:cuda-build-architectures"] == "86"
+    metadata_properties = {
+        item["name"]: item["value"]
+        for item in document["metadata"]["properties"]
+    }
+    assert metadata_properties["thuyetminh:native-build-receipt-sha256"] == (
+        _file_sha256(receipt)
+    )
+
+    server.write_bytes(b"tampered")
+    with pytest.raises(SbomError, match="llama-server"):
+        build_cyclonedx_sbom(
+            models,
+            native,
+            native_receipt_path=receipt,
+            distributions=[],
+        )
+
+
 @pytest.mark.parametrize(
     ("cuda_metadata", "message"),
     [
         ({"cuda_architectures": "86"}, "cuda_architectures mơ hồ"),
+        (
+            {"cuda_supported_versions": ["12.8", "12.6"]},
+            "cuda_supported_versions không hợp lệ",
+        ),
+        (
+            {
+                "cuda_version": "12.8",
+                "cuda_supported_versions": ["12.6"],
+            },
+            "cuda_version không thuộc ma trận hỗ trợ",
+        ),
         (
             {
                 "cuda_supported_architectures": [70, 86],
@@ -227,6 +327,7 @@ def test_sbom_rejects_ambiguous_cuda_lock_metadata(
                     "llama_cpp": {
                         "release": "b1",
                         "cuda_version": "12.8",
+                        "cuda_supported_versions": ["12.6", "12.8"],
                         **cuda_metadata,
                     }
                 },

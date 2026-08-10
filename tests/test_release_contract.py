@@ -8,11 +8,19 @@ from pathlib import Path
 
 from dub_server import __version__
 from dub_server.api import create_app
-from dub_server.gpu import SUPPORTED_CUDA_ARCHITECTURES
+from dub_server.gpu import (
+    CUDA_TOOLKIT_MINIMUM_DRIVERS,
+    SUPPORTED_CUDA_ARCHITECTURES,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_CUDA_ARCHITECTURES = frozenset({70, 75, 80, 86, 89, 90})
+EXPECTED_CUDA_TOOLKIT_VERSIONS = ("12.6", "12.8")
+EXPECTED_CUDA_TOOLKIT_MINIMUM_DRIVERS = {
+    "12.6": (560, 28, 3),
+    "12.8": (570, 26),
+}
 
 
 def _installer_assignment(name: str) -> str:
@@ -150,7 +158,7 @@ def test_installer_defaults_to_safe_release_and_explicit_legacy_migration() -> N
     assert _installer_assignment("MIGRATE_EXISTING") == "false"
     assert _installer_assignment("UPGRADE_EXISTING") == "false"
     assert _installer_assignment("COMPATIBLE_UPGRADE_FROM") == (
-        "0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2"
+        "0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2 0.3.3"
     )
     assert _installer_assignment("ACCEPTANCE_MODE") == "basic"
     assert _installer_assignment("START_STACK") == "true"
@@ -159,7 +167,11 @@ def test_installer_defaults_to_safe_release_and_explicit_legacy_migration() -> N
     assert "exec {prompt_fd}<>/dev/tty" in installer
     assert "--upgrade-existing" in installer
     assert "main() {" in installer
-    assert installer.rstrip().endswith('main "$@"')
+    assert installer.rstrip().endswith(
+        'if [[ "${BASH_SOURCE[0]:-${0}}" == "${0}" ]]; then\n'
+        '  main "$@"\n'
+        "fi"
+    )
 
 
 def test_deployment_templates_use_the_release_user_agent() -> None:
@@ -233,6 +245,13 @@ def test_cuda_architecture_metadata_and_implementations_do_not_drift() -> None:
     assert native_installer == locked
     assert llama_metadata["cuda_default_build_architecture"] == 86
     assert llama_metadata["cuda_default_build_architecture"] in locked
+    assert tuple(llama_metadata["cuda_supported_versions"]) == (
+        EXPECTED_CUDA_TOOLKIT_VERSIONS
+    )
+    assert tuple(CUDA_TOOLKIT_MINIMUM_DRIVERS) == EXPECTED_CUDA_TOOLKIT_VERSIONS
+    assert CUDA_TOOLKIT_MINIMUM_DRIVERS == EXPECTED_CUDA_TOOLKIT_MINIMUM_DRIVERS
+    assert llama_metadata["cuda_version"] in EXPECTED_CUDA_TOOLKIT_VERSIONS
+    assert "nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04@sha256:" in dockerfile
     assert "cuda_architectures" not in llama_metadata
 
 
@@ -242,6 +261,7 @@ def test_native_llama_build_can_be_overridden_and_is_keyed_by_architecture() -> 
     )
 
     assert ".components.llama_cpp.cuda_version" in installer
+    assert ".components.llama_cpp.cuda_supported_versions" in installer
     assert ".components.llama_cpp.cuda_supported_architectures" in installer
     assert ".components.llama_cpp.cuda_default_build_architecture" in installer
     override_assignment = next(
@@ -262,6 +282,8 @@ def test_native_llama_build_can_be_overridden_and_is_keyed_by_architecture() -> 
     )
     assert 'grep -Fxq -- "${architecture}"' in installer
     assert "LOCKED_LLAMA_CUDA_ARCHITECTURES" in installer
+    assert "LOCKED_LLAMA_CUDA_VERSIONS" in installer
+    assert 'LLAMA_CUDA_VERSION="${ACTUAL_NVCC_RELEASE}"' in installer
 
     label_assignment = re.search(
         rf'^([A-Z][A-Z0-9_]*ARCH[A-Z0-9_]*)="\$\{{{internal_architecture_variable}//;/_\}}"$',
@@ -313,6 +335,7 @@ def test_installer_passes_selected_arch_and_writes_new_profile_defaults() -> Non
         "CUDA_VISIBLE_DEVICES",
         "DUB_SELECTED_GPU_UUID",
         "DUB_SELECTED_CUDA_ARCHITECTURE",
+        "DUB_SELECTED_CUDA_TOOLKIT_VERSION",
     ):
         assert variable in new_env_contract
     assert "migrate_legacy_model_default" in new_env_contract
@@ -328,8 +351,25 @@ def test_native_installer_preflights_driver_architecture_and_cmp_profile() -> No
     assert 'device_uuid.casefold().startswith("gpu-")' in installer
     assert 'device_uuid = f"GPU-{device_uuid[4:]}"' in installer
     assert 'device_uuid = f"GPU-{device_uuid}"' in installer
-    assert "yêu cầu CUDA toolkit 12.8" in installer
-    assert "Cần NVIDIA driver 570.26 trở lên" in installer
+    assert "hỗ trợ CUDA toolkit 12.6 hoặc 12.8" in installer
+    assert re.search(
+        r'12\.6\)\s*minimum_driver_major=560\s*'
+        r'minimum_driver_minor=28\s*'
+        r'minimum_driver_patch=3\s*'
+        r'minimum_driver_version="560\.28\.03"',
+        installer,
+    )
+    assert re.search(
+        r'12\.8\)\s*minimum_driver_major=570\s*'
+        r'minimum_driver_minor=26\s*'
+        r'minimum_driver_patch=0\s*'
+        r'minimum_driver_version="570\.26"',
+        installer,
+    )
+    assert "cuda_toolkit_version=%s" in installer
+    assert "gpu_cuda_toolkit_version" in installer
+    assert "CUDACXX=/usr/local/cuda/bin/nvcc" in installer
+    assert "--native-receipt /usr/local/lib/llama.cpp/build-receipt.json" in installer
     assert _shell_case_architectures(installer, "cuda_arch") == (
         EXPECTED_CUDA_ARCHITECTURES
     )
