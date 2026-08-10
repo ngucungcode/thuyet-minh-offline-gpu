@@ -101,6 +101,10 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.match(page, /rights_confirmed: true/);
   assert.match(page, /useState<"natural" \| "strict">\("natural"\)/);
   assert.match(page, /timing_profile: timingProfile/);
+  assert.match(page, /details\.phase4_step === "timing_rewrite"/);
+  assert.match(page, /Đang xử lý/);
+  assert.match(page, /timing_rewrite_attempt/);
+  assert.match(page, /Lần rút gọn/);
   assert.match(page, /sourceMode === "upload"/);
   assert.match(page, /accept="\.mp4,\.mkv,video\/mp4,video\/x-matroska"/);
   assert.match(page, /accept="\.srt,application\/x-subrip,text\/plain"/);

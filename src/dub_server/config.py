@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     llama_max_output_tokens: int = Field(default=512, ge=32, le=2048)
     llama_startup_timeout_seconds: float = Field(default=300.0, ge=10.0, le=900.0)
     llama_request_timeout_seconds: float = Field(default=180.0, ge=5.0, le=900.0)
+    timing_rewrite_max_attempts: int = Field(default=3, ge=0, le=3)
     tiger_source_dir: Path = Path("/opt/tiger")
     vieneu_entrypoint: Path = Path("/opt/vieneu/vieneu-offline.py")
     separation_chunk_seconds: float = Field(default=120.0, ge=12.0, le=600.0)

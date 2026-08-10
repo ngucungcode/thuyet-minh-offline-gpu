@@ -449,6 +449,60 @@ def test_schema_eight_makes_cover_layout_failure_retryable(
     assert reopened.get_checkpoint(job.id, JobStage.TIMING).payload["completed"] is True
 
 
+def test_schema_nine_makes_legacy_timing_rewrite_failure_retryable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    store = StateStore(database)
+    job = store.create_job(
+        "release-1",
+        {"rights_confirmed": True, "timing_profile": "natural"},
+    )
+    store.update_status(
+        job.id,
+        JobStatus.TIMING,
+        stage=JobStage.TIMING,
+        force=True,
+    )
+    store.save_checkpoint(
+        job.id,
+        JobStage.TTS,
+        {"completed": True, "blocks": [{"ordinal": 87}]},
+    )
+    store.update_status(
+        job.id,
+        JobStatus.FAILED,
+        error_code="timing_rewrite_required",
+        error_message="Khối 88 cần rút gọn",
+        retryable=False,
+    )
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE schema_metadata SET value = '8' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = StateStore(database)
+    migrated = reopened.get_job(job.id)
+
+    assert migrated.retryable is True
+    event = reopened.list_events(job.id)[-1]
+    assert event.event_type == "job.error_reclassified"
+    assert event.payload == {
+        "code": "timing_rewrite_required",
+        "retryable": True,
+        "reason": "timing_narration_auto_rewrite",
+    }
+    resumed = reopened.resume(job.id)
+    assert resumed.status is JobStatus.TIMING
+    assert reopened.get_checkpoint(job.id, JobStage.TTS).payload["blocks"] == [
+        {"ordinal": 87}
+    ]
+
+
 def test_future_schema_is_rejected_without_downgrading_metadata(
     tmp_path: Path,
 ) -> None:
@@ -457,7 +511,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "UPDATE schema_metadata SET value = '9' WHERE key = 'schema_version'"
+            "UPDATE schema_metadata SET value = '10' WHERE key = 'schema_version'"
         )
         connection.commit()
     finally:
@@ -473,7 +527,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
         ).fetchone()[0]
     finally:
         connection.close()
-    assert version == "9"
+    assert version == "10"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

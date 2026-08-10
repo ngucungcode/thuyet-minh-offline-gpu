@@ -19,7 +19,9 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 - TIGER-DnR loại thoại diễn viên nhưng giữ nhạc và hiệu ứng.
 - VieNeu v2 hoặc Piper tạo lời thuyết minh tiếng Việt.
 - Chế độ nhịp tự nhiên dịch gọn theo thời lượng, mượn khoảng lặng lân cận và giới hạn
-  tốc độ toàn câu ở 1,20×; vẫn có chế độ khớp timestamp nghiêm ngặt khi cần.
+  tốc độ toàn câu ở 1,20×. Nếu TTS đo thực tế vẫn dài, hệ thống tự dùng Gemma rút
+  gọn đúng khối lỗi rồi chỉ tổng hợp lại khối đó; vẫn có chế độ khớp timestamp
+  nghiêm ngặt khi cần.
 - Ducking, mix và xuất MP4 H.264 + AAC: nguồn H.264 được passthrough; nguồn HEVC
   chỉ mã hóa lại phần hình sang H.264 bằng CPU để hoạt động nhất quán trên mọi GPU hỗ trợ.
 - Checkpoint atomic, hủy, retry và tiếp tục sau khi tiến trình khởi động lại.
@@ -274,11 +276,11 @@ chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu 
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.3` lên `v0.3.4`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.4` lên `v0.3.5`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.4/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.5/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -294,7 +296,7 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.4/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.5/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
@@ -313,16 +315,17 @@ bại, trình cài phục hồi source và trạng thái stack cũ. Backup sourc
 
 Job tạo trước `v0.3.0` không có `timing_profile` được giữ ở chế độ `strict`, vì vậy
 nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới mặc định dùng
-`natural`; có thể tiếp tục job lỗi có retry bằng lệnh:
+`natural`. Khi nâng lên `v0.3.5`, job cũ dừng ở lỗi `timing_rewrite_required`
+được chuyển thành có thể tiếp tục và sẽ tự rút gọn đúng khối bị tràn. Chạy:
 
 ```bash
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.3.4` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.3.5` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.4/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.5/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có

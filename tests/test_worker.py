@@ -399,6 +399,179 @@ async def test_worker_dispatches_and_safely_finalizes_phase4(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase4_status",
+    [JobStatus.SYNTHESIZING, JobStatus.TIMING],
+    ids=["synthesizing", "timing"],
+)
+async def test_worker_checks_translation_vram_for_natural_timing_rewrite(
+    tmp_path,
+    phase4_status: JobStatus,
+) -> None:
+    store = StateStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(
+        "release-1",
+        {
+            "rights_confirmed": True,
+            "timing_profile": "natural",
+            "models": {
+                "translation": "mt-too-large",
+                "tts": "tts-small",
+            },
+        },
+    )
+    store.update_status(
+        job.id,
+        phase4_status,
+        stage=(
+            JobStage.TTS
+            if phase4_status is JobStatus.SYNTHESIZING
+            else JobStage.TIMING
+        ),
+        progress_permille=800,
+        force=True,
+    )
+    lock_path = tmp_path / "models.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "models": [
+                    {
+                        "id": "tts-small",
+                        "stage": "tts",
+                        "backend": "test",
+                        "license": "MIT",
+                        "minimum_vram_mib": 4096,
+                    },
+                    {
+                        "id": "mt-too-large",
+                        "stage": "mt",
+                        "backend": "test",
+                        "license": "MIT",
+                        "minimum_vram_mib": 8192,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=tmp_path / "unused.sqlite3",
+        models_lock_path=lock_path,
+        models_dir=tmp_path / "models",
+        incoming_dir=tmp_path / "incoming",
+        jobs_dir=tmp_path / "jobs",
+        output_dir=tmp_path / "output",
+    )
+
+    class ForbiddenStage:
+        async def run(self, _job_id: str):
+            raise AssertionError("Oversized rewrite model must not be loaded")
+
+    worked = await process_next_phase4_job(
+        store,
+        ForbiddenStage(),  # type: ignore[arg-type]
+        shutdown=threading.Event(),
+        settings=settings,
+        gpu_report=_ready_gpu_report(vram_mib=6144),
+    )
+
+    failed = store.get_job(job.id)
+    assert worked is True
+    assert failed.status is JobStatus.FAILED
+    assert failed.error_code == "model_vram_insufficient"
+    assert failed.retryable is False
+    assert failed.details["required_model_id"] == "mt-too-large"
+    assert failed.details["required_vram_mib"] == 8192
+    assert failed.details["available_vram_mib"] == 6144
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timing_profile", "rewrite_max_attempts"),
+    [("strict", 3), ("natural", 0)],
+    ids=["strict-profile", "rewrite-disabled"],
+)
+async def test_worker_skips_translation_vram_when_timing_rewrite_is_disabled(
+    tmp_path,
+    timing_profile: str,
+    rewrite_max_attempts: int,
+) -> None:
+    store = StateStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(
+        "release-1",
+        {
+            "rights_confirmed": True,
+            "timing_profile": timing_profile,
+            "models": {
+                "translation": "mt-too-large",
+                "tts": "tts-small",
+            },
+        },
+    )
+    store.update_status(
+        job.id,
+        JobStatus.TIMING,
+        stage=JobStage.TIMING,
+        progress_permille=850,
+        force=True,
+    )
+    lock_path = tmp_path / "models.lock.json"
+    lock_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "models": [
+                    {
+                        "id": "tts-small",
+                        "stage": "tts",
+                        "backend": "test",
+                        "license": "MIT",
+                        "minimum_vram_mib": 4096,
+                    },
+                    {
+                        "id": "mt-too-large",
+                        "stage": "mt",
+                        "backend": "test",
+                        "license": "MIT",
+                        "minimum_vram_mib": 8192,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=tmp_path / "unused.sqlite3",
+        models_lock_path=lock_path,
+        models_dir=tmp_path / "models",
+        incoming_dir=tmp_path / "incoming",
+        jobs_dir=tmp_path / "jobs",
+        output_dir=tmp_path / "output",
+        timing_rewrite_max_attempts=rewrite_max_attempts,
+    )
+    calls: list[str] = []
+
+    class Stage:
+        async def run(self, selected_job_id: str):
+            calls.append(selected_job_id)
+            return store.get_job(selected_job_id)
+
+    worked = await process_next_phase4_job(
+        store,
+        Stage(),  # type: ignore[arg-type]
+        shutdown=threading.Event(),
+        settings=settings,
+        gpu_report=_ready_gpu_report(vram_mib=6144),
+    )
+
+    assert worked is True
+    assert calls == [job.id]
+    assert store.get_job(job.id).status is JobStatus.TIMING
+
+
+@pytest.mark.asyncio
 async def test_worker_does_not_apply_model_vram_floor_after_inference(tmp_path) -> None:
     store = StateStore(tmp_path / "jobs.sqlite3")
     job = store.create_job(

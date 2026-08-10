@@ -235,6 +235,7 @@ class LlamaServerTranslator:
         self._sleeper = sleeper
         self._process: ProcessHandle | None = None
         self._closed = False
+        self._startup_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._request_lock = threading.Lock()
 
@@ -275,6 +276,15 @@ class LlamaServerTranslator:
     def start(self) -> LlamaServerTranslator:
         """Start the local server and wait until `/health` reports ready."""
 
+        # Serialize callers without blocking ``abort``, which intentionally
+        # uses only the lifecycle lock to kill an in-progress model load.
+        with self._startup_lock:
+            return self._start_serialized()
+
+    def _start_serialized(self) -> LlamaServerTranslator:
+        """Start one server while the caller owns ``_startup_lock``."""
+
+        started_process: ProcessHandle | None = None
         with self._lifecycle_lock:
             if self._closed:
                 raise LlamaTranslationError(
@@ -286,6 +296,7 @@ class LlamaServerTranslator:
                 return self
             try:
                 self._process = self._process_factory(self.command)
+                started_process = self._process
             except (OSError, ValueError) as exc:
                 self._process = None
                 raise LlamaTranslationError(
@@ -293,12 +304,31 @@ class LlamaServerTranslator:
                     "Kh\u00f4ng th\u1ec3 kh\u1edfi \u0111\u1ed9ng llama-server c\u1ee5c b\u1ed9",
                     retryable=True,
                 ) from exc
-            try:
-                self._wait_until_healthy()
-            except BaseException:
-                self._stop_process()
-                raise
-            return self
+        # Do not hold the lifecycle lock while llama.cpp loads the model.  The
+        # timing stage must be able to abort this process immediately when the
+        # user cancels instead of waiting for the startup timeout.
+        try:
+            self._wait_until_healthy()
+        except BaseException:
+            with self._lifecycle_lock:
+                if self._process is started_process:
+                    self._stop_process()
+            raise
+        with self._lifecycle_lock:
+            if self._closed:
+                raise LlamaTranslationError(
+                    "translator_closed",
+                    "B\u1ed9 d\u1ecbch llama.cpp \u0111\u00e3 \u0111\u00f3ng",
+                    retryable=False,
+                )
+            process = self._process
+            if process is None or process.poll() is not None:
+                raise LlamaTranslationError(
+                    "server_stopped",
+                    "llama-server c\u1ee5c b\u1ed9 \u0111\u00e3 d\u1eebng",
+                    retryable=True,
+                )
+        return self
 
     def count_tokens(self, text: str) -> int:
         """Count model tokens through llama-server's local `/tokenize` route."""
@@ -496,6 +526,12 @@ class LlamaServerTranslator:
     def close(self) -> None:
         """Idempotently terminate the server, escalating to kill on timeout."""
 
+        # ``abort`` marks the runtime closed before killing it.  Avoid waiting
+        # behind an HTTP request lock in that state; cancellation has already
+        # performed the process and cache cleanup.
+        with self._lifecycle_lock:
+            if self._closed:
+                return
         with self._request_lock:
             with self._lifecycle_lock:
                 if self._closed:
@@ -505,6 +541,24 @@ class LlamaServerTranslator:
             with self._token_cache_lock:
                 self._token_cache_generation += 1
                 self._token_cache.clear()
+
+    def abort(self) -> None:
+        """Immediately kill the server without waiting for an active request.
+
+        ``close`` deliberately serializes behind the request lock.  Cancellation
+        cannot do that because a generation request may be blocked until its
+        HTTP timeout.  Killing the loopback server interrupts that request and
+        releases GPU memory before the TTS process is opened again.
+        """
+
+        with self._lifecycle_lock:
+            if self._closed and self._process is None:
+                return
+            self._closed = True
+            self._abort_process()
+        with self._token_cache_lock:
+            self._token_cache_generation += 1
+            self._token_cache.clear()
 
     def _wait_until_healthy(self) -> None:
         deadline = self._clock() + self._startup_timeout
@@ -703,6 +757,22 @@ class LlamaServerTranslator:
             return
         try:
             process.wait(timeout=self._shutdown_timeout)
+        except (OSError, TimeoutError, subprocess.TimeoutExpired):
+            return
+
+    def _abort_process(self) -> None:
+        """Best-effort immediate kill used only by explicit cancellation."""
+
+        process = self._process
+        self._process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.kill()
+        except OSError:
+            return
+        try:
+            process.wait(timeout=min(self._shutdown_timeout, 1.0))
         except (OSError, TimeoutError, subprocess.TimeoutExpired):
             return
 
