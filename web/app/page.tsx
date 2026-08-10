@@ -715,6 +715,16 @@ function jobProgressView(job: Job): JobProgressView {
       metrics.push({ label: "Block đã khớp", value: blocks });
       summary = `${blocks} block`;
     }
+    if (
+      details.phase4_step === "timing_rewrite" &&
+      typeof details.phase4_message === "string" &&
+      details.phase4_message.trim()
+    ) {
+      summary = details.phase4_message.trim();
+      metrics.push({ label: "Đang xử lý", value: summary });
+      const attempt = nonNegativeNumber(details.timing_rewrite_attempt);
+      if (attempt !== null) metrics.push({ label: "Lần rút gọn", value: formatCount(attempt) });
+    }
   } else if (job.stage === "export") {
     stagePercent = ratioPercent(details.export_processed_us, details.export_duration_us);
     const processed = nonNegativeNumber(details.export_processed_us);

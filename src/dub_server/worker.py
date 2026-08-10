@@ -347,12 +347,21 @@ async def process_next_phase4_job(
         return False
     record = records[0]
     phase4_model_stages: tuple[str, ...]
+    timing_rewrite_stages = (
+        ("mt",)
+        if record.spec.get("timing_profile") == "natural"
+        and (
+            settings is None
+            or settings.timing_rewrite_max_attempts > 0
+        )
+        else ()
+    )
     if record.status in {JobStatus.MIXING, JobStatus.MUXING, JobStatus.VERIFYING}:
         phase4_model_stages = ()
     elif record.status in {JobStatus.SYNTHESIZING, JobStatus.TIMING}:
-        phase4_model_stages = ("tts",)
+        phase4_model_stages = ("tts", *timing_rewrite_stages)
     else:
-        phase4_model_stages = ("separation", "tts")
+        phase4_model_stages = ("separation", "tts", *timing_rewrite_stages)
     if not _ensure_selected_models_fit_vram(
         store,
         record,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -59,6 +61,31 @@ class FakeTransport:
         if isinstance(response, BaseException):
             raise response
         return response
+
+
+class BlockingTransport:
+    def __init__(self, *, block_path: str) -> None:
+        self.block_path = block_path
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        payload: Mapping[str, object] | None,
+        *,
+        timeout_seconds: float,
+    ) -> JsonHttpResponse:
+        del method, payload, timeout_seconds
+        if path == self.block_path:
+            self.entered.set()
+            if not self.release.wait(5.0):
+                raise AssertionError("blocking transport was not released")
+            raise OSError("server socket closed")
+        if path == "/health":
+            return _health_ok()
+        raise AssertionError(f"unexpected request: {path}")
 
 
 def _files(tmp_path: Path) -> tuple[Path, Path]:
@@ -495,3 +522,73 @@ def test_close_escalates_from_terminate_to_kill_and_is_idempotent(tmp_path: Path
     with pytest.raises(LlamaTranslationError) as caught:
         translator.count_tokens("closed")
     assert caught.value.code == "translator_closed"
+
+
+def test_abort_bypasses_blocked_request_and_kills_server_immediately(
+    tmp_path: Path,
+) -> None:
+    transport = BlockingTransport(block_path="/tokenize")
+    translator, process, _ = _translator(tmp_path, transport)  # type: ignore[arg-type]
+    translator.start()
+    errors: list[BaseException] = []
+
+    def request() -> None:
+        try:
+            translator.count_tokens("blocked")
+        except BaseException as error:  # pragma: no branch - thread capture
+            errors.append(error)
+
+    thread = threading.Thread(target=request, daemon=True)
+    thread.start()
+    assert transport.entered.wait(1.0)
+
+    started = time.monotonic()
+    translator.abort()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert process.killed is True
+    # The aborted request still owns the request lock in this fake transport;
+    # close must use its aborted fast path instead of waiting for that lock.
+    close_started = time.monotonic()
+    translator.close()
+    assert time.monotonic() - close_started < 0.5
+    transport.release.set()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], LlamaTranslationError)
+
+
+def test_abort_can_interrupt_model_startup_without_waiting_for_health_timeout(
+    tmp_path: Path,
+) -> None:
+    transport = BlockingTransport(block_path="/health")
+    translator, process, _ = _translator(
+        tmp_path,
+        transport,  # type: ignore[arg-type]
+        startup_timeout_seconds=120.0,
+    )
+    errors: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            translator.start()
+        except BaseException as error:  # pragma: no branch - thread capture
+            errors.append(error)
+
+    thread = threading.Thread(target=start, daemon=True)
+    thread.start()
+    assert transport.entered.wait(1.0)
+
+    started = time.monotonic()
+    translator.abort()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert process.killed is True
+    transport.release.set()
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], LlamaTranslationError)
