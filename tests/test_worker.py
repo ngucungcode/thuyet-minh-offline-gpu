@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+import dub_server.worker as worker_module
 from dub_server.config import Settings
 from dub_server.gpu import ComponentStatus, GpuPreflightReport, NvidiaGpu
 from dub_server.state import JobStage, JobStatus, StateStore
@@ -52,6 +53,27 @@ def _ready_gpu_report(*, vram_mib: int) -> GpuPreflightReport:
         errors=(),
         warnings=(),
     )
+
+
+def test_worker_forwards_installed_cuda_toolkit_to_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    report = _ready_gpu_report(vram_mib=24_576)
+
+    def fake_inspect_gpu(**kwargs):
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(worker_module, "inspect_gpu", fake_inspect_gpu)
+    settings = Settings(
+        selected_gpu_uuid="GPU-test",
+        selected_cuda_architecture="sm_86",
+        selected_cuda_toolkit_version="12.6",
+    )
+
+    assert worker_module._inspect_configured_gpu(settings) is report
+    assert captured["expected_cuda_toolkit_version"] == "12.6"
 
 
 @pytest.mark.asyncio

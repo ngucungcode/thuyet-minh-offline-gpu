@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from dub_server.gpu import (
+    CUDA_TOOLKIT_MINIMUM_DRIVERS,
     ComponentStatus,
     CudaDeviceIdentity,
     GpuPreflightError,
@@ -70,6 +71,88 @@ def test_gpu_preflight_accepts_eligible_gpu() -> None:
     assert report.gpus[0].memory_total_mib == 16384
     assert report.ctranslate2.compute_types == ("float16", "int8_float16")
     assert report.model_dump()["gpus"][0]["uuid"] == "GPU-test"
+
+
+@pytest.mark.parametrize(
+    ("toolkit", "driver", "expected_minimum"),
+    [
+        ("12.6", "560.28.03", "560.28.03"),
+        ("12.8", "570.26", "570.26"),
+    ],
+)
+def test_gpu_driver_floor_tracks_installed_cuda_toolkit(
+    toolkit: str,
+    driver: str,
+    expected_minimum: str,
+) -> None:
+    report = inspect_gpu(
+        command_runner=lambda _: completed(
+            f"GPU-test, NVIDIA RTX Test, {driver}, 16384, 8.9\n"
+        ),
+        torch_probe=successful_torch,
+        ctranslate2_probe=successful_ctranslate2,
+        nvcc_probe=lambda: toolkit,
+        expected_cuda_toolkit_version=toolkit,
+    )
+
+    assert report.ready is True
+    assert report.minimum_driver == expected_minimum
+    assert CUDA_TOOLKIT_MINIMUM_DRIVERS[toolkit] == tuple(
+        int(part) for part in expected_minimum.split(".")
+    )
+
+
+@pytest.mark.parametrize(
+    ("toolkit", "driver"),
+    [
+        ("12.6", "560.28.02"),
+        ("12.8", "569.99"),
+        ("12.7", "570.26"),
+    ],
+)
+def test_gpu_preflight_rejects_wrong_driver_or_unknown_toolkit(
+    toolkit: str,
+    driver: str,
+) -> None:
+    with pytest.raises(GpuPreflightError):
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                f"GPU-test, NVIDIA RTX Test, {driver}, 16384, 8.9\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+            nvcc_probe=lambda: toolkit,
+            expected_cuda_toolkit_version=toolkit,
+        )
+
+
+def test_gpu_preflight_rejects_toolkit_changed_after_native_install() -> None:
+    with pytest.raises(GpuPreflightError, match="host CUDA toolkit 12.8"):
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                "GPU-test, NVIDIA RTX Test, 570.124.06, 16384, 8.9\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+            nvcc_probe=lambda: "12.8",
+            expected_cuda_toolkit_version="12.6",
+        )
+
+
+def test_gpu_preflight_fails_closed_when_nvcc_cannot_be_probed() -> None:
+    def unavailable_nvcc() -> str:
+        raise RuntimeError("nvcc unavailable")
+
+    with pytest.raises(GpuPreflightError, match="toolkit check failed"):
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                "GPU-test, NVIDIA RTX Test, 570.124.06, 16384, 8.9\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+            nvcc_probe=unavailable_nvcc,
+            expected_cuda_toolkit_version="12.8",
+        )
 
 
 def test_gpu_preflight_binds_native_runtime_to_expected_uuid_and_architecture() -> None:

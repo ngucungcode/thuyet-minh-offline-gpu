@@ -2,8 +2,43 @@
 
 set -Eeuo pipefail
 
+installer_select_cuda_contract() {
+  case "$1" in
+    12.6)
+      minimum_driver_major=560
+      minimum_driver_minor=28
+      minimum_driver_patch=3
+      minimum_driver_version="560.28.03"
+      ;;
+    12.8)
+      minimum_driver_major=570
+      minimum_driver_minor=26
+      minimum_driver_patch=0
+      minimum_driver_version="570.26"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+installer_parse_driver_version() {
+  local value="$1"
+  [[ "${value}" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]] || return 1
+  driver_major="${BASH_REMATCH[1]}"
+  driver_minor="${BASH_REMATCH[2]}"
+  driver_patch="${BASH_REMATCH[4]:-0}"
+}
+
+installer_driver_meets_minimum() {
+  ! ((10#${driver_major} < minimum_driver_major \
+    || (10#${driver_major} == minimum_driver_major \
+      && 10#${driver_minor} < minimum_driver_minor) \
+    || (10#${driver_major} == minimum_driver_major \
+      && 10#${driver_minor} == minimum_driver_minor \
+      && 10#${driver_patch} < minimum_driver_patch)))
+}
+
 main() {
-INSTALLER_VERSION="0.3.3"
+INSTALLER_VERSION="0.3.4"
 DEFAULT_REPOSITORY_URL="https://github.com/ngucungcode/thuyet-minh-offline-gpu.git"
 REPOSITORY_URL="${DUB_REPOSITORY_URL:-${DEFAULT_REPOSITORY_URL}}"
 SOURCE_REF="v${INSTALLER_VERSION}"
@@ -19,7 +54,7 @@ ASSUME_YES=false
 DRY_RUN=false
 MIGRATE_EXISTING=false
 UPGRADE_EXISTING=false
-COMPATIBLE_UPGRADE_FROM="0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2"
+COMPATIBLE_UPGRADE_FROM="0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2 0.3.3"
 MIGRATED_RUNTIME_REUSABLE=false
 MIGRATION_BACKUP_PATH=""
 MIGRATION_ACTIVE=false
@@ -321,20 +356,17 @@ nvcc_release="$(
     | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
     | tail -n 1
 )"
-[[ "${nvcc_release}" == "12.8" ]] \
-  || die "Release này yêu cầu CUDA toolkit 12.8; hiện có ${nvcc_release:-không xác định}"
+installer_select_cuda_contract "${nvcc_release}" \
+  || die "Release này hỗ trợ CUDA toolkit 12.6 hoặc 12.8; hiện có ${nvcc_release:-không xác định}"
 
 driver_report="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits)" \
   || die "Không đọc được NVIDIA driver"
 driver_version="$(printf '%s\n' "${driver_report}" | head -n 1 | xargs)"
-if [[ ! "${driver_version}" =~ ^([0-9]+)\.([0-9]+) ]]; then
+if ! installer_parse_driver_version "${driver_version}"; then
   die "Phiên bản NVIDIA driver không hợp lệ: ${driver_version}"
 fi
-driver_major="${BASH_REMATCH[1]}"
-driver_minor="${BASH_REMATCH[2]}"
-if ((10#${driver_major} < 570 \
-  || (10#${driver_major} == 570 && 10#${driver_minor} < 26))); then
-  die "Cần NVIDIA driver 570.26 trở lên; hiện có ${driver_version}"
+if ! installer_driver_meets_minimum; then
+  die "CUDA toolkit ${nvcc_release} cần NVIDIA driver ${minimum_driver_version} trở lên; hiện có ${driver_version}"
 fi
 torch_gpu_report="$(python3 - <<'PY'
 try:
@@ -433,7 +465,7 @@ required_kib=$((required_disk_gib * 1024 * 1024))
   || die "Profile ${MODEL_PROFILE} cần ít nhất ${required_disk_gib} GiB trống"
 
 log "Installer ${INSTALLER_VERSION}"
-log "GPU: ${gpu_name}, ${vram_mib} MiB VRAM, sm_${cuda_arch}, driver ${driver_version}"
+log "GPU: ${gpu_name}, ${vram_mib} MiB VRAM, sm_${cuda_arch}, driver ${driver_version}, CUDA toolkit ${nvcc_release}"
 log "Source: ${REPOSITORY_URL}@${SOURCE_REF}"
 log "Cài tại: ${INSTALL_DIR}"
 log "Dữ liệu: ${DATA_DIR}"
@@ -542,7 +574,7 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
       if ! migrate_git_release_upgrade \
         "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" \
         "${DATA_DIR_EXPLICIT}" "${INSTALLER_VERSION}" \
-        "${COMPATIBLE_UPGRADE_FROM}" "sm_${cuda_arch}"; then
+        "${COMPATIBLE_UPGRADE_FROM}" "sm_${cuda_arch}" "${nvcc_release}"; then
         if [[ -d "${staging_dir}" ]]; then
           rm -rf -- "${staging_dir}"
         fi
@@ -582,7 +614,7 @@ if [[ -z "${SCRIPT_ROOT}" ]]; then
     source "${migration_helper}"
     if ! migrate_legacy_install \
       "${INSTALL_DIR}" "${staging_dir}" "${DATA_DIR}" \
-      "${DATA_DIR_EXPLICIT}" legacy "sm_${cuda_arch}"; then
+      "${DATA_DIR_EXPLICIT}" legacy "sm_${cuda_arch}" "${nvcc_release}"; then
       if [[ -d "${staging_dir}" ]]; then
         rm -rf -- "${staging_dir}"
       fi
@@ -714,6 +746,7 @@ fi
 upsert_native_env_value CUDA_VISIBLE_DEVICES "${gpu_uuid}"
 upsert_native_env_value DUB_SELECTED_GPU_UUID "${gpu_uuid}"
 upsert_native_env_value DUB_SELECTED_CUDA_ARCHITECTURE "sm_${cuda_arch}"
+upsert_native_env_value DUB_SELECTED_CUDA_TOOLKIT_VERSION "${nvcc_release}"
 chmod 0600 "${ENV_FILE}"
 
 # shellcheck disable=SC1091
@@ -730,6 +763,7 @@ fingerprint="$(
   cd -- "${PROJECT_ROOT}"
   {
     printf 'cuda_architecture=sm_%s\n' "${cuda_arch}"
+    printf 'cuda_toolkit_version=%s\n' "${nvcc_release}"
     sha256sum \
       pyproject.toml \
       .env.native.example \
@@ -763,7 +797,8 @@ fi
 if [[ "${bootstrap_required}" == true ]]; then
   log "Bootstrap runtime native và chạy smoke check production"
   stage_started_seconds=${SECONDS}
-  DUB_LLAMA_CUDA_ARCHITECTURES="${cuda_arch}" \
+  CUDACXX=/usr/local/cuda/bin/nvcc \
+    DUB_LLAMA_CUDA_ARCHITECTURES="${cuda_arch}" \
     "${PROJECT_ROOT}/scripts/native-bootstrap.sh"
   bootstrap_seconds=$((SECONDS - stage_started_seconds))
   bootstrap_performed=true
@@ -943,6 +978,7 @@ install -d -m 0750 -o "${DUB_NATIVE_USER}" -g "${DUB_NATIVE_USER}" \
 "${DUB_VENV_DIR}/bin/python" "${PROJECT_ROOT}/scripts/generate-sbom.py" \
   --models-lock "${PROJECT_ROOT}/config/models.lock.json" \
   --native-lock "${PROJECT_ROOT}/native/components.lock.json" \
+  --native-receipt /usr/local/lib/llama.cpp/build-receipt.json \
   --output "${DUB_NATIVE_ROOT}/reports/sbom.cdx.json"
 
 commit="source-archive"
@@ -964,6 +1000,7 @@ jq -n \
   --arg gpu_driver_version "${driver_version}" \
   --arg gpu_compute_capability "${compute_cap}" \
   --arg gpu_cuda_architecture "sm_${cuda_arch}" \
+  --arg gpu_cuda_toolkit_version "${nvcc_release}" \
   --arg gpu_support_tier "${gpu_support_tier}" \
   --argjson gpu_vram_mib "${vram_mib}" \
   --argjson bootstrap_performed "${bootstrap_performed}" \
@@ -980,6 +1017,7 @@ jq -n \
       vram_mib:$gpu_vram_mib,
       compute_capability:$gpu_compute_capability,
       cuda_architecture:$gpu_cuda_architecture,
+      cuda_toolkit_version:$gpu_cuda_toolkit_version,
       support_tier:$gpu_support_tier},
     performance:{bootstrap_performed:$bootstrap_performed,
       bootstrap_seconds:$bootstrap_seconds,
@@ -1008,4 +1046,6 @@ log "Kiểm tra: dub doctor && dub stack status"
 log "Bắt đầu: dub search \"Tên phim\" --year 2024"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]:-${0}}" == "${0}" ]]; then
+  main "$@"
+fi

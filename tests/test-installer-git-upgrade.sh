@@ -59,7 +59,7 @@ create_git_project() {
     ']}' >"${root}/config/models.lock.json"
   printf '%s\n' \
     '{"schema_version":1,"components":{' \
-    '"llama_cpp":{},"prowlarr":{},"qbittorrent_nox":{}' \
+    '"llama_cpp":{"cuda_version":"12.8"},"prowlarr":{},"qbittorrent_nox":{}' \
     '}}' >"${root}/native/components.lock.json"
   printf '[supervisord]\nnodaemon=true\n' >"${root}/native/supervisord.conf"
   printf '__version__ = "%s"\n' "${version}" >"${root}/src/dub_server/__init__.py"
@@ -152,6 +152,25 @@ prepare_installed_release() {
     "${version}" "${commit}" >"${root}/var/install-state.json"
 }
 
+# Since v0.3.4 the state records the toolkit that actually built llama.cpp.
+# It must override the preferred lock value, and a missing field must fail
+# closed instead of silently pretending a CUDA 12.6 runtime was built by 12.8.
+state_toolkit_root="${TEST_ROOT}/state-toolkit"
+create_git_project "${state_toolkit_root}" 0.3.4 state-toolkit
+mkdir -p "${state_toolkit_root}/var"
+printf '%s\n' \
+  '{"installer_version":"0.3.4","gpu":{"cuda_toolkit_version":"12.6"}}' \
+  >"${state_toolkit_root}/var/install-state.json"
+[[ "$(migration_installed_cuda_toolkit_version \
+  "${state_toolkit_root}" "${state_toolkit_root}/var")" == 12.6 ]] \
+  || fail "install-state CUDA 12.6 không được ưu tiên"
+printf '%s\n' '{"installer_version":"0.3.4","gpu":{}}' \
+  >"${state_toolkit_root}/var/install-state.json"
+if migration_installed_cuda_toolkit_version \
+  "${state_toolkit_root}" "${state_toolkit_root}/var" >/dev/null 2>&1; then
+  fail "State v0.3.4 thiếu CUDA toolkit đã fallback sang lock preferred"
+fi
+
 # A runtime built by releases through v0.3.2 is sm_86. Moving the deployment
 # to a different GPU architecture must fail before source or stack mutation.
 gpu_swap_root="${TEST_ROOT}/gpu-swap-current"
@@ -168,6 +187,27 @@ fi
   || fail "GPU architecture mismatch đã đổi source hiện tại"
 assert_absent "${gpu_swap_root}.migration-state.json"
 
+# A native runtime compiled with another CUDA toolkit must not be reused after
+# the provider changes /usr/local/cuda, even when the GPU architecture matches.
+# Use a fresh staged tree so this assertion cannot pass because a previous
+# negative migration test intentionally left staging-side preflight artifacts.
+cuda_swap_root="${TEST_ROOT}/cuda-swap-current"
+cuda_swap_stage="${TEST_ROOT}/cuda-swap-stage"
+cuda_swap_error="${TEST_ROOT}/cuda-swap-error.log"
+create_git_project "${cuda_swap_root}" 0.3.2 cuda-old
+create_git_project "${cuda_swap_stage}" 0.3.3 cuda-new
+prepare_installed_release "${cuda_swap_root}" 0.3.2 cuda-model
+if migrate_git_release_upgrade \
+  "${cuda_swap_root}" "${cuda_swap_stage}" "${cuda_swap_root}/var" false \
+  0.3.3 "0.3.2" sm_86 12.6 2>"${cuda_swap_error}"; then
+  fail "Upgrade tái sử dụng nhầm runtime CUDA 12.8 trên toolkit 12.6"
+fi
+grep -Fq 'Runtime CUDA 12.8' "${cuda_swap_error}" \
+  || fail "CUDA toolkit mismatch không bị chặn đúng lý do"
+[[ "$(<"${cuda_swap_root}/SOURCE_MARKER")" == cuda-old ]] \
+  || fail "CUDA toolkit mismatch đã đổi source hiện tại"
+assert_absent "${cuda_swap_root}.migration-state.json"
+
 # Version-only and application-source changes are compatible. The source swap
 # must preserve the persistent runtime and support a complete rollback.
 upgrade_root="${TEST_ROOT}/upgrade-current"
@@ -179,12 +219,12 @@ create_git_project "${upgrade_stage}" 0.3.3 new
 # already-installed sm_86 runtime.
 printf '%s\n' \
   '{"schema_version":1,"components":{' \
-  '"llama_cpp":{"release":"fixture","cuda_architectures":"86"},' \
+  '"llama_cpp":{"release":"fixture","cuda_version":"12.8","cuda_architectures":"86"},' \
   '"prowlarr":{},"qbittorrent_nox":{}' \
   '}}' >"${upgrade_root}/native/components.lock.json"
 printf '%s\n' \
   '{"schema_version":1,"components":{' \
-  '"llama_cpp":{"release":"fixture","cuda_supported_architectures":[70,75,80,86,89,90],"cuda_default_build_architecture":86},' \
+  '"llama_cpp":{"release":"fixture","cuda_version":"12.8","cuda_supported_versions":["12.6","12.8"],"cuda_supported_architectures":[70,75,80,86,89,90],"cuda_default_build_architecture":86},' \
   '"prowlarr":{},"qbittorrent_nox":{}' \
   '}}' >"${upgrade_stage}/native/components.lock.json"
 git -C "${upgrade_root}" add native/components.lock.json
@@ -234,7 +274,7 @@ touch "${MIGRATION_TEST_STACK_STATE}"
 
 migrate_git_release_upgrade \
   "${upgrade_root}" "${upgrade_stage}" "${upgrade_root}/var" false \
-  0.3.3 "0.3.2"
+  0.3.3 "0.3.2" sm_86 12.8
 
 [[ "$(<"${upgrade_root}/SOURCE_MARKER")" == new ]] \
   || fail "Source release mới chưa active"

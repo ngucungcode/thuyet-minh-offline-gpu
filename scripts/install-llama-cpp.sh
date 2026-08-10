@@ -14,6 +14,20 @@ fi
 LLAMA_RELEASE="$(jq -er '.components.llama_cpp.release' "${LOCK_PATH}")"
 LLAMA_COMMIT="$(jq -er '.components.llama_cpp.commit' "${LOCK_PATH}")"
 LLAMA_REPOSITORY="$(jq -er '.components.llama_cpp.repository' "${LOCK_PATH}")"
+LOCKED_LLAMA_DEFAULT_CUDA_VERSION="$(
+  jq -er '.components.llama_cpp.cuda_version' "${LOCK_PATH}"
+)"
+LOCKED_LLAMA_CUDA_VERSIONS="$(
+  jq -er '
+    .components.llama_cpp.cuda_supported_versions as $versions
+    | if ($versions | type) == "array" and ($versions | length) > 0
+        and ($versions | all(.[]; type == "string" and test("^[0-9]+\\.[0-9]+$")))
+        and $versions == ($versions | sort | unique)
+      then $versions | join(";")
+      else error("invalid cuda_supported_versions")
+      end
+  ' "${LOCK_PATH}"
+)"
 LOCKED_LLAMA_CUDA_ARCHITECTURES="$(
   jq -er '
     .components.llama_cpp.cuda_supported_architectures
@@ -28,10 +42,8 @@ LOCKED_LLAMA_DEFAULT_CUDA_ARCHITECTURE="$(
   jq -er '.components.llama_cpp.cuda_default_build_architecture | tostring' \
     "${LOCK_PATH}"
 )"
-LLAMA_CUDA_VERSION="$(jq -er '.components.llama_cpp.cuda_version' "${LOCK_PATH}")"
 LLAMA_CUDA_ARCHITECTURES="${DUB_LLAMA_CUDA_ARCHITECTURES:-${LOCKED_LLAMA_DEFAULT_CUDA_ARCHITECTURE}}"
 LLAMA_CUDA_ARCH_LABEL="${LLAMA_CUDA_ARCHITECTURES//;/_}"
-LLAMA_TARGET="/usr/local/lib/llama.cpp-${LLAMA_RELEASE}-cuda${LLAMA_CUDA_VERSION}-sm${LLAMA_CUDA_ARCH_LABEL}-offline"
 LLAMA_LINK="/usr/local/lib/llama.cpp"
 NVCC_PATH="${CUDACXX:-/usr/local/cuda/bin/nvcc}"
 
@@ -48,10 +60,18 @@ ACTUAL_NVCC_RELEASE="$(
     | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
     | tail -n 1
 )"
-if [[ "${ACTUAL_NVCC_RELEASE}" != "${LLAMA_CUDA_VERSION}" ]]; then
-  echo "Can CUDA toolkit ${LLAMA_CUDA_VERSION}; hien co ${ACTUAL_NVCC_RELEASE:-khong xac dinh}" >&2
+if ! tr ';' '\n' <<<"${LOCKED_LLAMA_CUDA_VERSIONS}" \
+    | grep -Fxq -- "${ACTUAL_NVCC_RELEASE}"; then
+  echo "CUDA toolkit ${ACTUAL_NVCC_RELEASE:-khong xac dinh} khong nam trong ma tran ho tro ${LOCKED_LLAMA_CUDA_VERSIONS//;/, }" >&2
   exit 2
 fi
+if ! tr ';' '\n' <<<"${LOCKED_LLAMA_CUDA_VERSIONS}" \
+    | grep -Fxq -- "${LOCKED_LLAMA_DEFAULT_CUDA_VERSION}"; then
+  echo "CUDA toolkit mac dinh khong nam trong ma tran ho tro" >&2
+  exit 2
+fi
+LLAMA_CUDA_VERSION="${ACTUAL_NVCC_RELEASE}"
+LLAMA_TARGET="/usr/local/lib/llama.cpp-${LLAMA_RELEASE}-cuda${LLAMA_CUDA_VERSION}-sm${LLAMA_CUDA_ARCH_LABEL}-offline"
 if [[ ! "${LLAMA_CUDA_ARCHITECTURES}" =~ ^[0-9]{2,3}(\;[0-9]{2,3})*$ ]]; then
   echo "Danh sach CUDA architecture khong hop le: ${LLAMA_CUDA_ARCHITECTURES}" >&2
   exit 2
@@ -75,14 +95,21 @@ done
 
 if [[ -e "${LLAMA_TARGET}" || -L "${LLAMA_TARGET}" ]]; then
   if [[ -d "${LLAMA_TARGET}" && ! -L "${LLAMA_TARGET}" \
-      && -x "${LLAMA_TARGET}/llama-server" ]] \
+      && -x "${LLAMA_TARGET}/llama-server" \
+      && -x "${LLAMA_TARGET}/llama-cli" ]] \
       && "${LLAMA_TARGET}/llama-server" --version 2>&1 | grep -Fq "${LLAMA_COMMIT:0:7}" \
       && jq -e \
+        --arg release "${LLAMA_RELEASE}" \
         --arg commit "${LLAMA_COMMIT}" \
         --arg cuda_version "${LLAMA_CUDA_VERSION}" \
         --arg cuda_architectures "${LLAMA_CUDA_ARCHITECTURES}" \
-        '.commit == $commit and .cuda_version == $cuda_version and
-          .cuda_architectures == $cuda_architectures' \
+        --arg llama_server_sha256 "$(sha256sum "${LLAMA_TARGET}/llama-server" | awk '{print $1}')" \
+        --arg llama_cli_sha256 "$(sha256sum "${LLAMA_TARGET}/llama-cli" | awk '{print $1}')" \
+        '.release == $release and .commit == $commit and
+          .cuda_version == $cuda_version and
+          .cuda_architectures == $cuda_architectures and
+          .binaries.llama_server_sha256 == $llama_server_sha256 and
+          .binaries.llama_cli_sha256 == $llama_cli_sha256' \
         "${LLAMA_TARGET}/build-receipt.json" >/dev/null 2>&1; then
     ln -sfnT "${LLAMA_TARGET}" "${LLAMA_LINK}"
     exit 0

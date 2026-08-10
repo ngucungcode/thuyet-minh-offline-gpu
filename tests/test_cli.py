@@ -702,6 +702,26 @@ def test_model_recommendation_uses_logical_cuda_zero_not_largest_host_gpu(
     assert payload["gpu"]["name"] == "Tesla T4"
 
 
+def test_model_recommendation_forwards_installed_cuda_toolkit(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_inspect_gpu(**kwargs):
+        captured.update(kwargs)
+        return _gpu_report(
+            _gpu("NVIDIA RTX 3090", vram_mib=24_576, capability="8.6")
+        )
+
+    monkeypatch.setenv("DUB_SELECTED_CUDA_TOOLKIT_VERSION", "12.6")
+    monkeypatch.setattr(cli, "inspect_gpu", fake_inspect_gpu)
+
+    result = runner.invoke(cli.app, ["models", "recommend"])
+
+    assert result.exit_code == 0
+    assert captured["expected_cuda_toolkit_version"] == "12.6"
+
+
 def test_cmp_170hx_is_never_recommended_above_minimal(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,

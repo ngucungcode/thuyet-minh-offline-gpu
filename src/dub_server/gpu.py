@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 MIN_DRIVER = (570, 26)
+CUDA_TOOLKIT_MINIMUM_DRIVERS = {
+    "12.6": (560, 28, 3),
+    "12.8": MIN_DRIVER,
+}
 MIN_COMPUTE_CAPABILITY = (7, 0)
 MIN_VRAM_MIB = 6144
 SUPPORTED_CUDA_ARCHITECTURES = frozenset(
@@ -99,6 +103,7 @@ def gpu_support_tier(gpu: NvidiaGpu) -> str:
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 ComponentProbe = Callable[[], ComponentStatus]
+NvccProbe = Callable[[], str]
 
 
 def _run_command(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -111,6 +116,19 @@ def _run_command(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def probe_nvcc_release() -> str:
+    """Return the host toolkit feature release used by native artifacts."""
+
+    result = _run_command(("/usr/local/cuda/bin/nvcc", "--version"))
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit code {result.returncode}"
+        raise RuntimeError(f"nvcc failed: {detail}")
+    match = re.search(r"\brelease\s+([0-9]+\.[0-9]+)\b", result.stdout)
+    if match is None:
+        raise RuntimeError("nvcc did not report a CUDA feature release")
+    return match.group(1)
+
+
 def _version_tuple(value: str) -> tuple[int, ...]:
     numbers: list[int] = []
     for part in value.strip().split("."):
@@ -119,6 +137,15 @@ def _version_tuple(value: str) -> tuple[int, ...]:
             break
         numbers.append(int(digits))
     return tuple(numbers)
+
+
+def _format_version(value: tuple[int, ...]) -> str:
+    if len(value) <= 2:
+        return ".".join(str(part) for part in value)
+    return ".".join(
+        str(part) if index < 2 else f"{part:02d}"
+        for index, part in enumerate(value)
+    )
 
 
 def _normalize_nvidia_gpu_uuid(value: object | None) -> str | None:
@@ -205,16 +232,44 @@ def inspect_gpu(
     command_runner: CommandRunner = _run_command,
     torch_probe: ComponentProbe = probe_torch_cuda,
     ctranslate2_probe: ComponentProbe = probe_ctranslate2_cuda,
-    minimum_driver: tuple[int, int] = MIN_DRIVER,
+    nvcc_probe: NvccProbe = probe_nvcc_release,
+    minimum_driver: tuple[int, ...] | None = None,
     minimum_compute_capability: tuple[int, int] = MIN_COMPUTE_CAPABILITY,
     minimum_vram_mib: int = MIN_VRAM_MIB,
     expected_gpu_uuid: str | None = None,
     expected_cuda_architecture: str | None = None,
+    expected_cuda_toolkit_version: str | None = None,
 ) -> GpuPreflightReport:
     """Inspect GPU readiness and optionally fail closed for production workers."""
 
     failures: list[str] = []
     warnings: list[str] = []
+    configured_toolkit = (expected_cuda_toolkit_version or "").strip()
+    if minimum_driver is None:
+        minimum_driver = CUDA_TOOLKIT_MINIMUM_DRIVERS.get(
+            configured_toolkit,
+            MIN_DRIVER,
+        )
+    if configured_toolkit and configured_toolkit not in CUDA_TOOLKIT_MINIMUM_DRIVERS:
+        failures.append(
+            "configured installed runtime CUDA toolkit version is invalid: "
+            f"{configured_toolkit}"
+        )
+    elif configured_toolkit:
+        try:
+            actual_toolkit = nvcc_probe().strip()
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            failures.append(
+                "installed runtime CUDA toolkit check failed: "
+                f"{type(error).__name__}: {error}"
+            )
+        else:
+            if actual_toolkit != configured_toolkit:
+                failures.append(
+                    "host CUDA toolkit "
+                    f"{actual_toolkit or 'unknown'} does not match installed runtime "
+                    f"{configured_toolkit}"
+                )
     gpus: tuple[NvidiaGpu, ...] = ()
     try:
         result = command_runner(
@@ -308,7 +363,9 @@ def inspect_gpu(
     for index, gpu in enumerate(gpus):
         gpu_failures: list[str] = []
         if _version_tuple(gpu.driver_version) < minimum_driver:
-            gpu_failures.append(f"driver {gpu.driver_version} < {minimum_driver[0]}.{minimum_driver[1]}")
+            gpu_failures.append(
+                f"driver {gpu.driver_version} < {_format_version(minimum_driver)}"
+            )
         capability = _version_tuple(gpu.compute_capability)
         if capability not in SUPPORTED_CUDA_ARCHITECTURES:
             gpu_failures.append(
@@ -359,7 +416,7 @@ def inspect_gpu(
         ready=ready,
         enforced=require_gpu,
         checked_at=datetime.now(UTC).isoformat(),
-        minimum_driver=f"{minimum_driver[0]}.{minimum_driver[1]}",
+        minimum_driver=_format_version(minimum_driver),
         minimum_compute_capability=f"{minimum_compute_capability[0]}.{minimum_compute_capability[1]}",
         supported_cuda_architectures=tuple(
             f"sm_{major}{minor}"
@@ -443,8 +500,10 @@ __all__ = [
     "GPU_SUPPORT_EXPERIMENTAL",
     "GPU_SUPPORT_MAINTENANCE_LIMITED",
     "GPU_SUPPORT_SUPPORTED",
+    "CUDA_TOOLKIT_MINIMUM_DRIVERS",
     "NvidiaGpu",
     "gpu_support_tier",
+    "probe_nvcc_release",
     "SUPPORTED_CUDA_ARCHITECTURES",
     "inspect_gpu",
     "read_gpu_report",

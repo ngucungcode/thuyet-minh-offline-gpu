@@ -51,6 +51,7 @@ def _inspect_configured_gpu(settings: Settings) -> GpuPreflightReport:
         require_gpu=True,
         expected_gpu_uuid=settings.selected_gpu_uuid,
         expected_cuda_architecture=settings.selected_cuda_architecture,
+        expected_cuda_toolkit_version=settings.selected_cuda_toolkit_version,
     )
 
 

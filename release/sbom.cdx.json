@@ -615,8 +615,8 @@
           "value": "9d9a6d29f6b981cc7f41983d26e56485c6af1811"
         },
         {
-          "name": "thuyetminh:native:cuda-version",
-          "value": "12.8"
+          "name": "thuyetminh:native:cuda-supported-versions",
+          "value": "[\"12.6\", \"12.8\"]"
         },
         {
           "name": "thuyetminh:native:cuda-supported-architectures",
@@ -625,6 +625,10 @@
         {
           "name": "thuyetminh:native:cuda-default-build-architecture",
           "value": "86"
+        },
+        {
+          "name": "thuyetminh:native:cuda-preferred-version",
+          "value": "12.8"
         }
       ],
       "type": "library",
@@ -27069,7 +27073,7 @@
       ],
       "name": "thuyet-minh-offline-gpu",
       "type": "application",
-      "version": "0.3.3"
+      "version": "0.3.4"
     },
     "properties": [
       {
@@ -27078,11 +27082,11 @@
       },
       {
         "name": "thuyetminh:native-lock-sha256",
-        "value": "d2298b5ee672eddd3d2004ab3200c82f9bb70a3238355dfee7d3c9064e0f61c9"
+        "value": "f142736a8cfa785c57e55daa57ee6d5760483ef65ea402f6e4bb7fee3dffed64"
       },
       {
         "name": "thuyetminh:web-lock-sha256",
-        "value": "1a993089c2532d387af4206dc5e044ec02bf8237d07efc8923f99fdb3fe4f132"
+        "value": "7cfdff2da98d6eb59ce010bc07c0f830b33899fc9a06291a19e939a1fc335646"
       },
       {
         "name": "thuyetminh:python-runtime-lock-sha256",
@@ -27093,18 +27097,18 @@
         "value": "direct-only"
       }
     ],
-    "timestamp": "2026-08-09T18:25:11Z",
+    "timestamp": "2026-08-10T03:29:55Z",
     "tools": {
       "components": [
         {
           "name": "stdlib-sbom-generator",
           "type": "application",
-          "version": "4"
+          "version": "5"
         }
       ]
     }
   },
-  "serialNumber": "urn:uuid:7cc8dffe-1e32-45ed-ad94-c26fc7283d82",
+  "serialNumber": "urn:uuid:ef5ae7d9-2d52-404f-83b7-3c478e0039bb",
   "specVersion": "1.6",
   "version": 1
 }

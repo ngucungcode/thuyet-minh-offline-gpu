@@ -40,6 +40,7 @@ def build_cyclonedx_sbom(
     *,
     web_lock_path: Path | None = None,
     python_lock_path: Path | None = None,
+    native_receipt_path: Path | None = None,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
     generated_at: datetime | None = None,
     serial_number: str | None = None,
@@ -49,6 +50,11 @@ def build_cyclonedx_sbom(
     models_lock = _read_lock(models_lock_path, expected_collection="models")
     native_lock = _read_lock(native_lock_path, expected_collection="components")
     _validate_native_lock(native_lock["components"])
+    native_receipt = (
+        _read_llama_receipt(native_receipt_path, native_lock["components"])
+        if native_receipt_path is not None
+        else None
+    )
     timestamp = generated_at or datetime.now(UTC)
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
@@ -68,7 +74,10 @@ def build_cyclonedx_sbom(
         python_components = _python_lock_components(python_lock_path)
         application_version = __version__
     model_components = _model_components(models_lock["models"])
-    native_components = _native_components(native_lock["components"])
+    native_components = _native_components(
+        native_lock["components"],
+        llama_receipt=native_receipt,
+    )
     web_components: list[dict[str, Any]] = []
     if web_lock_path is not None:
         web_lock = _read_web_lock(web_lock_path)
@@ -115,6 +124,13 @@ def build_cyclonedx_sbom(
                 },
             )
         )
+    if native_receipt_path is not None:
+        lock_properties.append(
+            {
+                "name": "thuyetminh:native-build-receipt-sha256",
+                "value": _file_sha256(native_receipt_path),
+            }
+        )
 
     return {
         "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
@@ -136,7 +152,7 @@ def build_cyclonedx_sbom(
                     {
                         "type": "application",
                         "name": "stdlib-sbom-generator",
-                        "version": "4",
+                        "version": "5",
                     }
                 ]
             },
@@ -157,6 +173,7 @@ def write_cyclonedx_sbom(
     *,
     web_lock_path: Path | None = None,
     python_lock_path: Path | None = None,
+    native_receipt_path: Path | None = None,
     distributions: Iterable[importlib.metadata.Distribution] | None = None,
     generated_at: datetime | None = None,
     serial_number: str | None = None,
@@ -168,6 +185,7 @@ def write_cyclonedx_sbom(
         native_lock_path,
         web_lock_path=web_lock_path,
         python_lock_path=python_lock_path,
+        native_receipt_path=native_receipt_path,
         distributions=distributions,
         generated_at=generated_at,
         serial_number=serial_number,
@@ -229,6 +247,58 @@ def _read_web_lock(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _read_llama_receipt(
+    path: Path,
+    components: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SbomError(f"Không thể đọc native build receipt: {path}") from exc
+    llama = components.get("llama_cpp")
+    if not isinstance(llama, dict) or not isinstance(raw, dict):
+        raise SbomError("Native build receipt không khớp component llama_cpp")
+    if raw.get("schema_version") != 1:
+        raise SbomError("Native build receipt không đúng schema_version 1")
+    for key in ("release", "commit"):
+        if raw.get(key) != llama.get(key):
+            raise SbomError(f"Native build receipt không khớp llama_cpp {key}")
+    cuda_version = raw.get("cuda_version")
+    if cuda_version not in llama.get("cuda_supported_versions", []):
+        raise SbomError("Native build receipt có CUDA toolkit không được hỗ trợ")
+    cuda_architectures = raw.get("cuda_architectures")
+    if not isinstance(cuda_architectures, str) or not re.fullmatch(
+        r"[0-9]{2,3}(;[0-9]{2,3})*", cuda_architectures
+    ):
+        raise SbomError("Native build receipt có CUDA architecture không hợp lệ")
+    supported_architectures = {
+        str(value) for value in llama.get("cuda_supported_architectures", [])
+    }
+    if any(
+        architecture not in supported_architectures
+        for architecture in cuda_architectures.split(";")
+    ):
+        raise SbomError("Native build receipt có CUDA architecture không được hỗ trợ")
+    binaries = raw.get("binaries")
+    if not isinstance(binaries, dict):
+        raise SbomError("Native build receipt thiếu binary hashes")
+    receipt_root = Path(path).resolve(strict=True).parent
+    for binary_name, receipt_key in (
+        ("llama-server", "llama_server_sha256"),
+        ("llama-cli", "llama_cli_sha256"),
+    ):
+        expected_digest = binaries.get(receipt_key)
+        binary_path = receipt_root / binary_name
+        if (
+            not isinstance(expected_digest, str)
+            or _SHA256_RE.fullmatch(expected_digest) is None
+            or not binary_path.is_file()
+            or _file_sha256(binary_path) != expected_digest.lower()
+        ):
+            raise SbomError(f"Native build receipt không xác minh được {binary_name}")
+    return raw
+
+
 def _validate_native_lock(components: Mapping[str, Any]) -> None:
     """Validate CUDA metadata whose meaning must remain unambiguous in SBOMs."""
 
@@ -237,6 +307,7 @@ def _validate_native_lock(components: Mapping[str, Any]) -> None:
             continue
         cuda_keys = {
             "cuda_version",
+            "cuda_supported_versions",
             "cuda_supported_architectures",
             "cuda_default_build_architecture",
             "cuda_architectures",
@@ -251,6 +322,24 @@ def _validate_native_lock(components: Mapping[str, Any]) -> None:
         cuda_version = raw.get("cuda_version")
         if not isinstance(cuda_version, str) or not cuda_version.strip():
             raise SbomError(f"Component {name} có cuda_version không hợp lệ")
+        supported_versions = raw.get("cuda_supported_versions")
+        if (
+            not isinstance(supported_versions, list)
+            or not supported_versions
+            or any(
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9]+\.[0-9]+", value) is None
+                for value in supported_versions
+            )
+            or supported_versions != sorted(set(supported_versions))
+        ):
+            raise SbomError(
+                f"Component {name} có cuda_supported_versions không hợp lệ"
+            )
+        if cuda_version not in supported_versions:
+            raise SbomError(
+                f"Component {name} có cuda_version không thuộc ma trận hỗ trợ"
+            )
         supported = raw.get("cuda_supported_architectures")
         if (
             not isinstance(supported, list)
@@ -452,7 +541,11 @@ def _model_components(models: list[Any]) -> list[dict[str, Any]]:
     return components
 
 
-def _native_components(components: Mapping[str, Any]) -> list[dict[str, Any]]:
+def _native_components(
+    components: Mapping[str, Any],
+    *,
+    llama_receipt: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for name, raw in components.items():
         if not isinstance(name, str) or not name or not isinstance(raw, dict):
@@ -475,13 +568,43 @@ def _native_components(components: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "package",
                     "source",
                     "commit",
-                    "cuda_version",
+                    "cuda_supported_versions",
                     "cuda_supported_architectures",
                     "cuda_default_build_architecture",
                     "runtime_path",
                 ),
             ),
         }
+        preferred_cuda_version = raw.get("cuda_version")
+        if preferred_cuda_version is not None:
+            component["properties"].append(
+                {
+                    "name": "thuyetminh:native:cuda-preferred-version",
+                    "value": str(preferred_cuda_version),
+                }
+            )
+        if name == "llama_cpp" and llama_receipt is not None:
+            binaries = llama_receipt["binaries"]
+            component["properties"].extend(
+                [
+                    {
+                        "name": "thuyetminh:native:cuda-build-version",
+                        "value": str(llama_receipt["cuda_version"]),
+                    },
+                    {
+                        "name": "thuyetminh:native:cuda-build-architectures",
+                        "value": str(llama_receipt["cuda_architectures"]),
+                    },
+                    {
+                        "name": "thuyetminh:native:llama-server-sha256",
+                        "value": str(binaries["llama_server_sha256"]).lower(),
+                    },
+                    {
+                        "name": "thuyetminh:native:llama-cli-sha256",
+                        "value": str(binaries["llama_cli_sha256"]).lower(),
+                    },
+                ]
+            )
         license_name = str(raw.get("license") or "").strip()
         if license_name:
             component["licenses"] = [_license(license_name)]

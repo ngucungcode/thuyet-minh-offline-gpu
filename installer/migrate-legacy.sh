@@ -317,6 +317,7 @@ if not isinstance(llama, dict):
 # existing native runtime, while every other component field remains hashed.
 for key in (
     "cuda_architectures",
+    "cuda_supported_versions",
     "cuda_supported_architectures",
     "cuda_default_build_architecture",
 ):
@@ -377,6 +378,48 @@ architecture = document.get("components", {}).get("llama_cpp", {}).get("cuda_arc
 if not isinstance(architecture, str) or not re.fullmatch(r"[0-9]{2,3}", architecture):
     raise SystemExit("không suy ra được CUDA architecture của runtime legacy")
 print(f"sm_{architecture}")
+PY
+}
+
+migration_installed_cuda_toolkit_version() {
+  local project_root="$1"
+  local data_root="$2"
+  local state_path="${data_root}/install-state.json"
+  local lock_path="${project_root}/native/components.lock.json"
+
+  if migration_path_exists "${state_path}"; then
+    [[ -f "${state_path}" && ! -L "${state_path}" ]] || return 1
+  fi
+  [[ -f "${lock_path}" && ! -L "${lock_path}" ]] || return 1
+  python3 - "${state_path}" "${lock_path}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+state_path = Path(sys.argv[1])
+version = None
+if state_path.exists():
+    with state_path.open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    gpu = state.get("gpu")
+    version = gpu.get("cuda_toolkit_version") if isinstance(gpu, dict) else None
+    installer_version = state.get("installer_version")
+    if version is None:
+        if not isinstance(installer_version, str) or not re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+", installer_version
+        ):
+            raise SystemExit("install-state không ghi CUDA toolkit và version hợp lệ")
+        version_parts = tuple(int(part) for part in installer_version.split("."))
+        if version_parts >= (0, 3, 4):
+            raise SystemExit("install-state hiện tại thiếu CUDA toolkit")
+if version is None:
+    with Path(sys.argv[2]).open(encoding="utf-8") as handle:
+        lock = json.load(handle)
+    version = lock.get("components", {}).get("llama_cpp", {}).get("cuda_version")
+if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+", version):
+    raise SystemExit("không suy ra được CUDA toolkit của runtime đang cài")
+print(version)
 PY
 }
 
@@ -441,6 +484,7 @@ migrate_git_release_upgrade() {
   local expected_target_version="$5"
   local compatible_versions="$6"
   local expected_cuda_architecture="${7:-}"
+  local expected_cuda_toolkit_version="${8:-}"
   local current_version
   local target_version
   local current_commit
@@ -540,7 +584,8 @@ PY
 
   migrate_legacy_install \
     "${current_root}" "${staged_root}" "${requested_data_dir}" \
-    "${data_dir_explicit}" git "${expected_cuda_architecture}"
+    "${data_dir_explicit}" git "${expected_cuda_architecture}" \
+    "${expected_cuda_toolkit_version}"
 }
 
 migration_restart_stack() {
@@ -797,6 +842,7 @@ migrate_legacy_install() {
   local data_dir_explicit="${4:-false}"
   local source_mode="${5:-legacy}"
   local expected_cuda_architecture="${6:-}"
+  local expected_cuda_toolkit_version="${7:-}"
   local legacy_parent
   local staged_parent
   local configured_data_dir=""
@@ -814,6 +860,7 @@ migrate_legacy_install() {
   local database_path
   local active_jobs
   local installed_cuda_architecture
+  local installed_cuda_toolkit_version
   local new_source_active=false
   local item
   local persistent_items=(.venv-native)
@@ -954,6 +1001,19 @@ migrate_legacy_install() {
     }
     if [[ "${installed_cuda_architecture}" != "${expected_cuda_architecture}" ]]; then
       migration_error "Runtime ${installed_cuda_architecture} không dùng được trên GPU ${expected_cuda_architecture}; cần cài mới để build lại native artifact"
+      return 1
+    fi
+  fi
+  if [[ -n "${expected_cuda_toolkit_version}" ]]; then
+    installed_cuda_toolkit_version="$(
+      migration_installed_cuda_toolkit_version \
+        "${legacy_root}" "${effective_data_dir}"
+    )" || {
+      migration_error "Không xác định được CUDA toolkit của runtime đang cài"
+      return 1
+    }
+    if [[ "${installed_cuda_toolkit_version}" != "${expected_cuda_toolkit_version}" ]]; then
+      migration_error "Runtime CUDA ${installed_cuda_toolkit_version} không khớp toolkit ${expected_cuda_toolkit_version}; cần cài mới để build lại native artifact"
       return 1
     fi
   fi

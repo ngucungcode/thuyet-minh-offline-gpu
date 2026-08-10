@@ -22,6 +22,10 @@
       "repository": "https://github.com/ggml-org/llama.cpp.git",
       "license": "MIT",
       "cuda_version": "12.8",
+      "cuda_supported_versions": [
+        "12.6",
+        "12.8"
+      ],
       "cuda_supported_architectures": [
         70,
         75,
