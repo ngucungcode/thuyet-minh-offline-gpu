@@ -145,6 +145,13 @@ _TIMING_REWRITE_PROMPT_V2 = "timing-rewrite-v2"
 _TIMING_REWRITE_RAW_SPEED_MARGIN = 0.97
 _TIMING_REWRITE_RAW_DURATION_RESERVE_US = 20_000
 _TIMING_REWRITE_ADAPTIVE_DECAY = 0.85
+_NATURAL_BASE_PLANNER_POLICY = "natural-base-v1"
+_NATURAL_SILENT_SLACK_PLANNER_POLICY = "natural-silent-slack-v1"
+_STRICT_PLANNER_POLICY = "strict-v1"
+_NATURAL_MAXIMUM_SILENT_BORROW_US = 1_600_000
+_NATURAL_SILENCE_GUARD_US = 120_000
+_TIMING_REWRITE_FAILURE_OWNER_STRATEGY = "failure-owner-v1"
+_TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY = "critical-group-neighbor-v1"
 
 
 class _StageCancelled(Exception):
@@ -1114,6 +1121,47 @@ class Phase4Stage:
                     or len(item["history"]) > 6
                 ):
                     return False
+            recovery_metadata = (
+                "strategy",
+                "failure_ordinal",
+                "critical_group_start_ordinal",
+                "critical_group_end_ordinal",
+                "schedule_deficit_us",
+            )
+            if any(key in item for key in recovery_metadata):
+                strategy = item.get("strategy")
+                failure_ordinal = item.get("failure_ordinal")
+                group_start = item.get("critical_group_start_ordinal")
+                group_end = item.get("critical_group_end_ordinal")
+                deficit_us = item.get("schedule_deficit_us")
+                if (
+                    strategy
+                    not in {
+                        _TIMING_REWRITE_FAILURE_OWNER_STRATEGY,
+                        _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY,
+                    }
+                    or isinstance(failure_ordinal, bool)
+                    or not isinstance(failure_ordinal, int)
+                    or isinstance(group_start, bool)
+                    or not isinstance(group_start, int)
+                    or isinstance(group_end, bool)
+                    or not isinstance(group_end, int)
+                    or isinstance(deficit_us, bool)
+                    or not isinstance(deficit_us, int)
+                    or deficit_us <= 0
+                    or not 0 <= group_start <= failure_ordinal <= group_end
+                    or not group_start <= ordinal <= group_end
+                    or group_end >= len(translation.result.segments)
+                    or (
+                        strategy == _TIMING_REWRITE_FAILURE_OWNER_STRATEGY
+                        and ordinal != failure_ordinal
+                    )
+                    or (
+                        strategy == _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY
+                        and ordinal == failure_ordinal
+                    )
+                ):
+                    return False
             seen.add(ordinal)
         return True
 
@@ -1175,6 +1223,7 @@ class Phase4Stage:
     ) -> list[FittedNarrationBlock]:
         current_blocks = list(raw_blocks)
         rewrite_model: VerifiedModel | None = None
+        exhausted_candidate_budgets: dict[int, int] = {}
         while True:
             try:
                 fitted = await self._ensure_timing(
@@ -1197,9 +1246,11 @@ class Phase4Stage:
                     or self._timing_rewrite_max_attempts == 0
                 ):
                     raise
-                ordinal = self._timing_failure_ordinal(
+                ordinal, rewrite_error = self._select_timing_rewrite_candidate(
+                    job_id,
                     error,
-                    block_count=len(translation.result.segments),
+                    translation=translation,
+                    exhausted_candidate_budgets=exhausted_candidate_budgets,
                 )
                 if rewrite_model is None:
                     job = self._store.get_job(job_id)
@@ -1207,16 +1258,42 @@ class Phase4Stage:
                         self._translation_model_id(job),
                         "mt",
                     )
-                await self._persist_timing_rewrite(
-                    job_id,
-                    translation=translation,
-                    timing_error=error,
-                    ordinal=ordinal,
-                    tts_model=model,
-                    tts_support_model=support_model,
-                    rewrite_model=rewrite_model,
-                    timing_profile=timing_profile,
-                )
+                try:
+                    await self._persist_timing_rewrite(
+                        job_id,
+                        translation=translation,
+                        timing_error=rewrite_error,
+                        ordinal=ordinal,
+                        tts_model=model,
+                        tts_support_model=support_model,
+                        rewrite_model=rewrite_model,
+                        timing_profile=timing_profile,
+                    )
+                except TimingError as rewrite_failure:
+                    if rewrite_failure.code != "timing_semantic_budget_impossible":
+                        raise
+                    if self._valid_group_rewrite_candidates(
+                        error,
+                        block_count=len(translation.result.segments),
+                    ) is None:
+                        raise
+                    available_us = rewrite_error.details.get(
+                        "available_duration_us"
+                    )
+                    if (
+                        isinstance(available_us, bool)
+                        or not isinstance(available_us, int)
+                        or available_us <= 0
+                    ):
+                        raise
+                    # Semantic/minimum-duration exhaustion applies only to this
+                    # contributor at this budget. Try the next block in the
+                    # same congestion group instead of failing the whole job.
+                    exhausted_candidate_budgets[ordinal] = max(
+                        available_us,
+                        exhausted_candidate_budgets.get(ordinal, 0),
+                    )
+                    continue
                 current_blocks = await self._ensure_narration_blocks(
                     job_id,
                     translation=translation,
@@ -1249,6 +1326,174 @@ class Phase4Stage:
                 retryable=True,
             ) from error
         return ordinal
+
+    def _select_timing_rewrite_candidate(
+        self,
+        job_id: str,
+        error: TimingError,
+        *,
+        translation: TranslationArtifact,
+        exhausted_candidate_budgets: Mapping[int, int] | None = None,
+    ) -> tuple[int, TimingError]:
+        """Choose one bounded rewrite from an elastic planner failure group.
+
+        Older planners only reported one ordinal.  Malformed or legacy detail
+        payloads deliberately retain that behaviour instead of guessing at a
+        neighbouring subtitle.  A valid congestion group, however, can move
+        recovery away from an already-exhausted v2 rewrite and shorten one of
+        the other blocks that consumes the same local silence budget.
+        """
+
+        block_count = len(translation.result.segments)
+        owner = self._timing_failure_ordinal(error, block_count=block_count)
+        candidates = self._valid_group_rewrite_candidates(
+            error,
+            block_count=block_count,
+        )
+        if candidates is None:
+            return owner, error
+
+        checkpoint = self._store.get_checkpoint(job_id, JobStage.TTS)
+        payload = checkpoint.payload if checkpoint is not None else {}
+        rewrites = self._timing_rewrites_by_ordinal(
+            payload,
+            translation=translation,
+        )
+        exhausted_budgets = exhausted_candidate_budgets or {}
+
+        def budget_is_eligible(candidate: Mapping[str, int]) -> bool:
+            exhausted_at_us = exhausted_budgets.get(candidate["ordinal"])
+            return (
+                exhausted_at_us is None
+                or candidate["target_available_duration_us"] > exhausted_at_us
+            )
+
+        def eligible_v2(candidate: Mapping[str, int]) -> bool:
+            previous = rewrites.get(candidate["ordinal"])
+            return (
+                budget_is_eligible(candidate)
+                and previous is not None
+                and previous.get("prompt_version") == _TIMING_REWRITE_PROMPT_V2
+                and isinstance(previous.get("attempt"), int)
+                and not isinstance(previous.get("attempt"), bool)
+                and int(previous["attempt"]) < self._timing_rewrite_max_attempts
+            )
+
+        def eligible_fresh_or_legacy(candidate: Mapping[str, int]) -> bool:
+            previous = rewrites.get(candidate["ordinal"])
+            return budget_is_eligible(candidate) and (
+                previous is None
+                or previous.get("prompt_version") == _TIMING_REWRITE_PROMPT_V1
+            )
+
+        selected = next((item for item in candidates if eligible_v2(item)), None)
+        if selected is None:
+            selected = next(
+                (item for item in candidates if eligible_fresh_or_legacy(item)),
+                None,
+            )
+        if selected is None:
+            raise TimingError(
+                "timing_group_budget_impossible",
+                (
+                    f"Nhóm thuyết minh {int(error.details['critical_group_start_ordinal']) + 1}–"
+                    f"{int(error.details['critical_group_end_ordinal']) + 1} vẫn quá dài sau khi "
+                    "đã thử rút gọn tối đa các khối phù hợp"
+                ),
+                retryable=False,
+                details=dict(error.details),
+            ) from error
+
+        selected_ordinal = selected["ordinal"]
+        details = dict(error.details)
+        details.update(
+            {
+                "ordinal": selected_ordinal,
+                "required_duration_us": selected["required_duration_us"],
+                "available_duration_us": selected[
+                    "target_available_duration_us"
+                ],
+                "strategy": (
+                    _TIMING_REWRITE_FAILURE_OWNER_STRATEGY
+                    if selected_ordinal == owner
+                    else _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY
+                ),
+            }
+        )
+        return selected_ordinal, TimingError(
+            "timing_rewrite_required",
+            error.message_vi,
+            retryable=False,
+            details=details,
+        )
+
+    @staticmethod
+    def _valid_group_rewrite_candidates(
+        error: TimingError,
+        *,
+        block_count: int,
+    ) -> tuple[dict[str, int], ...] | None:
+        """Validate the planner's structured group contract defensively."""
+
+        details = error.details
+        failure_ordinal = details.get("failure_ordinal")
+        group_start = details.get("critical_group_start_ordinal")
+        group_end = details.get("critical_group_end_ordinal")
+        deficit_us = details.get("schedule_deficit_us")
+        raw_candidates = details.get("rewrite_candidates")
+        if (
+            isinstance(failure_ordinal, bool)
+            or not isinstance(failure_ordinal, int)
+            or isinstance(group_start, bool)
+            or not isinstance(group_start, int)
+            or isinstance(group_end, bool)
+            or not isinstance(group_end, int)
+            or isinstance(deficit_us, bool)
+            or not isinstance(deficit_us, int)
+            or deficit_us <= 0
+            or not 0 <= group_start <= failure_ordinal <= group_end < block_count
+            or details.get("ordinal") != failure_ordinal
+            or not isinstance(raw_candidates, list)
+            or not raw_candidates
+        ):
+            return None
+        parsed: list[dict[str, int]] = []
+        seen: set[int] = set()
+        # One congestion failure may rewrite at most three candidates.  The
+        # planner already orders them by impact and proximity deterministically.
+        for raw in raw_candidates[:3]:
+            if not isinstance(raw, Mapping):
+                return None
+            ordinal = raw.get("ordinal")
+            required_us = raw.get("required_duration_us")
+            target_us = raw.get("target_available_duration_us")
+            work_us = raw.get("work_duration_us")
+            if (
+                isinstance(ordinal, bool)
+                or not isinstance(ordinal, int)
+                or ordinal in seen
+                or not group_start <= ordinal <= group_end
+                or isinstance(required_us, bool)
+                or not isinstance(required_us, int)
+                or required_us <= 0
+                or isinstance(target_us, bool)
+                or not isinstance(target_us, int)
+                or target_us != max(1, required_us - deficit_us)
+                or isinstance(work_us, bool)
+                or not isinstance(work_us, int)
+                or work_us <= 0
+            ):
+                return None
+            parsed.append(
+                {
+                    "ordinal": ordinal,
+                    "required_duration_us": required_us,
+                    "target_available_duration_us": target_us,
+                    "work_duration_us": work_us,
+                }
+            )
+            seen.add(ordinal)
+        return tuple(parsed)
 
     @classmethod
     def _timing_rewrite_seed(
@@ -1548,6 +1793,25 @@ class Phase4Stage:
             "accepted": False,
             "history": previous_history[-6:],
         }
+        if timing_error.details.get("strategy") in {
+            _TIMING_REWRITE_FAILURE_OWNER_STRATEGY,
+            _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY,
+        }:
+            entry.update(
+                {
+                    "strategy": timing_error.details["strategy"],
+                    "failure_ordinal": timing_error.details["failure_ordinal"],
+                    "critical_group_start_ordinal": timing_error.details[
+                        "critical_group_start_ordinal"
+                    ],
+                    "critical_group_end_ordinal": timing_error.details[
+                        "critical_group_end_ordinal"
+                    ],
+                    "schedule_deficit_us": timing_error.details[
+                        "schedule_deficit_us"
+                    ],
+                }
+            )
         rewrites[ordinal] = entry
         payload["schema_version"] = 3
         payload["timing_rewrites"] = [
@@ -1831,12 +2095,33 @@ class Phase4Stage:
                 translation.result.segments, raw_blocks, strict=True
             )
         )
-        planned_slots = await asyncio.to_thread(
-            plan_narration_slots,
-            planning_inputs,
-            duration_us=translation.result.duration_us,
-            profile=timing_profile,
+        planner_policy = (
+            _NATURAL_BASE_PLANNER_POLICY
+            if timing_profile is TimingProfile.NATURAL
+            else _STRICT_PLANNER_POLICY
         )
+        try:
+            planned_slots = await asyncio.to_thread(
+                plan_narration_slots,
+                planning_inputs,
+                duration_us=translation.result.duration_us,
+                profile=timing_profile,
+            )
+        except TimingError as error:
+            if (
+                timing_profile is not TimingProfile.NATURAL
+                or error.code != "timing_rewrite_required"
+            ):
+                raise
+            planned_slots = await asyncio.to_thread(
+                plan_narration_slots,
+                planning_inputs,
+                duration_us=translation.result.duration_us,
+                profile=timing_profile,
+                maximum_silent_borrow_us=_NATURAL_MAXIMUM_SILENT_BORROW_US,
+                silence_guard_us=_NATURAL_SILENCE_GUARD_US,
+            )
+            planner_policy = _NATURAL_SILENT_SLACK_PLANNER_POLICY
         checkpoint = self._store.get_checkpoint(job_id, JobStage.TIMING)
         payload = self._valid_timing_checkpoint(
             checkpoint.payload if checkpoint is not None else None,
@@ -1844,6 +2129,7 @@ class Phase4Stage:
             model=model,
             block_count=len(raw_blocks),
             timing_profile=timing_profile,
+            planner_policy=planner_policy,
         )
         if payload is None:
             payload = {
@@ -1853,12 +2139,14 @@ class Phase4Stage:
                 "tts_model_id": model.model_id,
                 "tts_model_tree_sha256": model.tree_sha256,
                 "timing_profile": timing_profile.value,
+                "planner_policy": planner_policy,
                 "silence_trim_version": TTS_SILENCE_TRIM_VERSION,
                 "block_count": len(raw_blocks),
                 "blocks": [],
             }
-        elif "timing_profile" not in payload:
-            payload["timing_profile"] = timing_profile.value
+        elif "timing_profile" not in payload or "planner_policy" not in payload:
+            payload.setdefault("timing_profile", timing_profile.value)
+            payload.setdefault("planner_policy", planner_policy)
             self._store.save_checkpoint(job_id, JobStage.TIMING, payload)
         running = self._set_status(
             job_id,
@@ -2009,6 +2297,11 @@ class Phase4Stage:
             )
             self._store.save_checkpoint(job_id, JobStage.TIMING, payload)
         self._raise_if_cancelled(job_id)
+        if (
+            payload.get("completed") is True
+            and planner_policy == _NATURAL_SILENT_SLACK_PLANNER_POLICY
+        ):
+            self._warn_timing_silent_slack_used(job_id)
         quality_counts = {
             value.value: sum(block.quality is value for block in fitted_blocks)
             for value in TimingQuality
@@ -2037,6 +2330,7 @@ class Phase4Stage:
         model: VerifiedModel,
         block_count: int,
         timing_profile: TimingProfile,
+        planner_policy: str,
     ) -> dict[str, Any] | None:
         if not isinstance(payload, Mapping):
             return None
@@ -2048,9 +2342,44 @@ class Phase4Stage:
             or not isinstance(payload.get("blocks"), list)
             or not self._checkpoint_profile_matches(payload, timing_profile)
             or not self._checkpoint_trim_matches(payload, timing_profile)
+            or (
+                timing_profile is TimingProfile.NATURAL
+                and payload.get("planner_policy") != planner_policy
+            )
+            or (
+                timing_profile is TimingProfile.STRICT
+                and payload.get("planner_policy")
+                not in {None, _STRICT_PLANNER_POLICY}
+            )
         ):
             return None
         return dict(payload)
+
+    def _warn_timing_silent_slack_used(self, job_id: str) -> None:
+        checkpoint = self._store.get_checkpoint(job_id, JobStage.TIMING)
+        if (
+            checkpoint is None
+            or checkpoint.payload.get("completed") is not True
+            or checkpoint.payload.get("planner_policy")
+            != _NATURAL_SILENT_SLACK_PLANNER_POLICY
+        ):
+            return
+        job = self._store.get_job(job_id)
+        warnings = job.details.get("warnings", [])
+        if isinstance(warnings, list) and any(
+            isinstance(item, Mapping)
+            and item.get("code") == "timing_silent_slack_used"
+            for item in warnings
+        ):
+            return
+        self._store.append_warning(
+            job_id,
+            "timing_silent_slack_used",
+            (
+                "Timeline đã mượn thêm khoảng lặng an toàn giữa các cảnh để giữ "
+                "giọng thuyết minh tự nhiên trong giới hạn tốc độ 1,20×"
+            ),
+        )
 
     async def _load_fitted_block(
         self,

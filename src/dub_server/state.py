@@ -67,7 +67,7 @@ TERMINAL_STATUSES = frozenset(
     {JobStatus.COMPLETED, JobStatus.CANCELLED}
 )
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 
 ACTIVE_JOB_STATUSES = (
     JobStatus.CREATED,
@@ -563,6 +563,10 @@ class StateStore:
                             reclassified_errors["timing_rewrite_exhausted"] = (
                                 "timing_narration_adaptive_rewrite"
                             )
+                        if schema_version < 11:
+                            reclassified_errors[
+                                "timing_semantic_budget_impossible"
+                            ] = "timing_narration_slack_group_fallback"
                         affected: list[sqlite3.Row] = []
                         if reclassified_errors:
                             placeholders = ",".join("?" for _ in reclassified_errors)

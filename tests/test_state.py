@@ -564,6 +564,135 @@ def test_schema_ten_makes_exhausted_timing_rewrite_retryable(
     assert reopened.get_checkpoint(job.id, JobStage.TTS).payload == tts_checkpoint
 
 
+def test_schema_eleven_makes_impossible_semantic_budget_retryable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    store = StateStore(database)
+    job = store.create_job(
+        "release-1",
+        {"rights_confirmed": True, "timing_profile": "natural"},
+    )
+    store.update_status(
+        job.id,
+        JobStatus.TIMING,
+        stage=JobStage.TIMING,
+        force=True,
+    )
+    tts_checkpoint = {
+        "completed": True,
+        "blocks": [{"ordinal": 48, "duration_us": 4_900_000}],
+        "timing_rewrites": [
+            {
+                "ordinal": 48,
+                "adaptive_attempt": 3,
+                "text": "Bản rút gọn thích ứng cuối",
+                "observed_duration_us": 4_900_000,
+                "prompt_version": "timing-rewrite-v2",
+            }
+        ],
+    }
+    timing_checkpoint = {
+        "completed": False,
+        "failed_ordinal": 48,
+        "available_duration_us": 3_600_000,
+    }
+    store.save_checkpoint(job.id, JobStage.TTS, tts_checkpoint)
+    store.save_checkpoint(job.id, JobStage.TIMING, timing_checkpoint)
+    store.update_status(
+        job.id,
+        JobStatus.FAILED,
+        error_code="timing_semantic_budget_impossible",
+        error_message="Khối 49 vẫn quá dài sau 3 lần rút gọn thích ứng",
+        retryable=False,
+    )
+    unaffected = store.create_job(
+        "release-1",
+        {"rights_confirmed": True, "timing_profile": "natural"},
+    )
+    store.update_status(
+        unaffected.id,
+        JobStatus.FAILED,
+        error_code="native_oom",
+        error_message="GPU hết bộ nhớ",
+        retryable=False,
+    )
+
+    connection = sqlite3.connect(database)
+    try:
+        checkpoint_rows_before = connection.execute(
+            "SELECT stage, payload_json, hex(CAST(payload_json AS BLOB)), updated_at "
+            "FROM checkpoints "
+            "WHERE job_id = ? AND stage IN (?, ?) ORDER BY stage",
+            (job.id, JobStage.TIMING.value, JobStage.TTS.value),
+        ).fetchall()
+        connection.execute(
+            "UPDATE schema_metadata SET value = '10' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = StateStore(database)
+    migrated = reopened.get_job(job.id)
+
+    assert migrated.retryable is True
+    event = reopened.list_events(job.id)[-1]
+    assert event.event_type == "job.error_reclassified"
+    assert event.payload == {
+        "code": "timing_semantic_budget_impossible",
+        "retryable": True,
+        "reason": "timing_narration_slack_group_fallback",
+    }
+    assert reopened.get_job(unaffected.id).retryable is False
+    assert all(
+        event.event_type != "job.error_reclassified"
+        for event in reopened.list_events(unaffected.id)
+    )
+
+    connection = sqlite3.connect(database)
+    try:
+        checkpoint_rows_after = connection.execute(
+            "SELECT stage, payload_json, hex(CAST(payload_json AS BLOB)), updated_at "
+            "FROM checkpoints "
+            "WHERE job_id = ? AND stage IN (?, ?) ORDER BY stage",
+            (job.id, JobStage.TIMING.value, JobStage.TTS.value),
+        ).fetchall()
+        revision_after_first_open = connection.execute(
+            "SELECT revision FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()[0]
+        event_count_after_first_open = connection.execute(
+            "SELECT COUNT(*) FROM job_events "
+            "WHERE job_id = ? AND event_type = 'job.error_reclassified'",
+            (job.id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert checkpoint_rows_after == checkpoint_rows_before
+
+    reopened_again = StateStore(database)
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT revision FROM jobs WHERE id = ?", (job.id,)
+        ).fetchone()[0] == revision_after_first_open
+        assert connection.execute(
+            "SELECT COUNT(*) FROM job_events "
+            "WHERE job_id = ? AND event_type = 'job.error_reclassified'",
+            (job.id,),
+        ).fetchone()[0] == event_count_after_first_open
+    finally:
+        connection.close()
+
+    resumed = reopened_again.resume(job.id)
+    assert resumed.status is JobStatus.TIMING
+    assert reopened_again.get_checkpoint(job.id, JobStage.TTS).payload == tts_checkpoint
+    assert (
+        reopened_again.get_checkpoint(job.id, JobStage.TIMING).payload
+        == timing_checkpoint
+    )
+
+
 def test_future_schema_is_rejected_without_downgrading_metadata(
     tmp_path: Path,
 ) -> None:
@@ -572,7 +701,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "UPDATE schema_metadata SET value = '11' WHERE key = 'schema_version'"
+            "UPDATE schema_metadata SET value = '12' WHERE key = 'schema_version'"
         )
         connection.commit()
     finally:
@@ -588,7 +717,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
         ).fetchone()[0]
     finally:
         connection.close()
-    assert version == "11"
+    assert version == "12"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

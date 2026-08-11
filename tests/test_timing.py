@@ -12,6 +12,7 @@ import pytest
 from dub_server.timing import (
     FfmpegTimingFitter,
     FittedNarrationBlock,
+    NATURAL_MAX_SILENT_BORROW_US,
     NarrationTimingInput,
     TimingError,
     TimingProfile,
@@ -302,9 +303,185 @@ def test_natural_planner_requires_rewrite_instead_of_speeding_above_cap() -> Non
         "required_duration_us": 2_666_667,
         "available_duration_us": 2_600_000,
         "maximum_total_speed": 1.2,
+        "failure_kind": "single_window_capacity",
+        "failure_ordinal": 0,
+        "critical_group_start_ordinal": 0,
+        "critical_group_end_ordinal": 0,
+        "schedule_deficit_us": 66_667,
+        "rewrite_candidates": [
+            {
+                "ordinal": 0,
+                "required_duration_us": 2_666_667,
+                "target_available_duration_us": 2_600_000,
+                "work_duration_us": 3_200_000,
+            }
+        ],
     }
     assert "rút gọn" in error.message_vi
     assert "1,20×" in error.message_vi
+
+
+def test_intrinsic_window_overflow_does_not_blame_a_predecessor() -> None:
+    with pytest.raises(TimingError) as captured:
+        plan_narration_slots(
+            (
+                NarrationTimingInput(0, 1_000_000, 1_500_000),
+                NarrationTimingInput(1_000_000, 2_000_000, 3_200_000),
+            ),
+            duration_us=4_000_000,
+        )
+
+    details = captured.value.details
+    assert details["failure_kind"] == "single_window_capacity"
+    assert details["failure_ordinal"] == 1
+    assert details["critical_group_start_ordinal"] == 1
+    assert details["critical_group_end_ordinal"] == 1
+    assert [item["ordinal"] for item in details["rewrite_candidates"]] == [1]
+
+
+def test_elastic_planner_keeps_base_success_byte_identical() -> None:
+    inputs = (
+        NarrationTimingInput(1_000_000, 2_000_000, 1_600_000),
+        NarrationTimingInput(3_000_000, 3_500_000, 500_000),
+    )
+
+    base = plan_narration_slots(inputs, duration_us=6_000_000)
+    elastic_opt_in = plan_narration_slots(
+        inputs,
+        duration_us=6_000_000,
+        maximum_silent_borrow_us=NATURAL_MAX_SILENT_BORROW_US,
+    )
+
+    assert elastic_opt_in == base
+
+
+@pytest.mark.parametrize(
+    "options",
+    (
+        {"maximum_silent_borrow_us": True},
+        {"maximum_silent_borrow_us": 799_999},
+        {"silence_guard_us": True},
+        {"silence_guard_us": -1},
+    ),
+)
+def test_elastic_planner_rejects_invalid_borrow_options(
+    options: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        plan_narration_slots(
+            (NarrationTimingInput(0, 1_000_000, 500_000),),
+            duration_us=1_000_000,
+            **options,
+        )
+
+
+def test_elastic_planner_recovers_by_borrowing_a_larger_source_gap() -> None:
+    planned = plan_narration_slots(
+        (NarrationTimingInput(1_000_000, 2_000_000, 3_200_000),),
+        duration_us=3_000_000,
+        maximum_silent_borrow_us=NATURAL_MAX_SILENT_BORROW_US,
+    )
+
+    assert (planned[0].start_us, planned[0].end_us) == (0, 3_000_000)
+    assert planned[0].planned_total_speed == pytest.approx(3.2 / 3.0)
+    assert planned[0].start_us < 200_000
+    assert planned[0].end_us > 2_800_000
+
+
+def test_elastic_postvalidation_uses_exact_frames_at_the_speed_cap() -> None:
+    inputs = (
+        NarrationTimingInput(
+            0,
+            300_000,
+            1_000_188,
+            native_speed=1.2,
+            source_frame_count=48_009,
+            source_sample_rate=48_000,
+        ),
+        NarrationTimingInput(
+            300_000,
+            600_000,
+            1_000_188,
+            native_speed=1.2,
+            source_frame_count=48_009,
+            source_sample_rate=48_000,
+        ),
+    )
+
+    planned = plan_narration_slots(
+        inputs,
+        duration_us=2_000_376,
+        maximum_silent_borrow_us=NATURAL_MAX_SILENT_BORROW_US,
+    )
+
+    assert len(planned) == 2
+    assert planned[0].end_us <= planned[1].start_us
+    assert all(slot.planned_total_speed == pytest.approx(1.2) for slot in planned)
+
+
+def test_elastic_planner_never_extends_into_a_neighbour_source_block() -> None:
+    with pytest.raises(TimingError) as captured:
+        plan_narration_slots(
+            (
+                NarrationTimingInput(500_000, 1_000_000, 3_000_000),
+                NarrationTimingInput(2_000_000, 2_500_000, 300_000),
+            ),
+            duration_us=4_000_000,
+            maximum_silent_borrow_us=NATURAL_MAX_SILENT_BORROW_US,
+        )
+
+    error = captured.value
+    assert error.code == "timing_rewrite_required"
+    assert error.details["failure_ordinal"] == 0
+    # The elastic right edge stops 120 ms before the next source block.
+    assert error.details["available_duration_us"] == 1_880_000
+
+
+def test_dense_failure_describes_critical_chain_and_sorted_candidates() -> None:
+    with pytest.raises(TimingError) as captured:
+        plan_narration_slots(
+            (
+                NarrationTimingInput(0, 1_000_000, 1_600_000),
+                NarrationTimingInput(1_000_000, 2_000_000, 1_600_000),
+            ),
+            duration_us=2_000_000,
+        )
+
+    details = captured.value.details
+    assert details["failure_kind"] == "critical_chain_capacity"
+    assert details["failure_ordinal"] == 1
+    assert details["critical_group_start_ordinal"] == 0
+    assert details["critical_group_end_ordinal"] == 1
+    assert details["schedule_deficit_us"] == 666_668
+    assert details["rewrite_candidates"] == [
+        {
+            "ordinal": 1,
+            "required_duration_us": 1_333_334,
+            "target_available_duration_us": 666_666,
+            "work_duration_us": 1_600_000,
+        },
+        {
+            "ordinal": 0,
+            "required_duration_us": 1_333_334,
+            "target_available_duration_us": 666_666,
+            "work_duration_us": 1_600_000,
+        },
+    ]
+
+
+def test_critical_failure_details_are_deterministic() -> None:
+    inputs = (
+        NarrationTimingInput(0, 1_000_000, 1_500_000),
+        NarrationTimingInput(1_000_000, 2_000_000, 1_700_000),
+    )
+    captured_details: list[dict[str, object]] = []
+
+    for _ in range(3):
+        with pytest.raises(TimingError) as captured:
+            plan_narration_slots(inputs, duration_us=2_000_000)
+        captured_details.append(captured.value.details)
+
+    assert captured_details[1:] == captured_details[:-1]
 
 
 def test_strict_planner_preserves_legacy_slots_even_when_speech_is_long() -> None:

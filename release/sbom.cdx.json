@@ -27073,7 +27073,7 @@
       ],
       "name": "thuyet-minh-offline-gpu",
       "type": "application",
-      "version": "0.3.6"
+      "version": "0.3.7"
     },
     "properties": [
       {
@@ -27086,7 +27086,7 @@
       },
       {
         "name": "thuyetminh:web-lock-sha256",
-        "value": "3f43bcd745b636bfbe138c015eca70faaab580a01afe99e573f7d7ca8a45d9cb"
+        "value": "a770f3ce40ac2e5d915df00b436e9319aea61173330da7439f0e8c05931ed1a2"
       },
       {
         "name": "thuyetminh:python-runtime-lock-sha256",
@@ -27097,7 +27097,7 @@
         "value": "direct-only"
       }
     ],
-    "timestamp": "2026-08-10T16:37:53Z",
+    "timestamp": "2026-08-11T14:10:50Z",
     "tools": {
       "components": [
         {
@@ -27108,7 +27108,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:53e9b7f0-0a32-4a7c-b625-e287a674a7a9",
+  "serialNumber": "urn:uuid:96d3a89f-b028-4d12-a442-e9f453ceba44",
   "specVersion": "1.6",
   "version": 1
 }
