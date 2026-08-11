@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -106,6 +107,21 @@ class TimingTextRewriter(Protocol):
 
     def abort(self) -> None: ...
 
+    def rewrite_for_duration(
+        self,
+        source_text: str,
+        prior_target_text: str,
+        observed_duration_us: int,
+        target_duration_us: int,
+        max_output_words: int,
+        *,
+        source_language: str,
+        target_language: str = "vi",
+        canonical_vi: str | None = None,
+        adaptive_attempt: int = 1,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> str: ...
+
 
 TimingRewriterFactory = Callable[[VerifiedModel], TimingTextRewriter]
 
@@ -124,6 +140,11 @@ _SHA256 = frozenset("0123456789abcdef")
 _TIMING_REWRITE_TARGET_FACTORS = (0.90, 0.75, 0.62)
 _TIMING_REWRITE_MIN_TARGET_US = 120_000
 _TIMING_REWRITE_CANCEL_POLL_SECONDS = 0.20
+_TIMING_REWRITE_PROMPT_V1 = "timing-rewrite-v1"
+_TIMING_REWRITE_PROMPT_V2 = "timing-rewrite-v2"
+_TIMING_REWRITE_RAW_SPEED_MARGIN = 0.97
+_TIMING_REWRITE_RAW_DURATION_RESERVE_US = 20_000
+_TIMING_REWRITE_ADAPTIVE_DECAY = 0.85
 
 
 class _StageCancelled(Exception):
@@ -1030,6 +1051,7 @@ class Phase4Stage:
             attempt = item.get("attempt")
             available_us = item.get("available_duration_us")
             target_us = item.get("target_duration_us")
+            prompt_version = item.get("prompt_version")
             if (
                 not isinstance(text, str)
                 or not text.strip()
@@ -1051,9 +1073,47 @@ class Phase4Stage:
                 or not isinstance(item.get("model_id"), str)
                 or not str(item["model_id"]).strip()
                 or not self._valid_sha(item.get("model_tree_sha256"))
-                or item.get("prompt_version") != "timing-rewrite-v1"
+                or prompt_version
+                not in {_TIMING_REWRITE_PROMPT_V1, _TIMING_REWRITE_PROMPT_V2}
             ):
                 return False
+            if prompt_version == _TIMING_REWRITE_PROMPT_V2:
+                legacy_attempt_count = item.get("legacy_attempt_count")
+                adaptive_attempt = item.get("adaptive_attempt")
+                max_words = item.get("max_words")
+                previous_target_us = item.get("previous_target_duration_us")
+                previous_observed_us = item.get("previous_observed_duration_us")
+                observed_us = item.get("observed_duration_us")
+                if (
+                    isinstance(legacy_attempt_count, bool)
+                    or not isinstance(legacy_attempt_count, int)
+                    or not 0 <= legacy_attempt_count <= len(
+                        _TIMING_REWRITE_TARGET_FACTORS
+                    )
+                    or adaptive_attempt != attempt
+                    or isinstance(max_words, bool)
+                    or not isinstance(max_words, int)
+                    or max_words < 2
+                    or not self._valid_sha(item.get("previous_text_sha256"))
+                    or isinstance(previous_target_us, bool)
+                    or not isinstance(previous_target_us, int)
+                    or previous_target_us <= 0
+                    or isinstance(previous_observed_us, bool)
+                    or not isinstance(previous_observed_us, int)
+                    or previous_observed_us <= 0
+                    or (
+                        observed_us is not None
+                        and (
+                            isinstance(observed_us, bool)
+                            or not isinstance(observed_us, int)
+                            or observed_us <= 0
+                        )
+                    )
+                    or not isinstance(item.get("accepted"), bool)
+                    or not isinstance(item.get("history"), list)
+                    or len(item["history"]) > 6
+                ):
+                    return False
             seen.add(ordinal)
         return True
 
@@ -1117,13 +1177,18 @@ class Phase4Stage:
         rewrite_model: VerifiedModel | None = None
         while True:
             try:
-                return await self._ensure_timing(
+                fitted = await self._ensure_timing(
                     job_id,
                     translation=translation,
                     model=model,
                     raw_blocks=current_blocks,
                     timing_profile=timing_profile,
                 )
+                self._accept_timing_rewrites(
+                    job_id,
+                    translation=translation,
+                )
+                return fitted
             except TimingError as error:
                 if (
                     error.code != "timing_rewrite_required"
@@ -1185,6 +1250,112 @@ class Phase4Stage:
             ) from error
         return ordinal
 
+    @classmethod
+    def _timing_rewrite_seed(
+        cls,
+        payload: Mapping[str, Any],
+        *,
+        segment_text: str,
+        ordinal: int,
+        previous: Mapping[str, Any] | None,
+    ) -> tuple[str, int]:
+        previous_text = (
+            str(previous["text"])
+            if previous is not None
+            else segment_text
+        )
+        # The block checkpoint is the latest measured WAV. It may have been
+        # regenerated after a missing/corrupt artifact, so prefer it over the
+        # rewrite entry's older observation.
+        observed_us: int | None = None
+        for record in payload.get("blocks", []):
+            if not isinstance(record, Mapping) or record.get("ordinal") != ordinal:
+                continue
+            if cls._raw_narration_text(
+                record,
+                fallback=segment_text,
+            ) != previous_text:
+                continue
+            candidate = record.get("duration_us")
+            if (
+                not isinstance(candidate, bool)
+                and isinstance(candidate, int)
+                and candidate > 0
+            ):
+                observed_us = candidate
+                break
+        if observed_us is None:
+            candidate = previous.get("observed_duration_us") if previous else None
+            if (
+                not isinstance(candidate, bool)
+                and isinstance(candidate, int)
+                and candidate > 0
+            ):
+                observed_us = candidate
+        if observed_us is None:
+            raise TimingError(
+                "timing_rewrite_measurement_missing",
+                "Không tìm thấy thời lượng TTS đã đo để rút gọn thích ứng",
+                retryable=True,
+            )
+        return previous_text, observed_us
+
+    @staticmethod
+    def _adaptive_timing_rewrite_plan(
+        *,
+        available_us: int,
+        maximum_total_speed: object,
+        previous_text: str,
+        previous_target_us: int,
+        previous_observed_us: int,
+        adaptive_attempt: int,
+    ) -> tuple[int, int]:
+        if previous_observed_us <= _TIMING_REWRITE_MIN_TARGET_US:
+            raise TimingError(
+                "timing_semantic_budget_impossible",
+                "Lời thuyết minh đã ở thời lượng tối thiểu nên không thể rút gọn thêm",
+                retryable=False,
+                details={
+                    "previous_observed_duration_us": previous_observed_us,
+                    "minimum_target_duration_us": _TIMING_REWRITE_MIN_TARGET_US,
+                },
+            )
+        if (
+            isinstance(maximum_total_speed, bool)
+            or not isinstance(maximum_total_speed, (int, float))
+            or not math.isfinite(float(maximum_total_speed))
+            or not 1.0 <= float(maximum_total_speed) <= 2.0
+        ):
+            maximum_total_speed = NATURAL_MAX_TOTAL_SPEED
+        raw_budget_us = max(
+            _TIMING_REWRITE_MIN_TARGET_US,
+            math.floor(
+                available_us
+                * float(maximum_total_speed)
+                * _TIMING_REWRITE_RAW_SPEED_MARGIN
+            )
+            - _TIMING_REWRITE_RAW_DURATION_RESERVE_US,
+        )
+        gain = min(
+            0.90,
+            0.90 * raw_budget_us / previous_observed_us,
+        ) * (_TIMING_REWRITE_ADAPTIVE_DECAY ** (adaptive_attempt - 1))
+        gain = min(0.90, max(0.05, gain))
+        target_us = max(
+            _TIMING_REWRITE_MIN_TARGET_US,
+            min(
+                raw_budget_us,
+                math.floor(previous_target_us * 0.90),
+                math.floor(previous_target_us * gain),
+            ),
+        )
+        target_us = min(target_us, previous_observed_us - 1)
+        previous_word_count = max(1, len(previous_text.split()))
+        max_words = max(2, math.floor(previous_word_count * gain))
+        if previous_word_count > 2:
+            max_words = min(max_words, previous_word_count - 1)
+        return target_us, max_words
+
     async def _persist_timing_rewrite(
         self,
         job_id: str,
@@ -1216,21 +1387,6 @@ class Phase4Stage:
             translation=translation,
         )
         previous = rewrites.get(ordinal)
-        attempt = int(previous["attempt"]) + 1 if previous is not None else 1
-        if attempt > self._timing_rewrite_max_attempts:
-            raise TimingError(
-                "timing_rewrite_exhausted",
-                (
-                    f"Khối thuyết minh {ordinal + 1} vẫn quá dài sau "
-                    f"{self._timing_rewrite_max_attempts} lần tự rút gọn"
-                ),
-                retryable=False,
-                details={
-                    **timing_error.details,
-                    "ordinal": ordinal,
-                    "rewrite_attempts": self._timing_rewrite_max_attempts,
-                },
-            )
         available_us = timing_error.details.get("available_duration_us")
         if (
             isinstance(available_us, bool)
@@ -1246,34 +1402,105 @@ class Phase4Stage:
                 retryable=False,
             )
         segment = translation.result.segments[ordinal]
+        previous_text, previous_observed_us = self._timing_rewrite_seed(
+            payload,
+            segment_text=segment.translated_text,
+            ordinal=ordinal,
+            previous=previous,
+        )
+        previous_target_us = (
+            int(previous["target_duration_us"])
+            if previous is not None
+            else previous_observed_us
+        )
+        previous_prompt = (
+            str(previous.get("prompt_version")) if previous is not None else None
+        )
+        legacy_attempt_count = (
+            int(previous["attempt"])
+            if previous_prompt == _TIMING_REWRITE_PROMPT_V1
+            else int(previous.get("legacy_attempt_count", 0))
+            if previous is not None
+            else 0
+        )
+        attempt = (
+            int(previous["attempt"]) + 1
+            if previous_prompt == _TIMING_REWRITE_PROMPT_V2
+            else 1
+        )
         while True:
-            target_us = max(
-                _TIMING_REWRITE_MIN_TARGET_US,
-                round(
-                    available_us
-                    * _TIMING_REWRITE_TARGET_FACTORS[attempt - 1]
-                ),
-            )
+            if attempt > self._timing_rewrite_max_attempts:
+                raise TimingError(
+                    "timing_semantic_budget_impossible",
+                    (
+                        f"Khối thuyết minh {ordinal + 1} vẫn quá dài sau "
+                        f"{self._timing_rewrite_max_attempts} lần rút gọn thích ứng"
+                    ),
+                    retryable=False,
+                    details={
+                        **timing_error.details,
+                        "ordinal": ordinal,
+                        "legacy_rewrite_attempts": legacy_attempt_count,
+                        "adaptive_rewrite_attempts": self._timing_rewrite_max_attempts,
+                        "previous_observed_duration_us": previous_observed_us,
+                    },
+                )
+            try:
+                target_us, max_words = self._adaptive_timing_rewrite_plan(
+                    available_us=available_us,
+                    maximum_total_speed=timing_error.details.get(
+                        "maximum_total_speed",
+                        NATURAL_MAX_TOTAL_SPEED,
+                    ),
+                    previous_text=previous_text,
+                    previous_target_us=previous_target_us,
+                    previous_observed_us=previous_observed_us,
+                    adaptive_attempt=attempt,
+                )
+            except TimingError as error:
+                if error.code != "timing_semantic_budget_impossible":
+                    raise
+                raise TimingError(
+                    error.code,
+                    (
+                        f"Khối thuyết minh {ordinal + 1} đã ở thời lượng tối thiểu "
+                        "nên không thể rút gọn thêm"
+                    ),
+                    retryable=False,
+                    details={
+                        **timing_error.details,
+                        **error.details,
+                        "ordinal": ordinal,
+                    },
+                ) from error
             self._update_progress(
                 job_id,
                 self._store.get_job(job_id).progress_permille,
                 {
                     "phase4_step": "timing_rewrite",
                     "phase4_message": (
-                        f"Đang rút gọn khối thuyết minh {ordinal + 1} "
-                        f"(lần {attempt}/{self._timing_rewrite_max_attempts})"
+                        f"Đang rút gọn thích ứng khối {ordinal + 1} còn tối đa "
+                        f"{max_words} từ (lần {attempt}/"
+                        f"{self._timing_rewrite_max_attempts})"
                     ),
                     "timing_rewrite_ordinal": ordinal,
                     "timing_rewrite_attempt": attempt,
                     "timing_rewrite_target_us": target_us,
+                    "timing_rewrite_max_words": max_words,
+                    "timing_rewrite_previous_duration_us": previous_observed_us,
                 },
             )
             try:
                 rewritten = await self._rewrite_timing_text(
                     rewrite_model,
-                    text=segment.source_text,
+                    source_text=segment.source_text,
+                    canonical_vi=segment.translated_text,
+                    previous_vi=previous_text,
                     source_language=translation.result.source_language,
                     target_duration_us=target_us,
+                    observed_duration_us=previous_observed_us,
+                    max_words=max_words,
+                    adaptive_attempt=attempt,
                     job_id=job_id,
                 )
                 break
@@ -1283,21 +1510,21 @@ class Phase4Stage:
                     "timing_rewrite_output_invalid",
                 }:
                     raise
-                if attempt >= self._timing_rewrite_max_attempts:
-                    raise TimingError(
-                        "timing_rewrite_exhausted",
-                        (
-                            f"Khối thuyết minh {ordinal + 1} không thể rút gọn "
-                            f"sau {self._timing_rewrite_max_attempts} lần"
-                        ),
-                        retryable=False,
-                        details={
-                            **timing_error.details,
-                            "ordinal": ordinal,
-                            "rewrite_attempts": self._timing_rewrite_max_attempts,
-                        },
-                    ) from error
                 attempt += 1
+        previous_history = (
+            list(previous.get("history", []))
+            if previous_prompt == _TIMING_REWRITE_PROMPT_V2
+            and isinstance(previous, Mapping)
+            and isinstance(previous.get("history"), list)
+            else []
+        )
+        previous_history.append(
+            {
+                "text_sha256": self._text_sha256(previous_text),
+                "target_duration_us": previous_target_us,
+                "observed_duration_us": previous_observed_us,
+            }
+        )
         entry = {
             "ordinal": ordinal,
             "text": rewritten,
@@ -1307,14 +1534,22 @@ class Phase4Stage:
                 segment.translated_text
             ),
             "attempt": attempt,
+            "adaptive_attempt": attempt,
+            "legacy_attempt_count": legacy_attempt_count,
             "available_duration_us": available_us,
             "target_duration_us": target_us,
+            "max_words": max_words,
+            "previous_text_sha256": self._text_sha256(previous_text),
+            "previous_target_duration_us": previous_target_us,
+            "previous_observed_duration_us": previous_observed_us,
             "model_id": rewrite_model.model_id,
             "model_tree_sha256": rewrite_model.tree_sha256,
-            "prompt_version": "timing-rewrite-v1",
+            "prompt_version": _TIMING_REWRITE_PROMPT_V2,
+            "accepted": False,
+            "history": previous_history[-6:],
         }
         rewrites[ordinal] = entry
-        payload["schema_version"] = 2
+        payload["schema_version"] = 3
         payload["timing_rewrites"] = [
             rewrites[index] for index in sorted(rewrites)
         ]
@@ -1323,23 +1558,19 @@ class Phase4Stage:
         # A shorter block can move neighbouring natural slots. Refitting WAV
         # blocks is cheap and avoids reusing a stale aggregate timeline.
         self._store.save_checkpoint(job_id, JobStage.TIMING, {})
-        self._store.append_warning(
-            job_id,
-            "timing_translation_rewritten",
-            (
-                f"Khối thuyết minh {ordinal + 1} đã được tự rút gọn "
-                f"theo cửa sổ {available_us / 1_000_000:.2f} giây "
-                f"(lần {attempt})"
-            ),
-        )
 
     async def _rewrite_timing_text(
         self,
         model: VerifiedModel,
         *,
-        text: str,
+        source_text: str,
+        canonical_vi: str,
+        previous_vi: str,
         source_language: str,
         target_duration_us: int,
+        observed_duration_us: int,
+        max_words: int,
+        adaptive_attempt: int,
         job_id: str,
     ) -> str:
         if self._timing_rewriter_factory is None:  # pragma: no cover - caller guard
@@ -1368,19 +1599,30 @@ class Phase4Stage:
                 job_id=job_id,
             )
             self._raise_if_cancelled(job_id)
-            outputs = await self._run_cancellable_rewriter_call(
+            output = await self._run_cancellable_rewriter_call(
                 rewriter,
-                lambda: rewriter.translate_batch_for_durations(
-                    [text],
-                    [target_duration_us],
+                lambda: rewriter.rewrite_for_duration(
+                    source_text=source_text,
+                    prior_target_text=previous_vi,
+                    observed_duration_us=observed_duration_us,
+                    target_duration_us=target_duration_us,
+                    max_output_words=max_words,
+                    canonical_vi=canonical_vi,
                     source_language=source_language,
+                    adaptive_attempt=adaptive_attempt,
                     target_language="vi",
                     on_progress=progress,
                 ),
                 job_id=job_id,
             )
         except LlamaTranslationError as error:
-            if error.code in {"invalid_output", "translation_truncated"}:
+            if error.code in {
+                "critical_fact_missing",
+                "duration_constraint_violated",
+                "invalid_output",
+                "rewrite_unchanged",
+                "translation_truncated",
+            }:
                 raise TimingError(
                     "timing_rewrite_output_invalid",
                     "Model rút gọn trả về lời thuyết minh không hợp lệ hoặc bị cắt",
@@ -1414,25 +1656,23 @@ class Phase4Stage:
                         retryable=True,
                     ) from error
         self._raise_if_cancelled(job_id)
-        try:
-            values = tuple(outputs)
-        except TypeError as error:
+        if not isinstance(output, str):
             raise TimingError(
                 "timing_rewrite_output_invalid",
                 "Model rút gọn trả về dữ liệu không hợp lệ",
                 retryable=True,
-            ) from error
-        if len(values) != 1:
-            raise TimingError(
-                "timing_rewrite_output_invalid",
-                "Số kết quả rút gọn không khớp số khối thuyết minh",
-                retryable=True,
             )
-        rewritten = " ".join(str(values[0]).split())
+        rewritten = " ".join(output.split())
         if not rewritten:
             raise TimingError(
                 "timing_rewrite_output_empty",
                 "Model rút gọn trả về lời thuyết minh rỗng",
+                retryable=True,
+            )
+        if rewritten == " ".join(previous_vi.split()) or len(rewritten.split()) > max_words:
+            raise TimingError(
+                "timing_rewrite_output_invalid",
+                "Model chưa rút gọn đúng giới hạn số từ đã đo",
                 retryable=True,
             )
         return rewritten
@@ -1502,6 +1742,60 @@ class Phase4Stage:
         if entry is None or entry.get("observed_duration_us") == observed_duration_us:
             return
         entry["observed_duration_us"] = observed_duration_us
+        payload["timing_rewrites"] = [
+            rewrites[index] for index in sorted(rewrites)
+        ]
+        self._store.save_checkpoint(job_id, JobStage.TTS, payload)
+
+    def _accept_timing_rewrites(
+        self,
+        job_id: str,
+        *,
+        translation: TranslationArtifact,
+    ) -> None:
+        checkpoint = self._store.get_checkpoint(job_id, JobStage.TTS)
+        if checkpoint is None:
+            return
+        payload = dict(checkpoint.payload)
+        rewrites = self._timing_rewrites_by_ordinal(
+            payload,
+            translation=translation,
+        )
+        pending: list[tuple[dict[str, Any], str]] = []
+        for entry in rewrites.values():
+            if (
+                entry.get("prompt_version") != _TIMING_REWRITE_PROMPT_V2
+                or entry.get("accepted") is True
+            ):
+                continue
+            ordinal = int(entry["ordinal"])
+            message = (
+                f"Khối thuyết minh {ordinal + 1} đã được rút gọn thích ứng "
+                f"còn tối đa {int(entry['max_words'])} từ và đã khớp cửa sổ "
+                f"{int(entry['available_duration_us']) / 1_000_000:.2f} giây"
+            )
+            pending.append((entry, message))
+        if not pending:
+            return
+        job = self._store.get_job(job_id)
+        raw_warnings = job.details.get("warnings", [])
+        if isinstance(raw_warnings, list):
+            existing_warnings = {
+                (item.get("code"), item.get("message"))
+                for item in raw_warnings
+                if isinstance(item, Mapping)
+            }
+        else:
+            existing_warnings = set()
+        for _entry, message in pending:
+            warning_key = ("timing_translation_rewritten_adaptive", message)
+            if warning_key not in existing_warnings:
+                self._store.append_warning(job_id, *warning_key)
+                existing_warnings.add(warning_key)
+        # Warnings are written idempotently first. If checkpoint persistence
+        # fails, resume can safely retry without losing or duplicating them.
+        for entry, _message in pending:
+            entry["accepted"] = True
         payload["timing_rewrites"] = [
             rewrites[index] for index in sorted(rewrites)
         ]

@@ -24,7 +24,12 @@ from dub_server.narration import (
 )
 from dub_server.phase4_stage import Phase4Stage, _next_block_progress
 from dub_server.state import JobStage, JobStatus, StateStore
-from dub_server.timing import FittedNarrationBlock, TimingProfile, TimingQuality
+from dub_server.timing import (
+    FittedNarrationBlock,
+    TimingError,
+    TimingProfile,
+    TimingQuality,
+)
 from dub_server.translation_artifact import (
     TranslationResult,
     TranslationSegment,
@@ -54,6 +59,35 @@ def test_block_progress_coalesces_large_jobs_without_losing_completion() -> None
     assert emitted == sorted(set(emitted))
     assert len(emitted) == 115
     assert emitted[-1] == 850
+
+
+def test_adaptive_rewrite_plan_rejects_audio_at_minimum_duration() -> None:
+    with pytest.raises(TimingError) as caught:
+        Phase4Stage._adaptive_timing_rewrite_plan(
+            available_us=80_000,
+            maximum_total_speed=1.2,
+            previous_text="Rất ngắn",
+            previous_target_us=120_000,
+            previous_observed_us=120_000,
+            adaptive_attempt=1,
+        )
+
+    assert caught.value.code == "timing_semantic_budget_impossible"
+    assert caught.value.retryable is False
+
+
+def test_adaptive_rewrite_target_stays_below_measured_duration() -> None:
+    target_us, _max_words = Phase4Stage._adaptive_timing_rewrite_plan(
+        available_us=200_000,
+        maximum_total_speed=1.2,
+        previous_text="Rất ngắn",
+        previous_target_us=300_000,
+        previous_observed_us=120_001,
+        adaptive_attempt=1,
+    )
+
+    assert target_us == 120_000
+    assert target_us < 120_001
 
 
 def _write_wav(
@@ -277,6 +311,7 @@ class FakeTimingRewriter:
     def __init__(self, outputs: list[str]) -> None:
         self._outputs = list(outputs)
         self.calls: list[tuple[str, int, str]] = []
+        self.rewrite_contexts: list[dict[str, Any]] = []
         self.start_count = 0
         self.close_count = 0
         self.abort_count = 0
@@ -284,17 +319,35 @@ class FakeTimingRewriter:
     def start(self) -> None:
         self.start_count += 1
 
-    def translate_batch_for_durations(
+    def rewrite_for_duration(
         self,
-        texts: list[str],
-        target_durations_us: list[int],
+        source_text: str,
+        prior_target_text: str,
+        observed_duration_us: int,
+        target_duration_us: int,
+        max_output_words: int,
         *,
         source_language: str,
         target_language: str = "vi",
+        canonical_vi: str | None = None,
+        adaptive_attempt: int = 1,
         **_kwargs: Any,
-    ) -> tuple[str, ...]:
-        self.calls.append((texts[0], target_durations_us[0], source_language))
-        return (self._outputs.pop(0),)
+    ) -> str:
+        self.calls.append((source_text, target_duration_us, source_language))
+        self.rewrite_contexts.append(
+            {
+                "source_text": source_text,
+                "canonical_vi": canonical_vi,
+                "prior_target_text": prior_target_text,
+                "observed_duration_us": observed_duration_us,
+                "target_duration_us": target_duration_us,
+                "max_output_words": max_output_words,
+                "source_language": source_language,
+                "target_language": target_language,
+                "adaptive_attempt": adaptive_attempt,
+            }
+        )
+        return self._outputs.pop(0)
 
     def close(self) -> None:
         self.close_count += 1
@@ -310,16 +363,34 @@ class BlockingTimingRewriter(FakeTimingRewriter):
         self.request_aborted = threading.Event()
         self.fail_close = fail_close
 
-    def translate_batch_for_durations(
+    def rewrite_for_duration(
         self,
-        texts: list[str],
-        target_durations_us: list[int],
+        source_text: str,
+        prior_target_text: str,
+        observed_duration_us: int,
+        target_duration_us: int,
+        max_output_words: int,
         *,
         source_language: str,
         target_language: str = "vi",
+        canonical_vi: str | None = None,
+        adaptive_attempt: int = 1,
         **_kwargs: Any,
-    ) -> tuple[str, ...]:
-        self.calls.append((texts[0], target_durations_us[0], source_language))
+    ) -> str:
+        self.calls.append((source_text, target_duration_us, source_language))
+        self.rewrite_contexts.append(
+            {
+                "source_text": source_text,
+                "canonical_vi": canonical_vi,
+                "prior_target_text": prior_target_text,
+                "observed_duration_us": observed_duration_us,
+                "target_duration_us": target_duration_us,
+                "max_output_words": max_output_words,
+                "source_language": source_language,
+                "target_language": target_language,
+                "adaptive_attempt": adaptive_attempt,
+            }
+        )
         self.request_started.set()
         if not self.request_aborted.wait(5.0):
             raise AssertionError("timing rewrite request was not aborted")
@@ -336,16 +407,34 @@ class BlockingTimingRewriter(FakeTimingRewriter):
 
 
 class FailingTimingRewriter(FakeTimingRewriter):
-    def translate_batch_for_durations(
+    def rewrite_for_duration(
         self,
-        texts: list[str],
-        target_durations_us: list[int],
+        source_text: str,
+        prior_target_text: str,
+        observed_duration_us: int,
+        target_duration_us: int,
+        max_output_words: int,
         *,
         source_language: str,
         target_language: str = "vi",
+        canonical_vi: str | None = None,
+        adaptive_attempt: int = 1,
         **_kwargs: Any,
-    ) -> tuple[str, ...]:
-        self.calls.append((texts[0], target_durations_us[0], source_language))
+    ) -> str:
+        self.calls.append((source_text, target_duration_us, source_language))
+        self.rewrite_contexts.append(
+            {
+                "source_text": source_text,
+                "canonical_vi": canonical_vi,
+                "prior_target_text": prior_target_text,
+                "observed_duration_us": observed_duration_us,
+                "target_duration_us": target_duration_us,
+                "max_output_words": max_output_words,
+                "source_language": source_language,
+                "target_language": target_language,
+                "adaptive_attempt": adaptive_attempt,
+            }
+        )
         raise LlamaTranslationError(
             "request_failed",
             "llama-server tạm thời không phản hồi",
@@ -354,16 +443,34 @@ class FailingTimingRewriter(FakeTimingRewriter):
 
 
 class InvalidOutputTimingRewriter(FakeTimingRewriter):
-    def translate_batch_for_durations(
+    def rewrite_for_duration(
         self,
-        texts: list[str],
-        target_durations_us: list[int],
+        source_text: str,
+        prior_target_text: str,
+        observed_duration_us: int,
+        target_duration_us: int,
+        max_output_words: int,
         *,
         source_language: str,
         target_language: str = "vi",
+        canonical_vi: str | None = None,
+        adaptive_attempt: int = 1,
         **_kwargs: Any,
-    ) -> tuple[str, ...]:
-        self.calls.append((texts[0], target_durations_us[0], source_language))
+    ) -> str:
+        self.calls.append((source_text, target_duration_us, source_language))
+        self.rewrite_contexts.append(
+            {
+                "source_text": source_text,
+                "canonical_vi": canonical_vi,
+                "prior_target_text": prior_target_text,
+                "observed_duration_us": observed_duration_us,
+                "target_duration_us": target_duration_us,
+                "max_output_words": max_output_words,
+                "source_language": source_language,
+                "target_language": target_language,
+                "adaptive_attempt": adaptive_attempt,
+            }
+        )
         raise LlamaTranslationError(
             "invalid_output",
             "Model trả thêm phần giải thích",
@@ -751,7 +858,20 @@ async def test_phase4_natural_profile_rewrites_only_overflowing_block(
     ).run(job_id)
 
     assert result.status is JobStatus.COMPLETED
-    assert rewriter.calls == [("One", 1_620_000, "en")]
+    assert rewriter.calls == [("One", 1_867_680, "en")]
+    assert rewriter.rewrite_contexts == [
+        {
+            "source_text": "One",
+            "canonical_vi": "Một",
+            "prior_target_text": "Một",
+            "observed_duration_us": 3_200_000,
+            "target_duration_us": 1_867_680,
+            "max_output_words": 2,
+            "source_language": "en",
+            "target_language": "vi",
+            "adaptive_attempt": 1,
+        }
+    ]
     assert rewriter.start_count == rewriter.close_count == 1
     assert synthesizer.calls == ["Một", "Hai", "Một gọn"]
     assert fitter.calls == ["Một gọn", "Hai"]
@@ -767,11 +887,25 @@ async def test_phase4_natural_profile_rewrites_only_overflowing_block(
             "source_text_sha256": hashlib.sha256(b"One").hexdigest(),
             "original_translation_sha256": hashlib.sha256("Một".encode()).hexdigest(),
             "attempt": 1,
+            "adaptive_attempt": 1,
+            "legacy_attempt_count": 0,
             "available_duration_us": 1_800_000,
-            "target_duration_us": 1_620_000,
+            "target_duration_us": 1_867_680,
+            "max_words": 2,
+            "previous_text_sha256": hashlib.sha256("Một".encode()).hexdigest(),
+            "previous_target_duration_us": 3_200_000,
+            "previous_observed_duration_us": 3_200_000,
             "model_id": "mt-test",
             "model_tree_sha256": MODEL_SHA,
-            "prompt_version": "timing-rewrite-v1",
+            "prompt_version": "timing-rewrite-v2",
+            "accepted": True,
+            "history": [
+                {
+                    "text_sha256": hashlib.sha256("Một".encode()).hexdigest(),
+                    "target_duration_us": 3_200_000,
+                    "observed_duration_us": 3_200_000,
+                }
+            ],
             "observed_duration_us": 1_200_000,
         }
     ]
@@ -779,7 +913,7 @@ async def test_phase4_natural_profile_rewrites_only_overflowing_block(
         "Một gọn"
     ) >= 0
     assert any(
-        warning["code"] == "timing_translation_rewritten"
+        warning["code"] == "timing_translation_rewritten_adaptive"
         for warning in result.details["warnings"]
     )
 
@@ -827,10 +961,15 @@ async def test_phase4_timing_rewrite_stops_after_three_measured_attempts(
 ) -> None:
     store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
     synthesizer = RewriteAwareSynthesizer(
-        {"Hai": 800_000},
+        {
+            "Hai": 800_000,
+            "Gọn một": 2_800_000,
+            "Gọn hai": 2_500_000,
+            "Gọn ba": 2_200_000,
+        },
         default_us=3_200_000,
     )
-    rewriter = FakeTimingRewriter(["Một dài 1", "Một dài 2", "Một dài 3"])
+    rewriter = FakeTimingRewriter(["Gọn một", "Gọn hai", "Gọn ba"])
     exporter = FakeExporter()
 
     result = await _stage(
@@ -844,20 +983,48 @@ async def test_phase4_timing_rewrite_stops_after_three_measured_attempts(
     ).run(job_id)
 
     assert result.status is JobStatus.FAILED
-    assert result.error_code == "timing_rewrite_exhausted"
+    assert result.error_code == "timing_semantic_budget_impossible"
     assert result.retryable is False
     assert len(rewriter.calls) == 3
     assert rewriter.start_count == rewriter.close_count == 3
+    assert [item["prior_target_text"] for item in rewriter.rewrite_contexts] == [
+        "Một",
+        "Gọn một",
+        "Gọn hai",
+    ]
+    assert [
+        item["observed_duration_us"] for item in rewriter.rewrite_contexts
+    ] == [3_200_000, 2_800_000, 2_500_000]
+    assert [item["adaptive_attempt"] for item in rewriter.rewrite_contexts] == [
+        1,
+        2,
+        3,
+    ]
+    assert [item["max_output_words"] for item in rewriter.rewrite_contexts] == [
+        2,
+        2,
+        2,
+    ]
+    rewrite_targets = [
+        item["target_duration_us"] for item in rewriter.rewrite_contexts
+    ]
+    assert rewrite_targets == sorted(rewrite_targets, reverse=True)
     assert synthesizer.calls == [
         "Một",
         "Hai",
-        "Một dài 1",
-        "Một dài 2",
-        "Một dài 3",
+        "Gọn một",
+        "Gọn hai",
+        "Gọn ba",
     ]
     assert exporter.calls == 0
     checkpoint = store.get_checkpoint(job_id, JobStage.TTS).payload
     assert checkpoint["timing_rewrites"][0]["attempt"] == 3
+    assert checkpoint["timing_rewrites"][0]["observed_duration_us"] == 2_200_000
+    assert checkpoint["timing_rewrites"][0]["accepted"] is False
+    assert not any(
+        warning["code"] == "timing_translation_rewritten_adaptive"
+        for warning in result.details.get("warnings", [])
+    )
 
 
 @pytest.mark.asyncio
@@ -882,7 +1049,7 @@ async def test_phase4_empty_rewrite_output_is_bounded_without_tts_fallback(
     ).run(job_id)
 
     assert result.status is JobStatus.FAILED
-    assert result.error_code == "timing_rewrite_exhausted"
+    assert result.error_code == "timing_semantic_budget_impossible"
     assert result.retryable is False
     assert len(rewriter.calls) == 3
     assert rewriter.start_count == rewriter.close_count == 3
@@ -914,13 +1081,20 @@ async def test_phase4_retries_llama_invalid_output_three_times(
     ).run(job_id)
 
     assert result.status is JobStatus.FAILED
-    assert result.error_code == "timing_rewrite_exhausted"
+    assert result.error_code == "timing_semantic_budget_impossible"
     assert result.retryable is False
-    assert [target_us for _text, target_us, _language in rewriter.calls] == [
-        1_620_000,
-        1_350_000,
-        1_116_000,
+    assert [item["adaptive_attempt"] for item in rewriter.rewrite_contexts] == [
+        1,
+        2,
+        3,
     ]
+    assert [item["observed_duration_us"] for item in rewriter.rewrite_contexts] == [
+        3_200_000,
+        3_200_000,
+        3_200_000,
+    ]
+    targets = [item["target_duration_us"] for item in rewriter.rewrite_contexts]
+    assert targets == sorted(targets, reverse=True)
     assert rewriter.start_count == rewriter.close_count == 3
     assert synthesizer.calls == ["Một", "Hai"]
     assert store.get_checkpoint(job_id, JobStage.TTS).payload[
@@ -1015,7 +1189,177 @@ async def test_phase4_resume_uses_persisted_rewrite_without_calling_model_again(
     warnings = [
         item
         for item in resumed.details["warnings"]
-        if item["code"] == "timing_translation_rewritten"
+        if item["code"] == "timing_translation_rewritten_adaptive"
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_phase4_accept_warning_survives_checkpoint_save_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    rewriter = FakeTimingRewriter(["Một gọn"])
+    original_save_checkpoint = store.save_checkpoint
+    failed_once = False
+
+    def fail_first_accepted_checkpoint(
+        current_job_id: str,
+        stage: JobStage,
+        payload: dict[str, Any],
+    ) -> None:
+        nonlocal failed_once
+        rewrites = payload.get("timing_rewrites", [])
+        if (
+            not failed_once
+            and stage is JobStage.TTS
+            and isinstance(rewrites, list)
+            and rewrites
+            and isinstance(rewrites[0], dict)
+            and rewrites[0].get("accepted") is True
+        ):
+            failed_once = True
+            raise OSError("simulated checkpoint failure after warning")
+        original_save_checkpoint(current_job_id, stage, payload)
+
+    monkeypatch.setattr(store, "save_checkpoint", fail_first_accepted_checkpoint)
+    first = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=RewriteAwareSynthesizer(
+            {"Một": 3_200_000, "Hai": 800_000, "Một gọn": 1_200_000},
+            default_us=3_200_000,
+        ),
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert first.status is JobStatus.FAILED
+    assert first.error_code == "phase4_failed"
+    assert failed_once is True
+    assert sum(
+        item["code"] == "timing_translation_rewritten_adaptive"
+        for item in first.details.get("warnings", [])
+    ) == 1
+
+    monkeypatch.setattr(store, "save_checkpoint", original_save_checkpoint)
+    store.resume(job_id)
+    resumed_synthesizer = RewriteAwareSynthesizer({}, default_us=3_200_000)
+    resumed = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=resumed_synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert resumed.status is JobStatus.COMPLETED
+    assert resumed_synthesizer.calls == []
+    assert len(rewriter.calls) == 1
+    assert sum(
+        item["code"] == "timing_translation_rewritten_adaptive"
+        for item in resumed.details.get("warnings", [])
+    ) == 1
+    rewrite = store.get_checkpoint(job_id, JobStage.TTS).payload[
+        "timing_rewrites"
+    ][0]
+    assert rewrite["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_phase4_resumes_legacy_v1_attempt_three_with_measured_v2_rewrite(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    initial = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=RewriteAwareSynthesizer(
+            {"Một": 3_200_000, "Hai": 800_000},
+            default_us=3_200_000,
+        ),
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert initial.status is JobStatus.FAILED
+    assert initial.error_code == "timing_rewrite_required"
+    tts_payload = dict(store.get_checkpoint(job_id, JobStage.TTS).payload)
+    blocks = [dict(item) for item in tts_payload["blocks"]]
+    blocks[0]["text"] = "Một cũ"
+    blocks[0]["tts_normalized_text"] = "Một cũ"
+    blocks[0]["text_sha256"] = hashlib.sha256("Một cũ".encode()).hexdigest()
+    tts_payload["blocks"] = blocks
+    tts_payload["timing_rewrites"] = [
+        {
+            "ordinal": 0,
+            "text": "Một cũ",
+            "text_sha256": hashlib.sha256("Một cũ".encode()).hexdigest(),
+            "source_text_sha256": hashlib.sha256(b"One").hexdigest(),
+            "original_translation_sha256": hashlib.sha256(
+                "Một".encode()
+            ).hexdigest(),
+            "attempt": 3,
+            "available_duration_us": 1_800_000,
+            "target_duration_us": 1_116_000,
+            "model_id": "mt-test",
+            "model_tree_sha256": MODEL_SHA,
+            "prompt_version": "timing-rewrite-v1",
+            # Deliberately stale: the current block checkpoint below measures
+            # 3.2 seconds and must take precedence for adaptive feedback.
+            "observed_duration_us": 4_600_000,
+        }
+    ]
+    store.save_checkpoint(job_id, JobStage.TTS, tts_payload)
+    store.update_status(
+        job_id,
+        JobStatus.READY_TTS,
+        stage=JobStage.TTS,
+        progress_permille=650,
+        force=True,
+    )
+
+    rewriter = FakeTimingRewriter(["Một gọn"])
+    resumed_synthesizer = RewriteAwareSynthesizer(
+        {"Một gọn": 1_200_000, "Hai": 800_000},
+        default_us=3_200_000,
+    )
+    resumed = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=resumed_synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert resumed.status is JobStatus.COMPLETED
+    assert resumed_synthesizer.calls == ["Một gọn"]
+    assert len(rewriter.rewrite_contexts) == 1
+    context = rewriter.rewrite_contexts[0]
+    assert context["prior_target_text"] == "Một cũ"
+    assert context["observed_duration_us"] == 3_200_000
+    assert context["adaptive_attempt"] == 1
+    assert context["target_duration_us"] < 1_116_000
+    rewrite = store.get_checkpoint(job_id, JobStage.TTS).payload[
+        "timing_rewrites"
+    ][0]
+    assert rewrite["prompt_version"] == "timing-rewrite-v2"
+    assert rewrite["legacy_attempt_count"] == 3
+    assert rewrite["adaptive_attempt"] == 1
+    assert rewrite["previous_observed_duration_us"] == 3_200_000
+    assert rewrite["accepted"] is True
+    warnings = [
+        item
+        for item in resumed.details["warnings"]
+        if item["code"] == "timing_translation_rewritten_adaptive"
     ]
     assert len(warnings) == 1
 
@@ -1270,7 +1614,7 @@ async def test_phase4_cancel_aborts_blocked_timing_rewrite_without_http_timeout(
         rewriter=rewriter,
     )
     run_task = asyncio.create_task(stage.run(job_id))
-    assert await asyncio.to_thread(rewriter.request_started.wait, 2.0)
+    assert await asyncio.to_thread(rewriter.request_started.wait, 5.0)
 
     started = asyncio.get_running_loop().time()
     store.request_cancel(job_id)
@@ -1305,7 +1649,7 @@ async def test_phase4_task_cancellation_is_not_masked_by_rewriter_cleanup_error(
         rewriter=rewriter,
     )
     run_task = asyncio.create_task(stage.run(job_id))
-    assert await asyncio.to_thread(rewriter.request_started.wait, 2.0)
+    assert await asyncio.to_thread(rewriter.request_started.wait, 5.0)
 
     started = asyncio.get_running_loop().time()
     run_task.cancel()
