@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import dub_server.timing as timing_module
 from dub_server.timing import (
     FfmpegTimingFitter,
     FittedNarrationBlock,
@@ -417,6 +418,36 @@ def test_elastic_postvalidation_uses_exact_frames_at_the_speed_cap() -> None:
     assert len(planned) == 2
     assert planned[0].end_us <= planned[1].start_us
     assert all(slot.planned_total_speed == pytest.approx(1.2) for slot in planned)
+
+
+def test_elastic_postvalidation_reports_the_real_capacity_deficit() -> None:
+    window = timing_module._NaturalWindow(
+        ordinal=0,
+        lower_us=0,
+        upper_us=1_500_000,
+        preferred_center_us=450_000,
+        work_duration_us=1_200_000,
+        source_frame_count=None,
+        source_sample_rate=None,
+        native_speed_ppm=1_000_000,
+    )
+    slot = timing_module.PlannedNarrationSlot(
+        start_us=0,
+        end_us=900_000,
+        planned_total_speed=4 / 3,
+    )
+
+    with pytest.raises(TimingError) as captured:
+        timing_module._postvalidate_elastic_schedule(
+            (window,),
+            (window,),
+            (slot,),
+            maximum_total_speed=1.2,
+        )
+
+    assert captured.value.details["failure_kind"] == "elastic_postvalidation"
+    assert captured.value.details["schedule_deficit_us"] == 100_000
+    assert captured.value.details["available_duration_us"] == 900_000
 
 
 def test_elastic_planner_never_extends_into_a_neighbour_source_block() -> None:

@@ -199,6 +199,8 @@ def test_readme_documents_natural_timing_group_recovery() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "`timing_semantic_budget_impossible` từ `v0.3.6`" in readme
+    assert "`timing_group_budget_impossible`" in readme
+    assert "`retryable=false`" in readme
     assert "critical group" in readme
     assert "`1.20×`" in readme
     assert "âm thanh không bị cắt ngắn" in readme

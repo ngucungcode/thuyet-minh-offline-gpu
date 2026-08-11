@@ -319,7 +319,8 @@ nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới
 `timing_rewrite_exhausted` hoặc `timing_semantic_budget_impossible` từ `v0.3.6`
 được chuyển thành có thể tiếp tục. Migration giữ nguyên stage, bản dịch, artifact
 TTS và checkpoint đã hoàn tất; khi resume, chỉ audio của khối được chọn có thể
-được tổng hợp lại, các block còn lại vẫn được tái sử dụng.
+được tổng hợp lại, các block còn lại vẫn được tái sử dụng. Lần resume đầu tiên
+sau nâng cấp có thể fit lại các block timing bằng FFmpeg nên lâu hơn resume thông thường.
 
 Planner trước tiên thử mượn thêm khoảng im lặng thật ở hai phía mà không đi xuyên qua
 lời nguồn hoặc block lân cận. Nếu cả chuỗi block sát nhau vẫn vượt ngân sách, hệ thống
@@ -332,7 +333,8 @@ dub resume JOB_ID
 ```
 
 Nếu tối đa ba khối ưu tiên trong critical group đã dùng hết ngân sách adaptive mà
-vẫn không thể giữ đủ ý, job mới dừng bằng lỗi ngân sách nhóm có chẩn đoán cụ thể. Khi đó
+vẫn không thể giữ đủ ý, job dừng bằng `timing_group_budget_impossible`
+(`retryable=false`) có chẩn đoán cụ thể. Khi đó
 hãy rút gọn phụ đề/bản dịch được báo rồi gửi job mới, hoặc tạo job mới với
 `--timing-profile strict` nếu chấp nhận nhịp đọc kém tự nhiên hơn.
 

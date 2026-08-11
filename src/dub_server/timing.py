@@ -394,7 +394,7 @@ def _plan_natural_windows(
 
     # Check intrinsic local capacity in source order so an oversized block is
     # never misclassified as congestion caused by its predecessors.
-    for failure_index, window in enumerate(windows):
+    for window in windows:
         available_us = window.upper_us - window.lower_us
         if _duration_at_speed(window, maximum_speed_ppm) > available_us:
             _raise_rewrite_required(
@@ -580,8 +580,23 @@ def _postvalidate_elastic_schedule(
                 else slot.start_us - base.upper_us + 1
             )
         else:
+            drift_deficit_us = (
+                center_drift_us - NATURAL_MAX_ELASTIC_CENTER_DRIFT_US
+            )
+            capacity_deficit_us = required_us - (
+                slot.end_us - slot.start_us
+            )
+            geometry_deficit_us = max(
+                elastic.lower_us - slot.start_us,
+                slot.end_us - elastic.upper_us,
+                previous_end_us - slot.start_us,
+                0,
+            )
             locality_deficit_us = max(
-                1, center_drift_us - NATURAL_MAX_ELASTIC_CENTER_DRIFT_US
+                1,
+                drift_deficit_us,
+                capacity_deficit_us,
+                geometry_deficit_us,
             )
         available_us = max(0, required_us - locality_deficit_us)
         _raise_rewrite_required(
@@ -780,6 +795,7 @@ def _raise_rewrite_required(
             int(candidate["ordinal"]),
         )
     )
+    del candidates[3:]
     selected_failure_kind = failure_kind or (
         "single_window_capacity"
         if group_start_index == failure_index

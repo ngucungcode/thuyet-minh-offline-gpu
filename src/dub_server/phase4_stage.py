@@ -64,7 +64,9 @@ from .state import InvalidTransition, JobRecord, JobStage, JobStatus, StateStore
 from .timing import (
     FfmpegTimingFitter,
     FittedNarrationBlock,
+    NATURAL_MAX_SILENT_BORROW_US,
     NATURAL_MAX_TOTAL_SPEED,
+    NATURAL_SILENT_GAP_GUARD_US,
     NarrationTimingInput,
     TimingError,
     TimingProfile,
@@ -148,8 +150,6 @@ _TIMING_REWRITE_ADAPTIVE_DECAY = 0.85
 _NATURAL_BASE_PLANNER_POLICY = "natural-base-v1"
 _NATURAL_SILENT_SLACK_PLANNER_POLICY = "natural-silent-slack-v1"
 _STRICT_PLANNER_POLICY = "strict-v1"
-_NATURAL_MAXIMUM_SILENT_BORROW_US = 1_600_000
-_NATURAL_SILENCE_GUARD_US = 120_000
 _TIMING_REWRITE_FAILURE_OWNER_STRATEGY = "failure-owner-v1"
 _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY = "critical-group-neighbor-v1"
 
@@ -2118,8 +2118,8 @@ class Phase4Stage:
                 planning_inputs,
                 duration_us=translation.result.duration_us,
                 profile=timing_profile,
-                maximum_silent_borrow_us=_NATURAL_MAXIMUM_SILENT_BORROW_US,
-                silence_guard_us=_NATURAL_SILENCE_GUARD_US,
+                maximum_silent_borrow_us=NATURAL_MAX_SILENT_BORROW_US,
+                silence_guard_us=NATURAL_SILENT_GAP_GUARD_US,
             )
             planner_policy = _NATURAL_SILENT_SLACK_PLANNER_POLICY
         checkpoint = self._store.get_checkpoint(job_id, JobStage.TIMING)
