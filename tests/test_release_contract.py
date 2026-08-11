@@ -159,7 +159,7 @@ def test_installer_defaults_to_safe_release_and_explicit_legacy_migration() -> N
     assert _installer_assignment("UPGRADE_EXISTING") == "false"
     assert _installer_assignment("COMPATIBLE_UPGRADE_FROM") == (
         "0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2 0.3.3"
-        " 0.3.4 0.3.5"
+        " 0.3.4 0.3.5 0.3.6"
     )
     assert _installer_assignment("ACCEPTANCE_MODE") == "basic"
     assert _installer_assignment("START_STACK") == "true"
@@ -188,7 +188,22 @@ def test_readme_uses_the_short_release_installer() -> None:
         "https://github.com/ngucungcode/thuyet-minh-offline-gpu/"
         "releases/latest/download/install.sh | sudo bash"
     ) in readme
+    assert (
+        "https://github.com/ngucungcode/thuyet-minh-offline-gpu/"
+        f"releases/download/v{__version__}/install.sh"
+    ) in readme
     assert "--profile auto --start --yes" not in readme
+
+
+def test_readme_documents_natural_timing_group_recovery() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "`timing_semantic_budget_impossible` từ `v0.3.6`" in readme
+    assert "`timing_group_budget_impossible`" in readme
+    assert "`retryable=false`" in readme
+    assert "critical group" in readme
+    assert "`1.20×`" in readme
+    assert "âm thanh không bị cắt ngắn" in readme
 
 
 def test_installer_does_not_hash_profile_models_twice() -> None:

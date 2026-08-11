@@ -21,6 +21,9 @@ TIMELINE_SAMPLE_RATE = 48_000
 TIMELINE_CHANNELS = 1
 TIMELINE_SAMPLE_WIDTH_BYTES = 2
 NATURAL_BORROW_WINDOW_US = 800_000
+NATURAL_MAX_SILENT_BORROW_US = 1_600_000
+NATURAL_SILENT_GAP_GUARD_US = 120_000
+NATURAL_MAX_ELASTIC_CENTER_DRIFT_US = 2_000_000
 NATURAL_MAX_TOTAL_SPEED = 1.20
 NATURAL_MAX_ADJACENT_SPEED_DELTA = 0.08
 
@@ -34,7 +37,7 @@ class TimingError(RuntimeError):
         message_vi: str,
         *,
         retryable: bool,
-        details: dict[str, int | float | str] | None = None,
+        details: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message_vi)
         self.code = code
@@ -229,6 +232,8 @@ def plan_narration_slots(
     duration_us: int,
     profile: TimingProfile | str = TimingProfile.NATURAL,
     borrow_window_us: int = NATURAL_BORROW_WINDOW_US,
+    maximum_silent_borrow_us: int | None = None,
+    silence_guard_us: int = NATURAL_SILENT_GAP_GUARD_US,
     maximum_total_speed: float = NATURAL_MAX_TOTAL_SPEED,
     maximum_adjacent_speed_delta: float = NATURAL_MAX_ADJACENT_SPEED_DELTA,
 ) -> tuple[PlannedNarrationSlot, ...]:
@@ -269,6 +274,21 @@ def plan_narration_slots(
         )
     if borrow_window_us < 0:
         raise ValueError("borrow_window_us must not be negative")
+    if maximum_silent_borrow_us is not None and (
+        isinstance(maximum_silent_borrow_us, bool)
+        or not isinstance(maximum_silent_borrow_us, int)
+        or maximum_silent_borrow_us < borrow_window_us
+    ):
+        raise ValueError(
+            "maximum_silent_borrow_us must be an integer greater than or equal "
+            "to borrow_window_us"
+        )
+    if (
+        isinstance(silence_guard_us, bool)
+        or not isinstance(silence_guard_us, int)
+        or silence_guard_us < 0
+    ):
+        raise ValueError("silence_guard_us must be a non-negative integer")
     if not 1.0 <= maximum_total_speed <= 2.0:
         raise ValueError("maximum_total_speed must be between 1.0 and 2.0")
     if not 0 <= maximum_adjacent_speed_delta <= maximum_total_speed - 1.0:
@@ -306,7 +326,7 @@ def plan_narration_slots(
             for block in blocks
         )
 
-    windows = tuple(
+    base_windows = tuple(
         _NaturalWindow(
             ordinal=ordinal,
             lower_us=max(0, block.start_us - borrow_window_us),
@@ -323,8 +343,67 @@ def plan_narration_slots(
         )
         for ordinal, block in enumerate(blocks)
     )
+    try:
+        return _plan_natural_windows(
+            base_windows,
+            borrow_window_us=borrow_window_us,
+            maximum_total_speed=maximum_total_speed,
+            maximum_adjacent_speed_delta=maximum_adjacent_speed_delta,
+        )
+    except TimingError as base_failure:
+        if (
+            base_failure.code != "timing_rewrite_required"
+            or maximum_silent_borrow_us is None
+            or maximum_silent_borrow_us == borrow_window_us
+        ):
+            raise
+
+    elastic_windows = _elastic_natural_windows(
+        blocks,
+        base_windows,
+        duration_us=duration_us,
+        maximum_silent_borrow_us=maximum_silent_borrow_us,
+        silence_guard_us=silence_guard_us,
+    )
+    planned = _plan_natural_windows(
+        elastic_windows,
+        borrow_window_us=borrow_window_us,
+        maximum_total_speed=maximum_total_speed,
+        maximum_adjacent_speed_delta=maximum_adjacent_speed_delta,
+    )
+    _postvalidate_elastic_schedule(
+        base_windows,
+        elastic_windows,
+        planned,
+        maximum_total_speed=maximum_total_speed,
+    )
+    return planned
+
+
+def _plan_natural_windows(
+    windows: Sequence[_NaturalWindow],
+    *,
+    borrow_window_us: int,
+    maximum_total_speed: float,
+    maximum_adjacent_speed_delta: float,
+) -> tuple[PlannedNarrationSlot, ...]:
+    """Run the legacy deterministic planner against prepared windows."""
+
     maximum_speed_ppm = round(maximum_total_speed * 1_000_000)
     speed_delta_ppm = round(maximum_adjacent_speed_delta * 1_000_000)
+
+    # Check intrinsic local capacity in source order so an oversized block is
+    # never misclassified as congestion caused by its predecessors.
+    for window in windows:
+        available_us = window.upper_us - window.lower_us
+        if _duration_at_speed(window, maximum_speed_ppm) > available_us:
+            _raise_rewrite_required(
+                (window,),
+                failure_index=0,
+                available_us=available_us,
+                maximum_speed_ppm=maximum_speed_ppm,
+                maximum_total_speed=maximum_total_speed,
+            )
     speeds = [
         _minimum_window_speed(window, maximum_speed_ppm) for window in windows
     ]
@@ -346,7 +425,8 @@ def plan_narration_slots(
         )
         if failure_index is not None:
             _raise_rewrite_required(
-                chain[failure_index],
+                chain,
+                failure_index=failure_index,
                 available_us=available_us,
                 maximum_speed_ppm=maximum_speed_ppm,
                 maximum_total_speed=maximum_total_speed,
@@ -384,7 +464,8 @@ def plan_narration_slots(
     failure_index, available_us = _first_schedule_failure(windows, speeds)
     if failure_index is not None:  # Defensive typed failure for persisted jobs.
         _raise_rewrite_required(
-            windows[failure_index],
+            windows,
+            failure_index=failure_index,
             available_us=available_us,
             maximum_speed_ppm=maximum_speed_ppm,
             maximum_total_speed=maximum_total_speed,
@@ -402,6 +483,131 @@ def plan_narration_slots(
             windows, scheduled, strict=True
         )
     )
+
+
+def _elastic_natural_windows(
+    blocks: Sequence[NarrationTimingInput],
+    base_windows: Sequence[_NaturalWindow],
+    *,
+    duration_us: int,
+    maximum_silent_borrow_us: int,
+    silence_guard_us: int,
+) -> tuple[_NaturalWindow, ...]:
+    """Extend only into source silence while preserving every base envelope."""
+
+    elastic: list[_NaturalWindow] = []
+    for index, (block, base) in enumerate(
+        zip(blocks, base_windows, strict=True)
+    ):
+        lower_us = base.lower_us
+        desired_lower_us = max(0, block.start_us - maximum_silent_borrow_us)
+        if desired_lower_us < lower_us:
+            silent_floor_us = (
+                0
+                if index == 0
+                else blocks[index - 1].end_us + silence_guard_us
+            )
+            lower_us = min(lower_us, max(desired_lower_us, silent_floor_us))
+
+        upper_us = base.upper_us
+        desired_upper_us = min(
+            duration_us, block.end_us + maximum_silent_borrow_us
+        )
+        if desired_upper_us > upper_us:
+            silent_ceiling_us = (
+                duration_us
+                if index + 1 == len(blocks)
+                else blocks[index + 1].start_us - silence_guard_us
+            )
+            upper_us = max(upper_us, min(desired_upper_us, silent_ceiling_us))
+
+        elastic.append(
+            _NaturalWindow(
+                ordinal=base.ordinal,
+                lower_us=lower_us,
+                upper_us=upper_us,
+                preferred_center_us=base.preferred_center_us,
+                work_duration_us=base.work_duration_us,
+                source_frame_count=base.source_frame_count,
+                source_sample_rate=base.source_sample_rate,
+                native_speed_ppm=base.native_speed_ppm,
+            )
+        )
+    return tuple(elastic)
+
+
+def _postvalidate_elastic_schedule(
+    base_windows: Sequence[_NaturalWindow],
+    elastic_windows: Sequence[_NaturalWindow],
+    planned: Sequence[PlannedNarrationSlot],
+    *,
+    maximum_total_speed: float,
+) -> None:
+    """Reject elastic placements that lose scene locality after scheduling."""
+
+    previous_end_us = 0
+    maximum_speed_ppm = round(maximum_total_speed * 1_000_000)
+    for index, (base, elastic, slot) in enumerate(
+        zip(base_windows, elastic_windows, planned, strict=True)
+    ):
+        slot_center_us = (slot.start_us + slot.end_us) // 2
+        intersects_base = (
+            slot.end_us > base.lower_us and slot.start_us < base.upper_us
+        )
+        center_drift_us = abs(slot_center_us - base.preferred_center_us)
+        valid_geometry = (
+            elastic.lower_us <= slot.start_us < slot.end_us <= elastic.upper_us
+            and slot.start_us >= previous_end_us
+        )
+        respects_speed_cap = (
+            slot.end_us - slot.start_us
+            >= _duration_at_speed(elastic, maximum_speed_ppm)
+        )
+        if (
+            valid_geometry
+            and intersects_base
+            and center_drift_us <= NATURAL_MAX_ELASTIC_CENTER_DRIFT_US
+            and respects_speed_cap
+        ):
+            previous_end_us = slot.end_us
+            continue
+
+        required_us = _duration_at_speed(elastic, maximum_speed_ppm)
+        if not intersects_base:
+            locality_deficit_us = (
+                base.lower_us - slot.end_us + 1
+                if slot.end_us <= base.lower_us
+                else slot.start_us - base.upper_us + 1
+            )
+        else:
+            drift_deficit_us = (
+                center_drift_us - NATURAL_MAX_ELASTIC_CENTER_DRIFT_US
+            )
+            capacity_deficit_us = required_us - (
+                slot.end_us - slot.start_us
+            )
+            geometry_deficit_us = max(
+                elastic.lower_us - slot.start_us,
+                slot.end_us - elastic.upper_us,
+                previous_end_us - slot.start_us,
+                0,
+            )
+            locality_deficit_us = max(
+                1,
+                drift_deficit_us,
+                capacity_deficit_us,
+                geometry_deficit_us,
+            )
+        available_us = max(0, required_us - locality_deficit_us)
+        _raise_rewrite_required(
+            elastic_windows,
+            failure_index=index,
+            available_us=available_us,
+            maximum_speed_ppm=maximum_speed_ppm,
+            maximum_total_speed=maximum_total_speed,
+            failure_kind="elastic_postvalidation",
+            schedule_deficit_us=locality_deficit_us,
+        )
 
 
 def _duration_at_speed(window: _NaturalWindow, speed_ppm: int) -> int:
@@ -435,12 +641,7 @@ def _duration_at_speed(window: _NaturalWindow, speed_ppm: int) -> int:
 def _minimum_window_speed(window: _NaturalWindow, maximum_speed_ppm: int) -> int:
     available_us = window.upper_us - window.lower_us
     if _duration_at_speed(window, maximum_speed_ppm) > available_us:
-        _raise_rewrite_required(
-            window,
-            available_us=available_us,
-            maximum_speed_ppm=maximum_speed_ppm,
-            maximum_total_speed=maximum_speed_ppm / 1_000_000,
-        )
+        raise AssertionError("window capacity must be checked before speed search")
     low = 1_000_000
     high = maximum_speed_ppm
     while low < high:
@@ -550,13 +751,56 @@ def _centered_natural_schedule(
 
 
 def _raise_rewrite_required(
-    window: _NaturalWindow,
+    windows: Sequence[_NaturalWindow],
     *,
+    failure_index: int,
     available_us: int,
     maximum_speed_ppm: int,
     maximum_total_speed: float,
+    failure_kind: str | None = None,
+    schedule_deficit_us: int | None = None,
 ) -> NoReturn:
+    window = windows[failure_index]
     required_us = _duration_at_speed(window, maximum_speed_ppm)
+    group_start_index = _critical_group_start_index(
+        windows,
+        failure_index=failure_index,
+        maximum_speed_ppm=maximum_speed_ppm,
+    )
+    deficit_us = (
+        max(1, required_us - available_us)
+        if schedule_deficit_us is None
+        else max(1, schedule_deficit_us)
+    )
+    group_windows = windows[group_start_index : failure_index + 1]
+    candidates = [
+        {
+            "ordinal": candidate.ordinal,
+            "required_duration_us": (
+                candidate_required_us := _duration_at_speed(
+                    candidate, maximum_speed_ppm
+                )
+            ),
+            "target_available_duration_us": max(
+                1, candidate_required_us - deficit_us
+            ),
+            "work_duration_us": candidate.work_duration_us,
+        }
+        for candidate in group_windows
+    ]
+    candidates.sort(
+        key=lambda candidate: (
+            -int(candidate["required_duration_us"]),
+            abs(window.ordinal - int(candidate["ordinal"])),
+            int(candidate["ordinal"]),
+        )
+    )
+    del candidates[3:]
+    selected_failure_kind = failure_kind or (
+        "single_window_capacity"
+        if group_start_index == failure_index
+        else "critical_chain_capacity"
+    )
     formatted_maximum_speed = f"{maximum_total_speed:.2f}".replace(".", ",")
     raise TimingError(
         "timing_rewrite_required",
@@ -573,8 +817,34 @@ def _raise_rewrite_required(
             "required_duration_us": required_us,
             "available_duration_us": available_us,
             "maximum_total_speed": maximum_total_speed,
+            "failure_kind": selected_failure_kind,
+            "failure_ordinal": window.ordinal,
+            "critical_group_start_ordinal": windows[group_start_index].ordinal,
+            "critical_group_end_ordinal": window.ordinal,
+            "schedule_deficit_us": deficit_us,
+            "rewrite_candidates": candidates,
         },
     )
+
+
+def _critical_group_start_index(
+    windows: Sequence[_NaturalWindow],
+    *,
+    failure_index: int,
+    maximum_speed_ppm: int,
+) -> int:
+    """Find the busy prefix after the last idle reset before a failure."""
+
+    cursor_us = 0
+    group_start_index = 0
+    for index, window in enumerate(windows[: failure_index + 1]):
+        if cursor_us <= window.lower_us:
+            group_start_index = index
+        earliest_us = max(window.lower_us, cursor_us)
+        if index == failure_index:
+            break
+        cursor_us = earliest_us + _duration_at_speed(window, maximum_speed_ppm)
+    return group_start_index
 
 
 class FfmpegTimingFitter:
@@ -1210,8 +1480,11 @@ __all__ = [
     "FfmpegTimingFitter",
     "FittedNarrationBlock",
     "NATURAL_BORROW_WINDOW_US",
+    "NATURAL_MAX_ELASTIC_CENTER_DRIFT_US",
     "NATURAL_MAX_ADJACENT_SPEED_DELTA",
+    "NATURAL_MAX_SILENT_BORROW_US",
     "NATURAL_MAX_TOTAL_SPEED",
+    "NATURAL_SILENT_GAP_GUARD_US",
     "NarrationTimingInput",
     "NarrationTimeline",
     "PlannedNarrationSlot",

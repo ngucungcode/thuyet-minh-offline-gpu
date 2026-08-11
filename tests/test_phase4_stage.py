@@ -33,6 +33,7 @@ from dub_server.timing import (
 from dub_server.translation_artifact import (
     TranslationResult,
     TranslationSegment,
+    load_translation_artifact,
     write_translation_artifact,
 )
 
@@ -159,6 +160,97 @@ def _ready_job(
         force=True,
     )
     return store, job.id, source
+
+
+def _ready_elastic_gap_job(tmp_path: Path) -> tuple[StateStore, str, Path]:
+    store = StateStore(tmp_path / "state" / "jobs.sqlite3")
+    source = tmp_path / "incoming" / "movie.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"local movie fixture")
+    job = store.create_job(
+        "release-1",
+        {
+            "rights_confirmed": True,
+            "timing_profile": "natural",
+            "models": {
+                "separation": "separation-test",
+                "tts": "tts-test",
+            },
+        },
+    )
+    translation = write_translation_artifact(
+        tmp_path / "jobs" / job.id / "translated-transcript.json",
+        TranslationResult(
+            source_language="en",
+            target_language="vi",
+            duration_us=3_000_000,
+            source_transcript_sha256=SOURCE_SHA,
+            model_id="mt-test",
+            segments=(
+                TranslationSegment(1_000_000, 2_000_000, "One", "Một"),
+            ),
+        ),
+    )
+    store.update_status(
+        job.id,
+        JobStatus.READY_TTS,
+        stage=JobStage.TTS,
+        progress_permille=650,
+        details={
+            "source_media_path": str(source),
+            "source_transcript_sha256": SOURCE_SHA,
+            "translated_transcript_path": str(translation.path),
+            "translated_transcript_sha256": translation.sha256,
+        },
+        force=True,
+    )
+    return store, job.id, source
+
+
+def _exhausted_v2_rewrite(
+    *,
+    ordinal: int,
+    source_text: str,
+    original_text: str,
+    rewritten_text: str,
+    observed_duration_us: int,
+) -> dict[str, Any]:
+    return {
+        "ordinal": ordinal,
+        "text": rewritten_text,
+        "text_sha256": hashlib.sha256(rewritten_text.encode()).hexdigest(),
+        "source_text_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+        "original_translation_sha256": hashlib.sha256(
+            original_text.encode()
+        ).hexdigest(),
+        "attempt": 3,
+        "adaptive_attempt": 3,
+        "legacy_attempt_count": 0,
+        "available_duration_us": 666_666,
+        "target_duration_us": 500_000,
+        "max_words": 2,
+        "previous_text_sha256": hashlib.sha256(
+            original_text.encode()
+        ).hexdigest(),
+        "previous_target_duration_us": 600_000,
+        "previous_observed_duration_us": observed_duration_us,
+        "observed_duration_us": observed_duration_us,
+        "model_id": "mt-test",
+        "model_tree_sha256": MODEL_SHA,
+        "prompt_version": "timing-rewrite-v2",
+        "accepted": False,
+        "history": [],
+    }
+
+
+def _replace_tts_block_text(
+    payload: dict[str, Any], *, ordinal: int, text: str
+) -> None:
+    blocks = [dict(item) for item in payload["blocks"]]
+    blocks[ordinal]["text"] = text
+    blocks[ordinal]["tts_normalized_text"] = text
+    blocks[ordinal]["text_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+    payload["blocks"] = blocks
 
 
 class FakeSeparator:
@@ -817,15 +909,359 @@ async def test_phase4_natural_profile_fails_with_actionable_rewrite_details(
     assert result.error_code == "timing_rewrite_required"
     assert result.retryable is False
     assert result.error_message is not None and "rút gọn" in result.error_message
-    assert result.details["timing_failure"] == {
-        "profile": "natural",
-        "ordinal": 0,
-        "required_duration_us": 2_666_667,
-        "available_duration_us": 1_800_000,
-        "maximum_total_speed": 1.2,
-    }
+    failure = result.details["timing_failure"]
+    assert failure["profile"] == "natural"
+    assert failure["ordinal"] == failure["failure_ordinal"] == 0
+    assert failure["required_duration_us"] == 2_666_667
+    assert failure["available_duration_us"] == 1_800_000
+    assert failure["maximum_total_speed"] == 1.2
+    assert failure["failure_kind"] == "single_window_capacity"
+    assert failure["critical_group_start_ordinal"] == 0
+    assert failure["critical_group_end_ordinal"] == 0
+    assert failure["schedule_deficit_us"] == 866_667
     assert fitter.calls == []
     assert exporter.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_phase4_elastic_silent_slack_avoids_rewrite_and_tts_rerun(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_elastic_gap_job(tmp_path)
+    synthesizer = FakeSynthesizer(duration_us=3_200_000)
+    rewriter = FakeTimingRewriter(["không được gọi"])
+    fitter = FakeTimingFitter()
+    stage = _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(duration_us=3_000_000),
+        synthesizer=synthesizer,
+        fitter=fitter,
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    )
+
+    result = await stage.run(job_id)
+
+    assert result.status is JobStatus.COMPLETED
+    assert synthesizer.calls == ["Một"]
+    assert rewriter.calls == []
+    assert fitter.calls == ["Một"]
+    timing = store.get_checkpoint(job_id, JobStage.TIMING).payload
+    assert timing["completed"] is True
+    assert timing["planner_policy"] == "natural-silent-slack-v1"
+    job = store.get_job(job_id)
+    artifact = load_translation_artifact(
+        Path(str(job.details["translated_transcript_path"])),
+        expected_sha256=str(job.details["translated_transcript_sha256"]),
+    )
+    tts_model = _model_resolver(
+        tmp_path / "models.lock.json",
+        tmp_path / "models",
+        "tts-test",
+        "tts",
+    )
+    assert stage._valid_timing_checkpoint(
+        timing,
+        translation=artifact,
+        model=tts_model,
+        block_count=1,
+        timing_profile=TimingProfile.NATURAL,
+        planner_policy="natural-silent-slack-v1",
+    ) is not None
+    assert stage._valid_timing_checkpoint(
+        timing,
+        translation=artifact,
+        model=tts_model,
+        block_count=1,
+        timing_profile=TimingProfile.NATURAL,
+        planner_policy="natural-base-v1",
+    ) is None
+    warnings = [
+        item
+        for item in result.details["warnings"]
+        if item["code"] == "timing_silent_slack_used"
+    ]
+    assert len(warnings) == 1
+    stage._warn_timing_silent_slack_used(job_id)
+    assert sum(
+        item["code"] == "timing_silent_slack_used"
+        for item in store.get_job(job_id).details["warnings"]
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_phase4_exhausted_failure_owner_rewrites_only_group_predecessor(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    first_synthesizer = RewriteAwareSynthesizer(
+        {"Một": 1_600_000, "Hai": 1_600_000},
+        default_us=1_600_000,
+    )
+    initial = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=first_synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert initial.status is JobStatus.FAILED
+    assert initial.error_code == "timing_rewrite_required"
+    payload = dict(store.get_checkpoint(job_id, JobStage.TTS).payload)
+    _replace_tts_block_text(payload, ordinal=1, text="Hai cũ")
+    payload["timing_rewrites"] = [
+        _exhausted_v2_rewrite(
+            ordinal=1,
+            source_text="Two",
+            original_text="Hai",
+            rewritten_text="Hai cũ",
+            observed_duration_us=1_600_000,
+        )
+    ]
+    store.save_checkpoint(job_id, JobStage.TTS, payload)
+    store.update_status(
+        job_id,
+        JobStatus.READY_TTS,
+        stage=JobStage.TTS,
+        progress_permille=650,
+        force=True,
+    )
+
+    rewriter = FakeTimingRewriter(["Một gọn"])
+    resumed_synthesizer = RewriteAwareSynthesizer(
+        {"Một gọn": 600_000},
+        default_us=1_600_000,
+    )
+    resumed = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=resumed_synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert resumed.status is JobStatus.COMPLETED
+    assert resumed_synthesizer.calls == ["Một gọn"]
+    assert len(rewriter.rewrite_contexts) == 1
+    assert rewriter.rewrite_contexts[0]["source_text"] == "One"
+    assert rewriter.rewrite_contexts[0]["prior_target_text"] == "Một"
+    rewrites = {
+        item["ordinal"]: item
+        for item in store.get_checkpoint(job_id, JobStage.TTS).payload[
+            "timing_rewrites"
+        ]
+    }
+    recovered = rewrites[0]
+    assert recovered["strategy"] == "critical-group-neighbor-v1"
+    assert recovered["failure_ordinal"] == 1
+    assert recovered["critical_group_start_ordinal"] == 0
+    assert recovered["critical_group_end_ordinal"] == 1
+    assert recovered["schedule_deficit_us"] == 666_668
+
+
+@pytest.mark.asyncio
+async def test_phase4_invalid_owner_rewrites_try_next_group_candidate(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    rewriter = FakeTimingRewriter(
+        ["quá nhiều từ", "vẫn quá dài", "chưa đủ ngắn", "Một gọn"]
+    )
+    synthesizer = RewriteAwareSynthesizer(
+        {"Một": 1_600_000, "Hai": 1_600_000, "Một gọn": 600_000},
+        default_us=1_600_000,
+    )
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert result.status is JobStatus.COMPLETED
+    assert [item["source_text"] for item in rewriter.rewrite_contexts] == [
+        "Two",
+        "Two",
+        "Two",
+        "One",
+    ]
+    assert synthesizer.calls == ["Một", "Hai", "Một gọn"]
+    rewrites = store.get_checkpoint(job_id, JobStage.TTS).payload[
+        "timing_rewrites"
+    ]
+    assert len(rewrites) == 1
+    assert rewrites[0]["ordinal"] == 0
+    assert rewrites[0]["strategy"] == "critical-group-neighbor-v1"
+
+
+@pytest.mark.asyncio
+async def test_phase4_all_candidate_local_semantic_failures_are_bounded(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    rewriter = FakeTimingRewriter(
+        [
+            "quá nhiều từ",
+            "vẫn quá dài",
+            "chưa đủ ngắn",
+            "cũng quá nhiều",
+            "không thể dùng",
+            "vẫn chưa đạt",
+        ]
+    )
+    synthesizer = RewriteAwareSynthesizer(
+        {"Một": 1_600_000, "Hai": 1_600_000},
+        default_us=1_600_000,
+    )
+
+    result = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert result.status is JobStatus.FAILED
+    assert result.error_code == "timing_group_budget_impossible"
+    assert len(rewriter.calls) == 6
+    assert synthesizer.calls == ["Một", "Hai"]
+
+
+@pytest.mark.asyncio
+async def test_phase4_all_group_candidates_exhausted_fails_without_loop(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    initial = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=RewriteAwareSynthesizer(
+            {"Một": 1_600_000, "Hai": 1_600_000},
+            default_us=1_600_000,
+        ),
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert initial.error_code == "timing_rewrite_required"
+    payload = dict(store.get_checkpoint(job_id, JobStage.TTS).payload)
+    _replace_tts_block_text(payload, ordinal=0, text="Một cũ")
+    _replace_tts_block_text(payload, ordinal=1, text="Hai cũ")
+    payload["timing_rewrites"] = [
+        _exhausted_v2_rewrite(
+            ordinal=0,
+            source_text="One",
+            original_text="Một",
+            rewritten_text="Một cũ",
+            observed_duration_us=1_600_000,
+        ),
+        _exhausted_v2_rewrite(
+            ordinal=1,
+            source_text="Two",
+            original_text="Hai",
+            rewritten_text="Hai cũ",
+            observed_duration_us=1_600_000,
+        ),
+    ]
+    store.save_checkpoint(job_id, JobStage.TTS, payload)
+    store.update_status(
+        job_id,
+        JobStatus.READY_TTS,
+        stage=JobStage.TTS,
+        progress_permille=650,
+        force=True,
+    )
+    rewriter = FakeTimingRewriter(["không được gọi"])
+    resumed_synthesizer = RewriteAwareSynthesizer({}, default_us=1_600_000)
+
+    resumed = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=resumed_synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert resumed.status is JobStatus.FAILED
+    assert resumed.error_code == "timing_group_budget_impossible"
+    assert resumed.retryable is False
+    assert resumed_synthesizer.calls == []
+    assert rewriter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_phase4_intrinsic_owner_overflow_never_rewrites_predecessor(
+    tmp_path: Path,
+) -> None:
+    store, job_id, _source = _ready_job(tmp_path, timing_profile="natural")
+    initial = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=RewriteAwareSynthesizer(
+            {"Một": 1_500_000, "Hai": 3_200_000},
+            default_us=3_200_000,
+        ),
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+    ).run(job_id)
+
+    assert initial.error_code == "timing_rewrite_required"
+    failure = initial.details["timing_failure"]
+    assert failure["failure_kind"] == "single_window_capacity"
+    assert failure["critical_group_start_ordinal"] == 1
+    assert failure["critical_group_end_ordinal"] == 1
+    payload = dict(store.get_checkpoint(job_id, JobStage.TTS).payload)
+    _replace_tts_block_text(payload, ordinal=1, text="Hai cũ")
+    payload["timing_rewrites"] = [
+        _exhausted_v2_rewrite(
+            ordinal=1,
+            source_text="Two",
+            original_text="Hai",
+            rewritten_text="Hai cũ",
+            observed_duration_us=3_200_000,
+        )
+    ]
+    store.save_checkpoint(job_id, JobStage.TTS, payload)
+    store.update_status(
+        job_id,
+        JobStatus.READY_TTS,
+        stage=JobStage.TTS,
+        progress_permille=650,
+        force=True,
+    )
+    rewriter = FakeTimingRewriter(["không được gọi"])
+    resumed_synthesizer = RewriteAwareSynthesizer({}, default_us=3_200_000)
+
+    resumed = await _stage(
+        tmp_path,
+        store,
+        separator=FakeSeparator(),
+        synthesizer=resumed_synthesizer,
+        fitter=FakeTimingFitter(),
+        exporter=FakeExporter(),
+        rewriter=rewriter,
+    ).run(job_id)
+
+    assert resumed.status is JobStatus.FAILED
+    assert resumed.error_code == "timing_group_budget_impossible"
+    assert resumed_synthesizer.calls == []
+    assert rewriter.calls == []
 
 
 @pytest.mark.asyncio
@@ -907,6 +1343,11 @@ async def test_phase4_natural_profile_rewrites_only_overflowing_block(
                 }
             ],
             "observed_duration_us": 1_200_000,
+            "strategy": "failure-owner-v1",
+            "failure_ordinal": 0,
+            "critical_group_start_ordinal": 0,
+            "critical_group_end_ordinal": 0,
+            "schedule_deficit_us": 866_667,
         }
     ]
     assert Path(result.result["srt_path"]).read_text(encoding="utf-8").find(
@@ -983,7 +1424,7 @@ async def test_phase4_timing_rewrite_stops_after_three_measured_attempts(
     ).run(job_id)
 
     assert result.status is JobStatus.FAILED
-    assert result.error_code == "timing_semantic_budget_impossible"
+    assert result.error_code == "timing_group_budget_impossible"
     assert result.retryable is False
     assert len(rewriter.calls) == 3
     assert rewriter.start_count == rewriter.close_count == 3
@@ -1049,7 +1490,7 @@ async def test_phase4_empty_rewrite_output_is_bounded_without_tts_fallback(
     ).run(job_id)
 
     assert result.status is JobStatus.FAILED
-    assert result.error_code == "timing_semantic_budget_impossible"
+    assert result.error_code == "timing_group_budget_impossible"
     assert result.retryable is False
     assert len(rewriter.calls) == 3
     assert rewriter.start_count == rewriter.close_count == 3
@@ -1081,7 +1522,7 @@ async def test_phase4_retries_llama_invalid_output_three_times(
     ).run(job_id)
 
     assert result.status is JobStatus.FAILED
-    assert result.error_code == "timing_semantic_budget_impossible"
+    assert result.error_code == "timing_group_budget_impossible"
     assert result.retryable is False
     assert [item["adaptive_attempt"] for item in rewriter.rewrite_contexts] == [
         1,
