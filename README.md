@@ -276,11 +276,11 @@ chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu 
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.4` lên `v0.3.5`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.5` lên `v0.3.6`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.5/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.6/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -296,7 +296,7 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.5/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.6/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
@@ -315,17 +315,20 @@ bại, trình cài phục hồi source và trạng thái stack cũ. Backup sourc
 
 Job tạo trước `v0.3.0` không có `timing_profile` được giữ ở chế độ `strict`, vì vậy
 nâng cấp không đổi timestamp hay tái tạo TTS giữa chừng. Job mới mặc định dùng
-`natural`. Khi nâng lên `v0.3.5`, job cũ dừng ở lỗi `timing_rewrite_required`
-được chuyển thành có thể tiếp tục và sẽ tự rút gọn đúng khối bị tràn. Chạy:
+`natural`. Khi nâng lên `v0.3.6`, job cũ dừng ở lỗi `timing_rewrite_required`
+hoặc `timing_rewrite_exhausted` được chuyển thành có thể tiếp tục. Cơ chế adaptive
+dùng chính bản tiếng Việt trước đó cùng thời lượng TTS đã đo trong checkpoint để đặt
+ngân sách từ cứng theo cửa sổ còn lại. Stage và các block đã hoàn tất được giữ nguyên;
+hệ thống chỉ rút gọn rồi tổng hợp TTS lại block bị tràn. Chạy:
 
 ```bash
 dub resume JOB_ID
 ```
 
-Để cài mới đúng bản `v0.3.5` thay vì `latest`, dùng URL ghim theo tag:
+Để cài mới đúng bản `v0.3.6` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.5/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.6/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
