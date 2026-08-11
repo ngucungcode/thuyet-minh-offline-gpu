@@ -24,7 +24,12 @@ from dub_server.narration import (
 )
 from dub_server.phase4_stage import Phase4Stage, _next_block_progress
 from dub_server.state import JobStage, JobStatus, StateStore
-from dub_server.timing import FittedNarrationBlock, TimingProfile, TimingQuality
+from dub_server.timing import (
+    FittedNarrationBlock,
+    TimingError,
+    TimingProfile,
+    TimingQuality,
+)
 from dub_server.translation_artifact import (
     TranslationResult,
     TranslationSegment,
@@ -54,6 +59,35 @@ def test_block_progress_coalesces_large_jobs_without_losing_completion() -> None
     assert emitted == sorted(set(emitted))
     assert len(emitted) == 115
     assert emitted[-1] == 850
+
+
+def test_adaptive_rewrite_plan_rejects_audio_at_minimum_duration() -> None:
+    with pytest.raises(TimingError) as caught:
+        Phase4Stage._adaptive_timing_rewrite_plan(
+            available_us=80_000,
+            maximum_total_speed=1.2,
+            previous_text="Rất ngắn",
+            previous_target_us=120_000,
+            previous_observed_us=120_000,
+            adaptive_attempt=1,
+        )
+
+    assert caught.value.code == "timing_semantic_budget_impossible"
+    assert caught.value.retryable is False
+
+
+def test_adaptive_rewrite_target_stays_below_measured_duration() -> None:
+    target_us, _max_words = Phase4Stage._adaptive_timing_rewrite_plan(
+        available_us=200_000,
+        maximum_total_speed=1.2,
+        previous_text="Rất ngắn",
+        previous_target_us=300_000,
+        previous_observed_us=120_001,
+        adaptive_attempt=1,
+    )
+
+    assert target_us == 120_000
+    assert target_us < 120_001
 
 
 def _write_wav(

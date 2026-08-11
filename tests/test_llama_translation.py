@@ -495,6 +495,74 @@ def test_measured_duration_rewrite_accepts_exact_word_limit_and_default_canonica
 
 
 @pytest.mark.parametrize(
+    ("source", "previous", "canonical", "completion"),
+    [
+        (
+            "It increased by +5 percent",
+            "Mức tăng là +5% trong kỳ này",
+            "Mức tăng là +5%",
+            "Tăng+5%",
+        ),
+        (
+            "It decreased by -5 percent",
+            "Mức giảm là -5% trong kỳ này",
+            "Mức giảm là -5%",
+            "Giảm-5%",
+        ),
+    ],
+)
+def test_measured_duration_rewrite_accepts_signed_literal_after_word(
+    tmp_path: Path,
+    source: str,
+    previous: str,
+    canonical: str,
+    completion: str,
+) -> None:
+    transport = FakeTransport(
+        [_health_ok(), _tokens(12), _completion(completion)]
+    )
+    translator, _, _ = _translator(tmp_path, transport)
+
+    assert (
+        translator.rewrite_for_duration(
+            source,
+            previous,
+            4_000_000,
+            2_000_000,
+            2,
+            source_language="en",
+            canonical_vi=canonical,
+        )
+        == completion
+    )
+    translator.close()
+
+
+def test_measured_duration_rewrite_does_not_match_number_inside_larger_number(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(
+        [_health_ok(), _tokens(12), _completion("Giữ 142 hồ sơ")]
+    )
+    translator, _, _ = _translator(tmp_path, transport)
+
+    with pytest.raises(LlamaTranslationError) as caught:
+        translator.rewrite_for_duration(
+            "Keep 42 records",
+            "Hãy giữ đúng 42 hồ sơ này",
+            4_000_000,
+            2_000_000,
+            4,
+            source_language="en",
+            canonical_vi="Giữ 42 hồ sơ",
+        )
+
+    assert caught.value.code == "invalid_output"
+    assert "mất số hoặc URL" in caught.value.message_vi
+    translator.close()
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"observed_duration_us": 0},
@@ -503,6 +571,7 @@ def test_measured_duration_rewrite_accepts_exact_word_limit_and_default_canonica
         {"target_duration_us": 5_000_000},
         {"max_output_words": 0},
         {"max_output_words": True},
+        {"max_output_words": 513},
         {"adaptive_attempt": 0},
         {"adaptive_attempt": True},
         {"canonical_vi": "   "},

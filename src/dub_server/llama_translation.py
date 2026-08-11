@@ -42,6 +42,7 @@ _DURATION_REWRITE_NUMBER_PATTERN = re.compile(
     r"(?:\s?(?:%|\u2030|\u00b0[CF]?|\u20ab|\u0111|VND|USD|EUR|GBP))?(?!\w)",
     flags=re.IGNORECASE,
 )
+_MAX_DURATION_REWRITE_OUTPUT_WORDS = 512
 
 
 class LlamaTranslationError(RuntimeError):
@@ -510,7 +511,7 @@ class LlamaServerTranslator:
         if (
             isinstance(max_output_words, bool)
             or not isinstance(max_output_words, int)
-            or not 1 <= max_output_words <= self._max_output_characters
+            or not 1 <= max_output_words <= _MAX_DURATION_REWRITE_OUTPUT_WORDS
         ):
             raise LlamaTranslationError(
                 "invalid_input",
@@ -1106,8 +1107,14 @@ def _missing_duration_rewrite_literals(
 ) -> tuple[str, ...]:
     missing: list[str] = []
     for literal in protected_literals:
+        left_boundary = (
+            r"(?<!\w)" if literal[0].isalnum() or literal[0] == "_" else ""
+        )
+        right_boundary = (
+            r"(?!\w)" if literal[-1].isalnum() or literal[-1] == "_" else ""
+        )
         if re.search(
-            rf"(?<!\w){re.escape(literal)}(?!\w)",
+            rf"{left_boundary}{re.escape(literal)}{right_boundary}",
             output,
         ) is None:
             missing.append(literal)

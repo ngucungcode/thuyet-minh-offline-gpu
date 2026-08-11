@@ -1310,6 +1310,16 @@ class Phase4Stage:
         previous_observed_us: int,
         adaptive_attempt: int,
     ) -> tuple[int, int]:
+        if previous_observed_us <= _TIMING_REWRITE_MIN_TARGET_US:
+            raise TimingError(
+                "timing_semantic_budget_impossible",
+                "Lời thuyết minh đã ở thời lượng tối thiểu nên không thể rút gọn thêm",
+                retryable=False,
+                details={
+                    "previous_observed_duration_us": previous_observed_us,
+                    "minimum_target_duration_us": _TIMING_REWRITE_MIN_TARGET_US,
+                },
+            )
         if (
             isinstance(maximum_total_speed, bool)
             or not isinstance(maximum_total_speed, (int, float))
@@ -1339,6 +1349,7 @@ class Phase4Stage:
                 math.floor(previous_target_us * gain),
             ),
         )
+        target_us = min(target_us, previous_observed_us - 1)
         previous_word_count = max(1, len(previous_text.split()))
         max_words = max(2, math.floor(previous_word_count * gain))
         if previous_word_count > 2:
@@ -1434,17 +1445,34 @@ class Phase4Stage:
                         "previous_observed_duration_us": previous_observed_us,
                     },
                 )
-            target_us, max_words = self._adaptive_timing_rewrite_plan(
-                available_us=available_us,
-                maximum_total_speed=timing_error.details.get(
-                    "maximum_total_speed",
-                    NATURAL_MAX_TOTAL_SPEED,
-                ),
-                previous_text=previous_text,
-                previous_target_us=previous_target_us,
-                previous_observed_us=previous_observed_us,
-                adaptive_attempt=attempt,
-            )
+            try:
+                target_us, max_words = self._adaptive_timing_rewrite_plan(
+                    available_us=available_us,
+                    maximum_total_speed=timing_error.details.get(
+                        "maximum_total_speed",
+                        NATURAL_MAX_TOTAL_SPEED,
+                    ),
+                    previous_text=previous_text,
+                    previous_target_us=previous_target_us,
+                    previous_observed_us=previous_observed_us,
+                    adaptive_attempt=attempt,
+                )
+            except TimingError as error:
+                if error.code != "timing_semantic_budget_impossible":
+                    raise
+                raise TimingError(
+                    error.code,
+                    (
+                        f"Khối thuyết minh {ordinal + 1} đã ở thời lượng tối thiểu "
+                        "nên không thể rút gọn thêm"
+                    ),
+                    retryable=False,
+                    details={
+                        **timing_error.details,
+                        **error.details,
+                        "ordinal": ordinal,
+                    },
+                ) from error
             self._update_progress(
                 job_id,
                 self._store.get_job(job_id).progress_permille,

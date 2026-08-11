@@ -325,6 +325,12 @@ hệ thống chỉ rút gọn rồi tổng hợp TTS lại block bị tràn. Ch�
 dub resume JOB_ID
 ```
 
+Nếu không còn ngân sách rút gọn, hoặc cả ba lượt adaptive vẫn không thể giữ đủ ý
+trong cửa sổ, job dừng với `timing_semantic_budget_impossible` (`retryable=false`).
+Lỗi này không thể xử lý bằng `dub resume`; hãy rút gọn phụ đề/bản dịch của block được
+báo rồi gửi job mới, hoặc tạo job mới với `--timing-profile strict` nếu chấp nhận nhịp
+đọc kém tự nhiên hơn.
+
 Để cài mới đúng bản `v0.3.6` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
