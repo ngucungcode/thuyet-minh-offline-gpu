@@ -693,6 +693,223 @@ def test_schema_eleven_makes_impossible_semantic_budget_retryable(
     )
 
 
+def test_schema_twelve_reopens_only_valid_single_block_timing_failures(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "jobs.sqlite3"
+    store = StateStore(database)
+
+    def failed_job(
+        release_id: str,
+        timing_failure: object,
+    ):
+        job = store.create_job(
+            release_id,
+            {"rights_confirmed": True, "timing_profile": "natural"},
+        )
+        store.update_status(
+            job.id,
+            JobStatus.TIMING,
+            stage=JobStage.TIMING,
+            force=True,
+        )
+        store.update_progress(
+            job.id,
+            850,
+            details={"timing_failure": timing_failure},
+        )
+        return store.update_status(
+            job.id,
+            JobStatus.FAILED,
+            error_code="timing_group_budget_impossible",
+            error_message="Ngân sách thời lượng không thể đáp ứng",
+            retryable=False,
+        )
+
+    single_window = failed_job(
+        "single-window",
+        {
+            "ordinal": 259,
+            "failure_kind": "single_window_capacity",
+            "failure_ordinal": 259,
+            "critical_group_start_ordinal": 259,
+            "critical_group_end_ordinal": 259,
+            "schedule_deficit_us": 400_000,
+            "rewrite_candidates": [
+                {
+                    "ordinal": 259,
+                    "required_duration_us": 3_000_000,
+                    "target_available_duration_us": 2_600_000,
+                    "work_duration_us": 3_600_000,
+                }
+            ],
+        },
+    )
+    elastic_postvalidation = failed_job(
+        "elastic-postvalidation",
+        {
+            "ordinal": 12,
+            "failure_kind": "elastic_postvalidation",
+            "failure_ordinal": 12,
+            "critical_group_start_ordinal": 12,
+            "critical_group_end_ordinal": 12,
+            "schedule_deficit_us": 250_000,
+            "rewrite_candidates": [
+                {
+                    "ordinal": 12,
+                    "required_duration_us": 2_000_000,
+                    "target_available_duration_us": 1_750_000,
+                    "work_duration_us": 2_400_000,
+                }
+            ],
+        },
+    )
+    multi_block = failed_job(
+        "multi-block",
+        {
+            "ordinal": 13,
+            "failure_kind": "critical_chain_capacity",
+            "failure_ordinal": 13,
+            "critical_group_start_ordinal": 11,
+            "critical_group_end_ordinal": 13,
+        },
+    )
+    malformed = failed_job(
+        "malformed",
+        {
+            "ordinal": True,
+            "failure_kind": "single_window_capacity",
+            "failure_ordinal": True,
+            "critical_group_start_ordinal": True,
+            "critical_group_end_ordinal": True,
+        },
+    )
+    incomplete_single = failed_job(
+        "incomplete-single",
+        {
+            "ordinal": 14,
+            "failure_kind": "single_window_capacity",
+            "failure_ordinal": 14,
+            "critical_group_start_ordinal": 14,
+            "critical_group_end_ordinal": 14,
+            "schedule_deficit_us": 100_000,
+        },
+    )
+    unrelated = store.create_job(
+        "unrelated",
+        {"rights_confirmed": True, "timing_profile": "natural"},
+    )
+    store.update_status(
+        unrelated.id,
+        JobStatus.FAILED,
+        error_code="native_oom",
+        error_message="GPU hết bộ nhớ",
+        retryable=False,
+    )
+    tts_checkpoint = {
+        "completed": True,
+        "blocks": [{"ordinal": 259, "duration_us": 4_900_000}],
+        "timing_rewrites": [{"ordinal": 259, "attempt": 3}],
+    }
+    timing_checkpoint = {
+        "completed": False,
+        "failed_ordinal": 259,
+        "planner_policy": "natural-silent-slack-v1",
+    }
+    store.save_checkpoint(single_window.id, JobStage.TTS, tts_checkpoint)
+    store.save_checkpoint(single_window.id, JobStage.TIMING, timing_checkpoint)
+
+    connection = sqlite3.connect(database)
+    try:
+        checkpoint_rows_before = connection.execute(
+            "SELECT stage, payload_json, hex(CAST(payload_json AS BLOB)), updated_at "
+            "FROM checkpoints WHERE job_id = ? AND stage IN (?, ?) ORDER BY stage",
+            (
+                single_window.id,
+                JobStage.TIMING.value,
+                JobStage.TTS.value,
+            ),
+        ).fetchall()
+        connection.execute(
+            "UPDATE schema_metadata SET value = '11' WHERE key = 'schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    reopened = StateStore(database)
+
+    for job_id in (single_window.id, elastic_postvalidation.id):
+        migrated = reopened.get_job(job_id)
+        assert migrated.retryable is True
+        assert migrated.status is JobStatus.FAILED
+        event = reopened.list_events(job_id)[-1]
+        assert event.event_type == "job.error_reclassified"
+        assert event.payload == {
+            "code": "timing_group_budget_impossible",
+            "retryable": True,
+            "reason": "timing_narration_single_block_rescue",
+        }
+    for job_id in (
+        multi_block.id,
+        malformed.id,
+        incomplete_single.id,
+        unrelated.id,
+    ):
+        assert reopened.get_job(job_id).retryable is False
+        assert all(
+            event.event_type != "job.error_reclassified"
+            for event in reopened.list_events(job_id)
+        )
+
+    connection = sqlite3.connect(database)
+    try:
+        checkpoint_rows_after = connection.execute(
+            "SELECT stage, payload_json, hex(CAST(payload_json AS BLOB)), updated_at "
+            "FROM checkpoints WHERE job_id = ? AND stage IN (?, ?) ORDER BY stage",
+            (
+                single_window.id,
+                JobStage.TIMING.value,
+                JobStage.TTS.value,
+            ),
+        ).fetchall()
+        revision_after_first_open = connection.execute(
+            "SELECT revision FROM jobs WHERE id = ?", (single_window.id,)
+        ).fetchone()[0]
+        event_count_after_first_open = connection.execute(
+            "SELECT COUNT(*) FROM job_events "
+            "WHERE job_id = ? AND event_type = 'job.error_reclassified'",
+            (single_window.id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert checkpoint_rows_after == checkpoint_rows_before
+
+    reopened_again = StateStore(database)
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT revision FROM jobs WHERE id = ?", (single_window.id,)
+        ).fetchone()[0] == revision_after_first_open
+        assert connection.execute(
+            "SELECT COUNT(*) FROM job_events "
+            "WHERE job_id = ? AND event_type = 'job.error_reclassified'",
+            (single_window.id,),
+        ).fetchone()[0] == event_count_after_first_open
+    finally:
+        connection.close()
+
+    resumed = reopened_again.resume(single_window.id)
+    assert resumed.status is JobStatus.TIMING
+    assert resumed.error_code is None
+    assert reopened_again.get_checkpoint(
+        single_window.id, JobStage.TTS
+    ).payload == tts_checkpoint
+    assert reopened_again.get_checkpoint(
+        single_window.id, JobStage.TIMING
+    ).payload == timing_checkpoint
+
+
 def test_future_schema_is_rejected_without_downgrading_metadata(
     tmp_path: Path,
 ) -> None:
@@ -701,7 +918,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
     connection = sqlite3.connect(database)
     try:
         connection.execute(
-            "UPDATE schema_metadata SET value = '12' WHERE key = 'schema_version'"
+            "UPDATE schema_metadata SET value = '13' WHERE key = 'schema_version'"
         )
         connection.commit()
     finally:
@@ -717,7 +934,7 @@ def test_future_schema_is_rejected_without_downgrading_metadata(
         ).fetchone()[0]
     finally:
         connection.close()
-    assert version == "12"
+    assert version == "13"
 
 
 def test_cancel_from_paused_is_atomic_and_idempotent(tmp_path: Path) -> None:

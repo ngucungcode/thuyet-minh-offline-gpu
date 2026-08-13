@@ -67,7 +67,7 @@ TERMINAL_STATUSES = frozenset(
     {JobStatus.COMPLETED, JobStatus.CANCELLED}
 )
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 
 ACTIVE_JOB_STATUSES = (
     JobStatus.CREATED,
@@ -599,6 +599,113 @@ class StateStore:
                                 },
                                 now,
                             )
+                        if schema_version < 12:
+                            single_block_failures = connection.execute(
+                                "SELECT id, details_json FROM jobs "
+                                "WHERE status = ? AND retryable = 0 "
+                                "AND error_code = ?",
+                                (
+                                    JobStatus.FAILED.value,
+                                    "timing_group_budget_impossible",
+                                ),
+                            ).fetchall()
+                            for row in single_block_failures:
+                                try:
+                                    details = _decode(str(row["details_json"]))
+                                except (json.JSONDecodeError, StateError, TypeError):
+                                    # A malformed diagnostic must fail closed:
+                                    # only a proven single-block failure is safe
+                                    # to reopen for the new recovery policy.
+                                    continue
+                                failure = details.get("timing_failure")
+                                if not isinstance(failure, Mapping):
+                                    continue
+                                ordinal = failure.get("ordinal")
+                                failure_ordinal = failure.get("failure_ordinal")
+                                group_start = failure.get(
+                                    "critical_group_start_ordinal"
+                                )
+                                group_end = failure.get(
+                                    "critical_group_end_ordinal"
+                                )
+                                deficit_us = failure.get("schedule_deficit_us")
+                                rewrite_candidates = failure.get(
+                                    "rewrite_candidates"
+                                )
+                                if (
+                                    failure.get("failure_kind")
+                                    not in {
+                                        "single_window_capacity",
+                                        "elastic_postvalidation",
+                                    }
+                                    or any(
+                                        isinstance(value, bool)
+                                        or not isinstance(value, int)
+                                        for value in (
+                                            ordinal,
+                                            failure_ordinal,
+                                            group_start,
+                                            group_end,
+                                        )
+                                    )
+                                    or failure_ordinal < 0
+                                    or not ordinal
+                                    == failure_ordinal
+                                    == group_start
+                                    == group_end
+                                    or isinstance(deficit_us, bool)
+                                    or not isinstance(deficit_us, int)
+                                    or deficit_us <= 0
+                                    or not isinstance(rewrite_candidates, list)
+                                    or len(rewrite_candidates) != 1
+                                ):
+                                    continue
+                                candidate = rewrite_candidates[0]
+                                if not isinstance(candidate, Mapping):
+                                    continue
+                                candidate_ordinal = candidate.get("ordinal")
+                                required_us = candidate.get(
+                                    "required_duration_us"
+                                )
+                                target_us = candidate.get(
+                                    "target_available_duration_us"
+                                )
+                                work_us = candidate.get("work_duration_us")
+                                if (
+                                    isinstance(candidate_ordinal, bool)
+                                    or not isinstance(candidate_ordinal, int)
+                                    or candidate_ordinal != failure_ordinal
+                                    or isinstance(required_us, bool)
+                                    or not isinstance(required_us, int)
+                                    or required_us <= 0
+                                    or isinstance(target_us, bool)
+                                    or not isinstance(target_us, int)
+                                    or target_us
+                                    != max(1, required_us - deficit_us)
+                                    or isinstance(work_us, bool)
+                                    or not isinstance(work_us, int)
+                                    or work_us <= 0
+                                ):
+                                    continue
+                                connection.execute(
+                                    "UPDATE jobs SET retryable = 1, "
+                                    "revision = revision + 1, updated_at = ? "
+                                    "WHERE id = ?",
+                                    (now, row["id"]),
+                                )
+                                self._insert_event(
+                                    connection,
+                                    str(row["id"]),
+                                    "job.error_reclassified",
+                                    {
+                                        "code": "timing_group_budget_impossible",
+                                        "retryable": True,
+                                        "reason": (
+                                            "timing_narration_single_block_rescue"
+                                        ),
+                                    },
+                                    now,
+                                )
                         connection.execute(
                             "UPDATE schema_metadata SET value = ? "
                             "WHERE key = 'schema_version'",

@@ -276,11 +276,11 @@ chỉ session upload chưa finalize đã quá TTL (mặc định 7 ngày, cấu 
 
 ## Nâng cấp, cài bản ghim và rollback
 
-Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.6` lên `v0.3.7`, chạy
+Để nâng cấp deployment Git sạch từ `v0.2.0` đến `v0.3.7` lên `v0.3.8`, chạy
 một lệnh:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.7/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.8/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Deployment `provider` được cài bởi release cũ có thể để `supervisord` kế thừa khóa
@@ -296,7 +296,7 @@ dub jobs list --limit 20
 # Chỉ dừng stack khi danh sách trên không còn job đang xử lý.
 dub stack stop
 sudo flock -n "$LOCK" true && echo LOCK_FREE
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.7/install.sh | sudo bash -s -- --upgrade-existing --yes
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.8/install.sh | sudo bash -s -- --upgrade-existing --yes
 ```
 
 Xóa file khi khóa còn được giữ sẽ tạo inode mới và có thể cho phép hai installer chạy song
@@ -332,16 +332,27 @@ thời lượng, thay vì lặp lại block đầu tiên bị hết chỗ. Tốc
 dub resume JOB_ID
 ```
 
-Nếu tối đa ba khối ưu tiên trong critical group đã dùng hết ngân sách adaptive mà
-vẫn không thể giữ đủ ý, job dừng bằng `timing_group_budget_impossible`
-(`retryable=false`) có chẩn đoán cụ thể. Khi đó
-hãy rút gọn phụ đề/bản dịch được báo rồi gửi job mới, hoặc tạo job mới với
-`--timing-profile strict` nếu chấp nhận nhịp đọc kém tự nhiên hơn.
+Khi nâng tiếp lên `v0.3.8`, lỗi `timing_group_budget_impossible` do `v0.3.7` tạo ra
+được tự mở lại nếu chẩn đoán xác nhận critical group chỉ có đúng một block, chẳng hạn
+nhóm `260–260`. Sau khi chạy `dub resume JOB_ID`, bộ cứu hộ semantic v3 dùng thêm ngữ
+cảnh lân cận để tạo các cách diễn đạt tiếng Việt ngắn, tự nhiên và vẫn giữ ý. Trước khi
+đổi câu chữ, bộ lập lịch thử mượn tối đa `2,0 giây` khoảng lặng nguồn an toàn, vẫn giữ
+tâm lời trong phạm vi 2 giây quanh cảnh và không đè lên lời thoại lân cận. Khi chọn được
+phương án đạt ngân sách, hệ thống chỉ tổng hợp lại TTS của đúng block đó; nguồn, ASR,
+bản dịch chuẩn, tách âm và các block TTS khác tiếp tục được tái sử dụng.
 
-Để cài mới đúng bản `v0.3.7` thay vì `latest`, dùng URL ghim theo tag:
+Giới hạn tốc độ giọng vẫn là `1.20×` và âm thanh không bị cắt ngắn để ép vừa cửa sổ.
+Lỗi nhóm nhiều block hoặc chẩn đoán cũ không đủ dữ liệu không được tự mở lại. Nếu mọi
+phương án semantic v3 cho block đơn đều không thể giữ đủ ý, job dừng hữu hạn bằng
+`timing_single_block_budget_impossible`; mã lỗi mới này không bị migration mở lại ở
+những lần khởi động hoặc nâng cấp sau. Khi đó hãy rút gọn phụ đề/bản dịch được báo rồi
+gửi job mới, hoặc tạo job mới với `--timing-profile strict` nếu chấp nhận nhịp đọc kém
+tự nhiên hơn.
+
+Để cài mới đúng bản `v0.3.8` thay vì `latest`, dùng URL ghim theo tag:
 
 ```bash
-set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.7/install.sh | sudo bash
+set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-gpu/releases/download/v0.3.8/install.sh | sudo bash
 ```
 
 Installer có thể chạy lại an toàn trên đúng commit đã cài: không reset worktree có
