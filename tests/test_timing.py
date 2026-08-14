@@ -389,6 +389,26 @@ def test_elastic_planner_recovers_by_borrowing_a_larger_source_gap() -> None:
     assert planned[0].end_us > 2_800_000
 
 
+def test_elastic_planner_uses_two_seconds_before_semantic_rewrite() -> None:
+    inputs = (NarrationTimingInput(2_000_000, 3_000_000, 5_400_000),)
+
+    with pytest.raises(TimingError) as legacy_limit:
+        plan_narration_slots(
+            inputs,
+            duration_us=5_000_000,
+            maximum_silent_borrow_us=1_600_000,
+        )
+
+    assert legacy_limit.value.code == "timing_rewrite_required"
+    planned = plan_narration_slots(
+        inputs,
+        duration_us=5_000_000,
+        maximum_silent_borrow_us=NATURAL_MAX_SILENT_BORROW_US,
+    )
+    assert (planned[0].start_us, planned[0].end_us) == (0, 5_000_000)
+    assert planned[0].planned_total_speed == pytest.approx(1.08)
+
+
 def test_elastic_postvalidation_uses_exact_frames_at_the_speed_cap() -> None:
     inputs = (
         NarrationTimingInput(

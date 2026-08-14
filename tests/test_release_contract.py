@@ -159,7 +159,7 @@ def test_installer_defaults_to_safe_release_and_explicit_legacy_migration() -> N
     assert _installer_assignment("UPGRADE_EXISTING") == "false"
     assert _installer_assignment("COMPATIBLE_UPGRADE_FROM") == (
         "0.2.0 0.2.1 0.2.2 0.2.3 0.2.4 0.3.0 0.3.1 0.3.2 0.3.3"
-        " 0.3.4 0.3.5 0.3.6"
+        " 0.3.4 0.3.5 0.3.6 0.3.7"
     )
     assert _installer_assignment("ACCEPTANCE_MODE") == "basic"
     assert _installer_assignment("START_STACK") == "true"
@@ -200,7 +200,10 @@ def test_readme_documents_natural_timing_group_recovery() -> None:
 
     assert "`timing_semantic_budget_impossible` từ `v0.3.6`" in readme
     assert "`timing_group_budget_impossible`" in readme
-    assert "`retryable=false`" in readme
+    assert "`timing_single_block_budget_impossible`" in readme
+    assert "semantic v3" in readme
+    assert "`2,0 giây` khoảng lặng nguồn an toàn" in readme
+    assert "chỉ tổng hợp lại TTS của đúng block đó" in readme
     assert "critical group" in readme
     assert "`1.20×`" in readme
     assert "âm thanh không bị cắt ngắn" in readme

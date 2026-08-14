@@ -10,6 +10,7 @@ model is resolved through the immutable local model registry before use.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import math
 import os
@@ -17,7 +18,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 from .audio_mix_export import (
     ExportProgress,
@@ -121,6 +122,10 @@ class TimingTextRewriter(Protocol):
         target_language: str = "vi",
         canonical_vi: str | None = None,
         adaptive_attempt: int = 1,
+        semantic_recovery: bool = False,
+        context_before_vi: str | None = None,
+        context_after_vi: str | None = None,
+        rejected_candidate_hashes: Sequence[str] = (),
         on_progress: Callable[[int, int], None] | None = None,
     ) -> str: ...
 
@@ -144,14 +149,18 @@ _TIMING_REWRITE_MIN_TARGET_US = 120_000
 _TIMING_REWRITE_CANCEL_POLL_SECONDS = 0.20
 _TIMING_REWRITE_PROMPT_V1 = "timing-rewrite-v1"
 _TIMING_REWRITE_PROMPT_V2 = "timing-rewrite-v2"
+_TIMING_REWRITE_PROMPT_V3 = "timing-rewrite-v3"
+_TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS = 3
+_TIMING_SEMANTIC_CONTEXT_WINDOW_US = 2_000_000
 _TIMING_REWRITE_RAW_SPEED_MARGIN = 0.97
 _TIMING_REWRITE_RAW_DURATION_RESERVE_US = 20_000
 _TIMING_REWRITE_ADAPTIVE_DECAY = 0.85
 _NATURAL_BASE_PLANNER_POLICY = "natural-base-v1"
-_NATURAL_SILENT_SLACK_PLANNER_POLICY = "natural-silent-slack-v1"
+_NATURAL_SILENT_SLACK_PLANNER_POLICY = "natural-silent-slack-v2"
 _STRICT_PLANNER_POLICY = "strict-v1"
 _TIMING_REWRITE_FAILURE_OWNER_STRATEGY = "failure-owner-v1"
 _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY = "critical-group-neighbor-v1"
+_TIMING_REWRITE_SINGLE_SEMANTIC_STRATEGY = "single-block-semantic-v1"
 
 
 class _StageCancelled(Exception):
@@ -1081,7 +1090,11 @@ class Phase4Stage:
                 or not str(item["model_id"]).strip()
                 or not self._valid_sha(item.get("model_tree_sha256"))
                 or prompt_version
-                not in {_TIMING_REWRITE_PROMPT_V1, _TIMING_REWRITE_PROMPT_V2}
+                not in {
+                    _TIMING_REWRITE_PROMPT_V1,
+                    _TIMING_REWRITE_PROMPT_V2,
+                    _TIMING_REWRITE_PROMPT_V3,
+                }
             ):
                 return False
             if prompt_version == _TIMING_REWRITE_PROMPT_V2:
@@ -1121,6 +1134,59 @@ class Phase4Stage:
                     or len(item["history"]) > 6
                 ):
                     return False
+            elif prompt_version == _TIMING_REWRITE_PROMPT_V3:
+                semantic_attempt = item.get("semantic_attempt")
+                max_words = item.get("max_words")
+                previous_target_us = item.get("previous_target_duration_us")
+                previous_observed_us = item.get("previous_observed_duration_us")
+                observed_us = item.get("observed_duration_us")
+                rejected_hashes = item.get("rejected_candidate_hashes")
+                history = item.get("history")
+                if (
+                    isinstance(semantic_attempt, bool)
+                    or not isinstance(semantic_attempt, int)
+                    or semantic_attempt != attempt
+                    or not 1
+                    <= semantic_attempt
+                    <= _TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS
+                    or item.get("semantic_recovery") is not True
+                    or isinstance(max_words, bool)
+                    or not isinstance(max_words, int)
+                    or max_words < 1
+                    or not self._valid_sha(item.get("previous_text_sha256"))
+                    or isinstance(previous_target_us, bool)
+                    or not isinstance(previous_target_us, int)
+                    or previous_target_us <= 0
+                    or isinstance(previous_observed_us, bool)
+                    or not isinstance(previous_observed_us, int)
+                    or previous_observed_us <= 0
+                    or (
+                        observed_us is not None
+                        and (
+                            isinstance(observed_us, bool)
+                            or not isinstance(observed_us, int)
+                            or observed_us <= 0
+                        )
+                    )
+                    or not isinstance(item.get("accepted"), bool)
+                    or not isinstance(history, list)
+                    or len(history) > 12
+                    or not isinstance(rejected_hashes, list)
+                    or not rejected_hashes
+                    or len(rejected_hashes) > 16
+                    or any(not self._valid_sha(value) for value in rejected_hashes)
+                    or len(set(rejected_hashes)) != len(rejected_hashes)
+                    or (
+                        item["text_sha256"] in rejected_hashes
+                        and item.get("semantic_candidate_pending") is not True
+                    )
+                    or not isinstance(item.get("semantic_candidate_pending"), bool)
+                    or item.get("context_before_vi") is not None
+                    and not isinstance(item.get("context_before_vi"), str)
+                    or item.get("context_after_vi") is not None
+                    and not isinstance(item.get("context_after_vi"), str)
+                ):
+                    return False
             recovery_metadata = (
                 "strategy",
                 "failure_ordinal",
@@ -1139,6 +1205,7 @@ class Phase4Stage:
                     not in {
                         _TIMING_REWRITE_FAILURE_OWNER_STRATEGY,
                         _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY,
+                        _TIMING_REWRITE_SINGLE_SEMANTIC_STRATEGY,
                     }
                     or isinstance(failure_ordinal, bool)
                     or not isinstance(failure_ordinal, int)
@@ -1159,6 +1226,14 @@ class Phase4Stage:
                     or (
                         strategy == _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY
                         and ordinal == failure_ordinal
+                    )
+                    or (
+                        strategy == _TIMING_REWRITE_SINGLE_SEMANTIC_STRATEGY
+                        and (
+                            ordinal != failure_ordinal
+                            or group_start != failure_ordinal
+                            or group_end != failure_ordinal
+                        )
                     )
                 ):
                     return False
@@ -1392,6 +1467,37 @@ class Phase4Stage:
                 (item for item in candidates if eligible_fresh_or_legacy(item)),
                 None,
             )
+        semantic_recovery = False
+        previous_owner = rewrites.get(owner)
+        if (
+            selected is None
+            and self._valid_single_block_semantic_recovery(
+                error,
+                owner=owner,
+                candidates=candidates,
+            )
+            and previous_owner is not None
+            and (
+                (
+                    previous_owner.get("prompt_version")
+                    == _TIMING_REWRITE_PROMPT_V2
+                    and previous_owner.get("attempt")
+                    == _TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS
+                )
+                or previous_owner.get("prompt_version")
+                == _TIMING_REWRITE_PROMPT_V3
+            )
+        ):
+            previous_semantic_attempt = (
+                int(previous_owner["semantic_attempt"])
+                if previous_owner.get("prompt_version")
+                == _TIMING_REWRITE_PROMPT_V3
+                else 0
+            )
+            if previous_semantic_attempt >= _TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS:
+                self._raise_single_block_semantic_exhausted(error, owner=owner)
+            selected = candidates[0]
+            semantic_recovery = True
         if selected is None:
             raise TimingError(
                 "timing_group_budget_impossible",
@@ -1414,10 +1520,13 @@ class Phase4Stage:
                     "target_available_duration_us"
                 ],
                 "strategy": (
-                    _TIMING_REWRITE_FAILURE_OWNER_STRATEGY
+                    _TIMING_REWRITE_SINGLE_SEMANTIC_STRATEGY
+                    if semantic_recovery
+                    else _TIMING_REWRITE_FAILURE_OWNER_STRATEGY
                     if selected_ordinal == owner
                     else _TIMING_REWRITE_GROUP_NEIGHBOR_STRATEGY
                 ),
+                "semantic_recovery": semantic_recovery,
             }
         )
         return selected_ordinal, TimingError(
@@ -1426,6 +1535,46 @@ class Phase4Stage:
             retryable=False,
             details=details,
         )
+
+    @staticmethod
+    def _valid_single_block_semantic_recovery(
+        error: TimingError,
+        *,
+        owner: int,
+        candidates: Sequence[Mapping[str, int]],
+    ) -> bool:
+        """Allow contextual rewriting only for a true intrinsic one-block overflow."""
+
+        return (
+            error.details.get("failure_kind")
+            in {"single_window_capacity", "elastic_postvalidation"}
+            and error.details.get("critical_group_start_ordinal") == owner
+            and error.details.get("critical_group_end_ordinal") == owner
+            and len(candidates) == 1
+            and candidates[0].get("ordinal") == owner
+        )
+
+    @staticmethod
+    def _raise_single_block_semantic_exhausted(
+        error: TimingError,
+        *,
+        owner: int,
+    ) -> NoReturn:
+        raise TimingError(
+            "timing_single_block_budget_impossible",
+            (
+                f"Khối thuyết minh {owner + 1} vẫn quá dài sau khi đã thử "
+                "rút gọn ngữ nghĩa theo ngữ cảnh tối đa"
+            ),
+            retryable=False,
+            details={
+                **error.details,
+                "ordinal": owner,
+                "semantic_recovery_attempts": (
+                    _TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS
+                ),
+            },
+        ) from error
 
     @staticmethod
     def _valid_group_rewrite_candidates(
@@ -1601,6 +1750,387 @@ class Phase4Stage:
             max_words = min(max_words, previous_word_count - 1)
         return target_us, max_words
 
+    @staticmethod
+    def _semantic_timing_rewrite_plan(
+        *,
+        available_us: int,
+        maximum_total_speed: object,
+        previous_text: str,
+        previous_target_us: int,
+        previous_observed_us: int,
+        semantic_attempt: int,
+    ) -> tuple[int, int]:
+        """Build a measured one-block budget that may reach one spoken word."""
+
+        if (
+            isinstance(semantic_attempt, bool)
+            or not 1 <= semantic_attempt <= _TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS
+        ):
+            raise ValueError("semantic_attempt must be between 1 and 3")
+        if (
+            isinstance(maximum_total_speed, bool)
+            or not isinstance(maximum_total_speed, (int, float))
+            or not math.isfinite(float(maximum_total_speed))
+            or not 1.0 <= float(maximum_total_speed) <= 2.0
+        ):
+            maximum_total_speed = NATURAL_MAX_TOTAL_SPEED
+        raw_budget_us = max(
+            _TIMING_REWRITE_MIN_TARGET_US,
+            math.floor(
+                available_us
+                * float(maximum_total_speed)
+                * _TIMING_REWRITE_RAW_SPEED_MARGIN
+            )
+            - _TIMING_REWRITE_RAW_DURATION_RESERVE_US,
+        )
+        attempt_factor = (0.92, 0.84, 0.76)[semantic_attempt - 1]
+        target_us = max(
+            _TIMING_REWRITE_MIN_TARGET_US,
+            min(
+                raw_budget_us,
+                previous_observed_us - 1,
+                math.floor(previous_observed_us * 0.90),
+                math.floor(previous_target_us * attempt_factor),
+            ),
+        )
+        if target_us >= previous_observed_us:
+            raise TimingError(
+                "timing_single_block_budget_impossible",
+                "Lời thuyết minh một khối đã ở thời lượng tối thiểu có thể đo",
+                retryable=False,
+            )
+        previous_word_count = max(1, len(previous_text.split()))
+        duration_ratio = min(0.95, raw_budget_us / previous_observed_us)
+        max_words = max(
+            1,
+            math.floor(
+                previous_word_count
+                * duration_ratio
+                * (0.92 ** (semantic_attempt - 1))
+            ),
+        )
+        if previous_word_count > 1:
+            max_words = min(max_words, previous_word_count - 1)
+        return target_us, max_words
+
+    @classmethod
+    def _semantic_rewrite_context(
+        cls,
+        translation: TranslationArtifact,
+        rewrites: Mapping[int, Mapping[str, Any]],
+        *,
+        ordinal: int,
+    ) -> tuple[str | None, str | None]:
+        """Return only the nearest Vietnamese neighbour within two seconds."""
+
+        segments = translation.result.segments
+
+        def narration_text(index: int) -> str:
+            rewrite = rewrites.get(index)
+            return (
+                str(rewrite["text"])
+                if rewrite is not None and isinstance(rewrite.get("text"), str)
+                else segments[index].translated_text
+            )
+
+        before: str | None = None
+        if ordinal > 0:
+            previous = segments[ordinal - 1]
+            current = segments[ordinal]
+            if current.start_us - previous.end_us <= _TIMING_SEMANTIC_CONTEXT_WINDOW_US:
+                before = narration_text(ordinal - 1)
+        after: str | None = None
+        if ordinal + 1 < len(segments):
+            current = segments[ordinal]
+            following = segments[ordinal + 1]
+            if (
+                following.start_us - current.end_us
+                <= _TIMING_SEMANTIC_CONTEXT_WINDOW_US
+            ):
+                after = narration_text(ordinal + 1)
+        return before, after
+
+    @classmethod
+    def _semantic_rejected_hashes(
+        cls,
+        previous: Mapping[str, Any],
+        *,
+        original_text: str,
+    ) -> list[str]:
+        """Collect every prior candidate hash so semantic recovery cannot cycle."""
+
+        candidates: list[object] = [
+            cls._text_sha256(original_text),
+            previous.get("text_sha256"),
+            previous.get("previous_text_sha256"),
+        ]
+        raw_rejected = previous.get("rejected_candidate_hashes", [])
+        if isinstance(raw_rejected, list):
+            candidates.extend(raw_rejected)
+        raw_history = previous.get("history", [])
+        if isinstance(raw_history, list):
+            candidates.extend(
+                item.get("text_sha256")
+                for item in raw_history
+                if isinstance(item, Mapping)
+            )
+        unique: list[str] = []
+        for value in candidates:
+            if (
+                isinstance(value, str)
+                and cls._valid_sha(value)
+                and value not in unique
+            ):
+                unique.append(value)
+        return unique[-16:]
+
+    async def _persist_single_block_semantic_rewrite(
+        self,
+        job_id: str,
+        *,
+        translation: TranslationArtifact,
+        timing_error: TimingError,
+        ordinal: int,
+        payload: dict[str, Any],
+        rewrites: dict[int, dict[str, Any]],
+        previous: Mapping[str, Any] | None,
+        rewrite_model: VerifiedModel,
+    ) -> None:
+        retry_payload = copy.deepcopy(payload)
+        if (
+            previous is None
+            or timing_error.details.get("strategy")
+            != _TIMING_REWRITE_SINGLE_SEMANTIC_STRATEGY
+        ):
+            raise TimingError(
+                "timing_rewrite_context_invalid",
+                "Checkpoint rút gọn ngữ nghĩa một khối không hợp lệ",
+                retryable=True,
+            )
+        available_us = timing_error.details.get("available_duration_us")
+        if (
+            isinstance(available_us, bool)
+            or not isinstance(available_us, int)
+            or available_us <= 0
+        ):
+            raise TimingError(
+                "timing_rewrite_context_invalid",
+                "Cửa sổ thời lượng rút gọn ngữ nghĩa không hợp lệ",
+                retryable=True,
+            )
+        segment = translation.result.segments[ordinal]
+        previous_text, previous_observed_us = self._timing_rewrite_seed(
+            payload,
+            segment_text=segment.translated_text,
+            ordinal=ordinal,
+            previous=previous,
+        )
+        previous_target_us = int(previous["target_duration_us"])
+        semantic_attempt = (
+            int(previous["semantic_attempt"]) + 1
+            if previous.get("prompt_version") == _TIMING_REWRITE_PROMPT_V3
+            else 1
+        )
+        rejected_hashes = self._semantic_rejected_hashes(
+            previous,
+            original_text=segment.translated_text,
+        )
+        context_before, context_after = self._semantic_rewrite_context(
+            translation,
+            rewrites,
+            ordinal=ordinal,
+        )
+        inherited_history = (
+            list(previous.get("history", []))
+            if isinstance(previous.get("history"), list)
+            else []
+        )
+
+        def persist_entry(
+            *,
+            text: str,
+            attempt: int,
+            target_duration_us: int,
+            max_words: int,
+            pending: bool,
+            history: list[object],
+        ) -> None:
+            entry = {
+                "ordinal": ordinal,
+                "text": text,
+                "text_sha256": self._text_sha256(text),
+                "source_text_sha256": self._text_sha256(segment.source_text),
+                "original_translation_sha256": self._text_sha256(
+                    segment.translated_text
+                ),
+                "attempt": attempt,
+                "semantic_attempt": attempt,
+                "semantic_recovery": True,
+                "semantic_candidate_pending": pending,
+                "available_duration_us": available_us,
+                # A pending ledger still represents the last measured text.
+                # Keep its accepted target stable across process death and
+                # store the next requested target separately.
+                "target_duration_us": (
+                    previous_target_us if pending else target_duration_us
+                ),
+                "semantic_requested_target_duration_us": target_duration_us,
+                "max_words": max_words,
+                "previous_text_sha256": self._text_sha256(previous_text),
+                "previous_target_duration_us": previous_target_us,
+                "previous_observed_duration_us": previous_observed_us,
+                "observed_duration_us": previous_observed_us if pending else None,
+                "model_id": rewrite_model.model_id,
+                "model_tree_sha256": rewrite_model.tree_sha256,
+                "prompt_version": _TIMING_REWRITE_PROMPT_V3,
+                "accepted": False,
+                "history": history[-12:],
+                "rejected_candidate_hashes": list(rejected_hashes),
+                "context_before_vi": context_before,
+                "context_after_vi": context_after,
+                "strategy": _TIMING_REWRITE_SINGLE_SEMANTIC_STRATEGY,
+                "failure_ordinal": timing_error.details["failure_ordinal"],
+                "critical_group_start_ordinal": timing_error.details[
+                    "critical_group_start_ordinal"
+                ],
+                "critical_group_end_ordinal": timing_error.details[
+                    "critical_group_end_ordinal"
+                ],
+                "schedule_deficit_us": timing_error.details[
+                    "schedule_deficit_us"
+                ],
+            }
+            rewrites[ordinal] = entry
+            payload["schema_version"] = 4
+            payload["timing_rewrites"] = [
+                rewrites[index] for index in sorted(rewrites)
+            ]
+            payload["completed"] = False
+            self._store.save_checkpoint(job_id, JobStage.TTS, payload)
+
+        rewritten: str | None = None
+        target_us = 0
+        max_words = 0
+        while semantic_attempt <= _TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS:
+            target_us, max_words = self._semantic_timing_rewrite_plan(
+                available_us=available_us,
+                maximum_total_speed=timing_error.details.get(
+                    "maximum_total_speed",
+                    NATURAL_MAX_TOTAL_SPEED,
+                ),
+                previous_text=previous_text,
+                previous_target_us=previous_target_us,
+                previous_observed_us=previous_observed_us,
+                semantic_attempt=semantic_attempt,
+            )
+            # Persist before invoking llama.cpp. A killed process resumes at
+            # the next bounded strategy instead of repeating an inference.
+            persist_entry(
+                text=previous_text,
+                attempt=semantic_attempt,
+                target_duration_us=target_us,
+                max_words=max_words,
+                pending=True,
+                history=inherited_history,
+            )
+            self._update_progress(
+                job_id,
+                self._store.get_job(job_id).progress_permille,
+                {
+                    "phase4_step": "timing_rewrite",
+                    "timing_rewrite_mode": "semantic_recovery",
+                    "phase4_message": (
+                        f"Đang rút gọn ngữ nghĩa khối {ordinal + 1} theo ngữ cảnh "
+                        f"(chiến lược {semantic_attempt}/"
+                        f"{_TIMING_SEMANTIC_RECOVERY_MAX_ATTEMPTS})"
+                    ),
+                    "timing_rewrite_ordinal": ordinal,
+                    "timing_semantic_attempt": semantic_attempt,
+                    "timing_rewrite_target_us": target_us,
+                    "timing_rewrite_max_words": max_words,
+                    "timing_rewrite_previous_duration_us": previous_observed_us,
+                },
+            )
+            try:
+                rewritten = await self._rewrite_timing_text(
+                    rewrite_model,
+                    source_text=segment.source_text,
+                    canonical_vi=segment.translated_text,
+                    previous_vi=previous_text,
+                    source_language=translation.result.source_language,
+                    target_duration_us=target_us,
+                    observed_duration_us=previous_observed_us,
+                    max_words=max_words,
+                    adaptive_attempt=semantic_attempt,
+                    semantic_recovery=True,
+                    context_before_vi=context_before,
+                    context_after_vi=context_after,
+                    rejected_candidate_hashes=tuple(rejected_hashes),
+                    job_id=job_id,
+                )
+                break
+            except TimingError as error:
+                if error.code not in {
+                    "timing_rewrite_output_empty",
+                    "timing_rewrite_output_invalid",
+                }:
+                    # A handled runtime/network failure produced no semantic
+                    # candidate. Restore the exact durable checkpoint so a
+                    # normal retry may use the same strategy. An actual
+                    # process death cannot reach this rollback and therefore
+                    # remains bounded by the pre-call ledger above.
+                    self._store.save_checkpoint(
+                        job_id,
+                        JobStage.TTS,
+                        retry_payload,
+                    )
+                    raise
+                candidate_hash = error.details.get("candidate_sha256")
+                if (
+                    isinstance(candidate_hash, str)
+                    and self._valid_sha(candidate_hash)
+                    and candidate_hash not in rejected_hashes
+                ):
+                    rejected_hashes.append(candidate_hash)
+                    del rejected_hashes[:-16]
+                    persist_entry(
+                        text=previous_text,
+                        attempt=semantic_attempt,
+                        target_duration_us=target_us,
+                        max_words=max_words,
+                        pending=True,
+                        history=inherited_history,
+                    )
+                # A rejected semantic candidate is a consumed strategy. If a
+                # later strategy hits a transient runtime failure, roll back
+                # only that later call, never the durable rejected attempt.
+                retry_payload = copy.deepcopy(payload)
+                semantic_attempt += 1
+        if rewritten is None:
+            self._raise_single_block_semantic_exhausted(
+                timing_error,
+                owner=ordinal,
+            )
+
+        history = inherited_history
+        history.append(
+            {
+                "text_sha256": self._text_sha256(previous_text),
+                "target_duration_us": previous_target_us,
+                "observed_duration_us": previous_observed_us,
+                "prompt_version": str(previous.get("prompt_version") or ""),
+            }
+        )
+        persist_entry(
+            text=rewritten,
+            attempt=semantic_attempt,
+            target_duration_us=target_us,
+            max_words=max_words,
+            pending=False,
+            history=history,
+        )
+        self._store.save_checkpoint(job_id, JobStage.TIMING, {})
+
     async def _persist_timing_rewrite(
         self,
         job_id: str,
@@ -1632,6 +2162,18 @@ class Phase4Stage:
             translation=translation,
         )
         previous = rewrites.get(ordinal)
+        if timing_error.details.get("semantic_recovery") is True:
+            await self._persist_single_block_semantic_rewrite(
+                job_id,
+                translation=translation,
+                timing_error=timing_error,
+                ordinal=ordinal,
+                payload=payload,
+                rewrites=rewrites,
+                previous=previous,
+                rewrite_model=rewrite_model,
+            )
+            return
         available_us = timing_error.details.get("available_duration_us")
         if (
             isinstance(available_us, bool)
@@ -1835,6 +2377,10 @@ class Phase4Stage:
         observed_duration_us: int,
         max_words: int,
         adaptive_attempt: int,
+        semantic_recovery: bool = False,
+        context_before_vi: str | None = None,
+        context_after_vi: str | None = None,
+        rejected_candidate_hashes: Sequence[str] = (),
         job_id: str,
     ) -> str:
         if self._timing_rewriter_factory is None:  # pragma: no cover - caller guard
@@ -1874,6 +2420,10 @@ class Phase4Stage:
                     canonical_vi=canonical_vi,
                     source_language=source_language,
                     adaptive_attempt=adaptive_attempt,
+                    semantic_recovery=semantic_recovery,
+                    context_before_vi=context_before_vi,
+                    context_after_vi=context_after_vi,
+                    rejected_candidate_hashes=rejected_candidate_hashes,
                     target_language="vi",
                     on_progress=progress,
                 ),
@@ -1933,11 +2483,17 @@ class Phase4Stage:
                 "Model rút gọn trả về lời thuyết minh rỗng",
                 retryable=True,
             )
-        if rewritten == " ".join(previous_vi.split()) or len(rewritten.split()) > max_words:
+        rewritten_sha256 = self._text_sha256(rewritten)
+        if (
+            rewritten == " ".join(previous_vi.split())
+            or len(rewritten.split()) > max_words
+            or rewritten_sha256 in rejected_candidate_hashes
+        ):
             raise TimingError(
                 "timing_rewrite_output_invalid",
                 "Model chưa rút gọn đúng giới hạn số từ đã đo",
                 retryable=True,
+                details={"candidate_sha256": rewritten_sha256},
             )
         return rewritten
 
@@ -2028,7 +2584,9 @@ class Phase4Stage:
         pending: list[tuple[dict[str, Any], str]] = []
         for entry in rewrites.values():
             if (
-                entry.get("prompt_version") != _TIMING_REWRITE_PROMPT_V2
+                entry.get("prompt_version")
+                not in {_TIMING_REWRITE_PROMPT_V2, _TIMING_REWRITE_PROMPT_V3}
+                or entry.get("semantic_candidate_pending") is True
                 or entry.get("accepted") is True
             ):
                 continue
@@ -2052,7 +2610,19 @@ class Phase4Stage:
         else:
             existing_warnings = set()
         for _entry, message in pending:
-            warning_key = ("timing_translation_rewritten_adaptive", message)
+            warning_key = (
+                "timing_translation_rewritten_semantic"
+                if _entry.get("prompt_version") == _TIMING_REWRITE_PROMPT_V3
+                else "timing_translation_rewritten_adaptive",
+                (
+                    message
+                    if _entry.get("prompt_version") != _TIMING_REWRITE_PROMPT_V3
+                    else (
+                        f"Khối thuyết minh {int(_entry['ordinal']) + 1} đã được "
+                        "rút gọn ngữ nghĩa theo ngữ cảnh và đo lại bằng TTS"
+                    )
+                ),
+            )
             if warning_key not in existing_warnings:
                 self._store.append_warning(job_id, *warning_key)
                 existing_warnings.add(warning_key)
