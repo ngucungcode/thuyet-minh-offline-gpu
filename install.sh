@@ -409,15 +409,15 @@ compute_major="${BASH_REMATCH[1]}"
 compute_minor="${BASH_REMATCH[2]}"
 cuda_arch="$((10#${compute_major} * 10 + 10#${compute_minor}))"
 case "${cuda_arch}" in
-  70|75|80|86|89|90) ;;
+  70|75|80|86|89|90|120) ;;
   *)
-    die "GPU ${gpu_name} (sm_${cuda_arch}) không nằm trong ma trận hỗ trợ sm_70, sm_75, sm_80, sm_86, sm_89, sm_90"
+    die "GPU ${gpu_name} (sm_${cuda_arch}) không nằm trong ma trận hỗ trợ sm_70, sm_75, sm_80, sm_86, sm_89, sm_90, sm_120"
     ;;
 esac
 gpu_support_tier="supported"
 if [[ "${cuda_arch}" == "70" ]]; then
   gpu_support_tier="maintenance-limited"
-elif [[ "${gpu_name,,}" == *cmp*170*hx* ]]; then
+elif [[ "${cuda_arch}" == "120" || "${gpu_name,,}" == *cmp*170*hx* ]]; then
   gpu_support_tier="experimental"
 fi
 nvcc_architectures="$(/usr/local/cuda/bin/nvcc --list-gpu-arch 2>/dev/null)" \
@@ -437,7 +437,7 @@ if [[ "${MODEL_PROFILE}" == "auto" ]]; then
 fi
 if [[ "${gpu_support_tier}" == "experimental" \
   && "${MODEL_PROFILE}" != "minimal" && "${MODEL_PROFILE}" != "none" ]]; then
-  die "CMP 170HX hiện chỉ hỗ trợ profile minimal hoặc none"
+  die "GPU thuộc tier thử nghiệm hiện chỉ hỗ trợ profile minimal hoặc none"
 fi
 if [[ "${MODEL_PROFILE}" == "maximum" && "${vram_mib}" -lt 22528 ]]; then
   die "Profile maximum cần ít nhất 22 GiB VRAM; hiện có ${vram_mib} MiB"
@@ -472,7 +472,7 @@ log "Dữ liệu: ${DATA_DIR}"
 log "Profile: ${MODEL_PROFILE}; acceptance: ${ACCEPTANCE_MODE}"
 
 if [[ "${gpu_support_tier}" == "experimental" ]]; then
-  log "Cảnh báo: CMP 170HX được hỗ trợ ở mức thử nghiệm; cần chạy acceptance thật trước production"
+  log "Cảnh báo: GPU thuộc tier thử nghiệm; cần chạy acceptance thật trước production"
 elif [[ "${gpu_support_tier}" == "maintenance-limited" ]]; then
   log "Cảnh báo: Volta sm_70 thuộc nhánh bảo trì giới hạn CUDA 12.x"
 fi

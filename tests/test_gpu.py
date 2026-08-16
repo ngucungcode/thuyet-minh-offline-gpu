@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import dub_server.gpu as gpu
 from dub_server.gpu import (
     CUDA_TOOLKIT_MINIMUM_DRIVERS,
     ComponentStatus,
@@ -23,6 +24,13 @@ from dub_server.gpu import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def use_linux_driver_matrix_by_default(monkeypatch) -> None:
+    """Keep mocked driver fixtures stable on every CI operating system."""
+
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Linux")
 
 
 def completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -102,6 +110,47 @@ def test_gpu_driver_floor_tracks_installed_cuda_toolkit(
     )
 
 
+def test_windows_gpu_driver_floor_uses_nvidia_windows_matrix(monkeypatch) -> None:
+    monkeypatch.setattr(gpu.platform, "system", lambda: "Windows")
+
+    report = inspect_gpu(
+        command_runner=lambda _: completed(
+            "GPU-test, NVIDIA RTX Test, 570.65, 16384, 8.9\n"
+        ),
+        torch_probe=successful_torch,
+        ctranslate2_probe=successful_ctranslate2,
+        nvcc_probe=lambda: "12.8",
+        expected_cuda_toolkit_version="12.8",
+    )
+
+    assert report.ready is True
+    assert report.minimum_driver == "570.65"
+
+
+def test_probe_nvcc_release_honors_configured_windows_compiler(
+    monkeypatch, tmp_path: Path
+) -> None:
+    nvcc = tmp_path / "CUDA" / "bin" / "nvcc.exe"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_bytes(b"")
+    calls: list[tuple[str, ...]] = []
+
+    def run(args):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            "Cuda compilation tools, release 12.8, V12.8.61\n",
+            "",
+        )
+
+    monkeypatch.setenv("CUDACXX", str(nvcc))
+    monkeypatch.setattr(gpu, "_run_command", run)
+
+    assert gpu.probe_nvcc_release() == "12.8"
+    assert calls == [(str(nvcc), "--version")]
+
+
 @pytest.mark.parametrize(
     ("toolkit", "driver"),
     [
@@ -124,6 +173,21 @@ def test_gpu_preflight_rejects_wrong_driver_or_unknown_toolkit(
             nvcc_probe=lambda: toolkit,
             expected_cuda_toolkit_version=toolkit,
         )
+
+
+def test_blackwell_consumer_gpu_requires_cuda_12_8() -> None:
+    with pytest.raises(GpuPreflightError) as captured:
+        inspect_gpu(
+            command_runner=lambda _: completed(
+                "GPU-test, NVIDIA GeForce RTX 5080, 570.65, 16384, 12.0\n"
+            ),
+            torch_probe=successful_torch,
+            ctranslate2_probe=successful_ctranslate2,
+            nvcc_probe=lambda: "12.6",
+            expected_cuda_toolkit_version="12.6",
+        )
+
+    assert any("requires CUDA toolkit 12.8" in warning for warning in captured.value.report.warnings)
 
 
 def test_gpu_preflight_rejects_toolkit_changed_after_native_install() -> None:
@@ -197,7 +261,7 @@ def test_gpu_preflight_rejects_runtime_gpu_binding_mismatch(
 
 @pytest.mark.parametrize(
     "compute_capability",
-    ("7.0", "7.5", "8.0", "8.6", "8.9", "9.0"),
+    ("7.0", "7.5", "8.0", "8.6", "8.9", "9.0", "12.0"),
 )
 def test_gpu_preflight_accepts_only_the_release_cuda_architectures(
     compute_capability: str,

@@ -31,7 +31,7 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 ## Môi trường được hỗ trợ
 
-Đường triển khai production native có các yêu cầu sau:
+Đường triển khai production native Ubuntu có các yêu cầu sau:
 
 - Ubuntu 22.04 x86_64.
 - Python 3.11 hoặc 3.12 tại lệnh `python3`.
@@ -43,6 +43,13 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 - PyTorch CUDA đã được image nhà cung cấp cài sẵn và `torch.cuda.is_available()` trả `True`.
 - Quyền `root` hoặc tài khoản có `sudo`.
 
+Windows 10 22H2 x64 được hỗ trợ bằng bộ PowerShell native cho chế độ MVP
+**upload file cục bộ**: dashboard, API và worker chạy trực tiếp trên Windows, không
+cần WSL2 hay Docker. Trình cài Windows yêu cầu Python 3.11/3.12 x64, Git, CMake,
+Ninja, FFmpeg, Visual Studio 2022 Build Tools (Desktop development with C++), NVIDIA
+driver và CUDA Toolkit 12.6 hoặc 12.8. RTX 50 (`sm_120`) bắt buộc CUDA 12.8 và hiện
+chỉ dùng profile `minimal`. Xem [hướng dẫn Windows native](docs/windows-native.md).
+
 Trình cài không thay NVIDIA driver, CUDA toolkit hoặc PyTorch của nhà cung cấp.
 Docker Compose dành cho host có Docker daemon và NVIDIA Container Toolkit là
 đường triển khai nâng cao.
@@ -52,17 +59,19 @@ Docker Compose dành cho host có Docker daemon và NVIDIA Container Toolkit là
 | CUDA target | GPU tiêu biểu | Trạng thái | Profile khuyến nghị theo VRAM |
 |---|---|---|---|
 | `sm_70` | Tesla V100 16/32 GiB | Hỗ trợ có giới hạn; maintenance-limited | `balanced` với 16 GiB, `maximum` với 32 GiB |
-| `sm_75` | Tesla T4 16 GiB | Hỗ trợ | `balanced` |
+| `sm_75` | Tesla T4, GeForce RTX 20 series | Hỗ trợ | Theo VRAM; tối thiểu 6 GiB |
 | `sm_80` | NVIDIA A100 40/80 GiB, A30 24 GiB | Hỗ trợ | `maximum` |
-| `sm_86` | NVIDIA A10 24 GiB, A40 48 GiB, GeForce RTX 3090 24 GiB | Hỗ trợ | `maximum` |
-| `sm_89` | NVIDIA L4 24 GiB, L40/L40S 48 GiB | Hỗ trợ | `maximum` |
+| `sm_86` | NVIDIA A10/A40, GeForce RTX 30 series | Hỗ trợ | Theo VRAM |
+| `sm_89` | NVIDIA L4/L40/L40S, GeForce RTX 40 series | Hỗ trợ | Theo VRAM |
 | `sm_90` | NVIDIA H100/H200 | Hỗ trợ | `maximum` |
 | `sm_80` | NVIDIA CMP 170HX 8 GiB | Thử nghiệm; chỉ bật khi toàn bộ probe đạt | Chỉ `minimal` |
+| `sm_120` | GeForce RTX 50 series | Thử nghiệm; CUDA 12.8 và probe trên card thật | Chỉ `minimal` |
 
 V100 là nhánh maintenance-limited: dự án chỉ duy trì tương thích và sửa lỗi theo khả
 năng, không cam kết nâng toolchain vượt quá phiên bản CUDA/PyTorch còn hỗ trợ Volta.
-CMP 170HX không được tự động nâng lên `balanced` hoặc `maximum`, kể cả khi driver báo
-dung lượng khác. Installer xác minh driver, CUDA, kernel FP16 PyTorch, CTranslate2 và
+CMP 170HX và RTX 50 không được tự động nâng lên `balanced` hoặc `maximum`, kể cả khi
+driver báo dung lượng khác. Installer xác minh driver, CUDA, kernel FP16 PyTorch,
+CTranslate2 và
 binary native; trước khi dùng production vẫn phải chạy full acceptance trên chính card đó.
 
 Pascal (`sm_60`, `sm_61`, `sm_62`) và kiến trúc cũ hơn không được hỗ trợ. Kiến trúc
@@ -71,7 +80,7 @@ báo cáo nghiệm thu riêng; PTX fallback không được xem là bằng chứ
 production.
 
 Image Docker release dùng CUDA fatbin chứa mã cho `sm_70`, `sm_75`, `sm_80`, `sm_86`,
-`sm_89` và `sm_90`. Cài native chỉ build artifact cho compute capability của GPU đã
+`sm_89`, `sm_90` và `sm_120`. Cài native chỉ build artifact cho compute capability của GPU đã
 được preflight chọn trên máy đó để giảm thời gian build và kích thước binary; không sao
 chép native binary giữa các máy có kiến trúc khác nhau.
 
@@ -105,7 +114,7 @@ của một GPU đã qua preflight, không cộng VRAM của nhiều GPU. `auto`
 có ít nhất 22 GiB, chọn `balanced` khi có từ 8 GiB đến dưới 22 GiB, chọn `minimal` khi có
 từ 6 GiB đến dưới 8 GiB và từ chối cài model nếu thấp hơn 6 GiB. Người vận hành có thể chủ
 động chọn `minimal` để giảm thời gian cài
-và mức dùng tài nguyên; riêng CMP 170HX luôn bị giới hạn ở profile này.
+và mức dùng tài nguyên; riêng CMP 170HX và RTX 50 luôn bị giới hạn ở profile này.
 
 Installer native với `--profile auto` ghi lựa chọn model theo VRAM thực tế vào
 `.env.native`. Docker Compose không có bước chọn profile đó nên mặc định fail-safe với
@@ -126,6 +135,24 @@ set -o pipefail; curl -fsSL https://github.com/ngucungcode/thuyet-minh-offline-g
 Installer kiểm tra toàn bộ preflight trước khi sửa hệ thống, tự chọn profile,
 tải và xác minh SHA-256 model, tạo secret, khởi động stack, chạy acceptance cơ
 bản và cài `dub` tại `/usr/local/bin/dub`.
+
+### Windows 10 native
+
+Sau khi cài các prerequisite trong
+[hướng dẫn Windows](docs/windows-native.md), clone repository rồi mở PowerShell tại
+thư mục dự án:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\windows\preflight.ps1
+.\windows\install.ps1 -Profile auto
+.\windows\stack.ps1 start
+```
+
+Mở `http://127.0.0.1:8080/` để tải MP4/MKV và SRT từ máy. Cấu hình đã sinh nằm trong
+`.env.windows`, còn model, log, job và binary native mặc định nằm dưới
+`%LOCALAPPDATA%\ThuyetMinhOfflineGPU`. Bộ Windows MVP không tự cài hoặc quản lý
+Prowlarr/qBittorrent; luồng upload cục bộ hoạt động độc lập với hai dịch vụ này.
 
 Bootstrap mặc định dùng bộ smoke check production, tận dụng pip cache bên trong
 data root và tự dùng tối đa 16 luồng CPU khi build native. Để chạy thêm toàn bộ
@@ -371,11 +398,13 @@ backup và journal nếu installer yêu cầu phục hồi thủ công.
 
 ## Bảo mật và mạng
 
-- Chỉ cần mở cổng SSH của máy chủ để quản trị qua tunnel.
+- Ubuntu từ xa chỉ cần mở cổng SSH để quản trị qua tunnel; Windows desktop dùng
+  trực tiếp loopback và không cần mở cổng dashboard qua firewall.
 - Không public trực tiếp các cổng `8080`, `8081` hoặc `9696`; chúng không có TLS công khai.
 - Cổng peer theo cấu hình qBittorrent là tùy chọn; Docker mặc định dùng TCP/UDP
   `6881`. Chỉ mở cổng peer thực tế qua firewall khi cần.
-- Secret native nằm dưới `var/secrets` với mode `0600`; không đưa chúng vào Git hoặc log.
+- Secret Ubuntu native nằm dưới `var/secrets` với mode `0600`; Windows đặt chúng
+  trong data root của user dưới `%LOCALAPPDATA%`. Không đưa secret vào Git hoặc log.
 - API acquisition có mạng để tìm/tải nguồn; worker suy luận chỉ dùng model local đã verify.
 - Docker worker dùng `network_mode: none`; native worker dùng offline audit guard ở tầng tiến trình.
 - Model chỉ được tải bởi model-manager có egress; worker không tải model hoặc fallback cloud.
@@ -394,10 +423,11 @@ nvidia-smi
 python3 -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
 ```
 
-GPU phải thuộc allowlist `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_89` hoặc `sm_90`,
+GPU phải thuộc allowlist `sm_70`, `sm_75`, `sm_80`, `sm_86`, `sm_89`, `sm_90` hoặc `sm_120`,
 đồng thời driver, CUDA toolkit và PyTorch phải tương thích với nhau. Pascal và cũ hơn
 không được hỗ trợ. Với V100, dùng toolchain còn hỗ trợ Volta; với CMP 170HX, chỉ dùng
-profile `minimal` sau khi toàn bộ probe thử nghiệm đạt. Việc `nvidia-smi` nhìn thấy card
+profile `minimal` sau khi toàn bộ probe thử nghiệm đạt. RTX 50 cũng chỉ dùng `minimal`,
+bắt buộc CUDA 12.8 và PyTorch wheel `cu128`. Việc `nvidia-smi` nhìn thấy card
 không thay thế smoke test native và nghiệm thu trên phần cứng thật.
 
 - **Stack hoặc dashboard không phản hồi:** chạy `dub stack status`, xem
@@ -413,6 +443,7 @@ không thay thế smoke test native và nghiệm thu trên phần cứng thật.
 ## Tài liệu và giấy phép
 
 - [Workflow web và cấu hình tích hợp](docs/WEB_WORKFLOW.md)
+- [Cài và vận hành Windows 10 native](docs/windows-native.md)
 - [Catalog model bất biến](config/models.lock.json)
 - [SBOM CycloneDX 1.6 của release](release/sbom.cdx.json); SBOM tạo trên máy đã cài còn
   xác minh build receipt và ghi CUDA/binary `llama.cpp` thực tế.

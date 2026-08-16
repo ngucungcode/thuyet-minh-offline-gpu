@@ -511,8 +511,8 @@ function gpuWarningMessage(value: string) {
   if (warning.includes("maintenance-limited Volta sm_70")) {
     return "Volta sm_70 đang ở mức hỗ trợ bảo trì giới hạn.";
   }
-  if (warning.includes("experimental CMP 170HX support")) {
-    return "CMP 170HX đang ở mức hỗ trợ thử nghiệm; cần nghiệm thu trên card thật trước production.";
+  if (warning.includes("experimental GPU support tier")) {
+    return "GPU đang ở mức hỗ trợ thử nghiệm; chỉ dùng profile minimal và cần nghiệm thu trên card thật.";
   }
   return warning
     .replace(/^logical CUDA device 0:/, "GPU CUDA logical 0:")

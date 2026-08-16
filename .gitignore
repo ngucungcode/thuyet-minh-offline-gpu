@@ -1,8 +1,10 @@
 .env*
 !.env.example
 !.env.native.example
+!.env.windows.example
 .venv/
 .venv-native/
+.venv-windows/
 __pycache__/
 *.py[cod]
 *.egg-info/

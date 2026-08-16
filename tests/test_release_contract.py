@@ -10,16 +10,21 @@ from dub_server import __version__
 from dub_server.api import create_app
 from dub_server.gpu import (
     CUDA_TOOLKIT_MINIMUM_DRIVERS,
+    CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS,
     SUPPORTED_CUDA_ARCHITECTURES,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_CUDA_ARCHITECTURES = frozenset({70, 75, 80, 86, 89, 90})
+EXPECTED_CUDA_ARCHITECTURES = frozenset({70, 75, 80, 86, 89, 90, 120})
 EXPECTED_CUDA_TOOLKIT_VERSIONS = ("12.6", "12.8")
 EXPECTED_CUDA_TOOLKIT_MINIMUM_DRIVERS = {
     "12.6": (560, 28, 3),
     "12.8": (570, 26),
+}
+EXPECTED_CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS = {
+    "12.6": (560, 76),
+    "12.8": (570, 65),
 }
 
 
@@ -259,7 +264,7 @@ def test_cuda_architecture_metadata_and_implementations_do_not_drift() -> None:
         int(value.removesuffix("-virtual"))
         for value in docker_tokens
         if value.endswith("-virtual")
-    } == {90}
+    } == {120}
     assert gpu_preflight == locked
     assert native_installer == locked
     assert llama_metadata["cuda_default_build_architecture"] == 86
@@ -269,6 +274,10 @@ def test_cuda_architecture_metadata_and_implementations_do_not_drift() -> None:
     )
     assert tuple(CUDA_TOOLKIT_MINIMUM_DRIVERS) == EXPECTED_CUDA_TOOLKIT_VERSIONS
     assert CUDA_TOOLKIT_MINIMUM_DRIVERS == EXPECTED_CUDA_TOOLKIT_MINIMUM_DRIVERS
+    assert (
+        CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS
+        == EXPECTED_CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS
+    )
     assert llama_metadata["cuda_version"] in EXPECTED_CUDA_TOOLKIT_VERSIONS
     assert "nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04@sha256:" in dockerfile
     assert "cuda_architectures" not in llama_metadata
@@ -401,7 +410,7 @@ def test_native_installer_preflights_driver_architecture_and_cmp_profile() -> No
         r'MODEL_PROFILE="minimal"',
         installer,
     )
-    assert "CMP 170HX hiện chỉ hỗ trợ profile minimal hoặc none" in installer
+    assert "GPU thuộc tier thử nghiệm hiện chỉ hỗ trợ profile minimal hoặc none" in installer
     assert "torch.cuda.get_device_properties(0)" in installer
     assert "PyTorch không trả về UUID GPU logical 0 hợp lệ" in installer
     assert "--gpu-device INDEX|UUID" in installer
