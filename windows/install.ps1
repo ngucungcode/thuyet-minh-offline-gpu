@@ -3,14 +3,69 @@ param(
     [ValidateSet("auto", "minimal", "balanced", "maximum")]
     [string]$Profile = "auto",
     [switch]$SkipModels,
+    [switch]$SkipPrerequisites,
+    [switch]$SkipStart,
+    [switch]$OpenDashboard,
     [switch]$FullTest,
     [ValidateRange(1, 32)]
-    [int]$BuildJobs = 4
+    [int]$BuildJobs = 4,
+    [switch]$PrerequisitesOnly,
+    [switch]$Elevated
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot "prerequisites.ps1")
+
+function Invoke-DubElevatedPrerequisites {
+    $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+        throw "Khong tim thay Windows PowerShell de nang quyen UAC"
+    }
+    $arguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        ('"{0}"' -f $PSCommandPath),
+        "-PrerequisitesOnly",
+        "-Elevated"
+    )
+
+    Write-Output "Dang yeu cau quyen Administrator qua UAC de cai prerequisite..."
+    $process = Start-Process -FilePath $windowsPowerShell `
+        -ArgumentList $arguments `
+        -Verb RunAs `
+        -Wait `
+        -PassThru
+    if ($process.ExitCode -eq 3010) {
+        throw "Prerequisite da cai xong nhung Windows can reboot. Khoi dong lai may roi chay lai dung lenh install.ps1"
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "Tien trinh cai prerequisite that bai voi exit code $($process.ExitCode)"
+    }
+}
+
+$prerequisitesInstalledByChild = $false
+if ($PrerequisitesOnly) {
+    if (-not $Elevated -or -not (Test-DubAdministrator)) {
+        throw "PrerequisitesOnly chi duoc goi boi tien trinh UAC cua installer"
+    }
+    $result = Install-DubPrerequisites
+    if ($result.RestartRequired) {
+        exit 3010
+    }
+    exit 0
+}
+if (-not $SkipPrerequisites -and -not (Test-DubAdministrator)) {
+    if (Test-DubPrerequisitesReady) {
+        $prerequisitesInstalledByChild = $true
+    } else {
+        if ($Elevated) {
+            throw "Khong nhan duoc quyen Administrator sau khi mo UAC"
+        }
+        Invoke-DubElevatedPrerequisites
+        $prerequisitesInstalledByChild = $true
+    }
+}
 
 function Require-Command {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -253,23 +308,35 @@ $env:DUB_WINDOWS_ENV_FILE = $envFile
 $context = Initialize-DubWindowsEnvironment
 New-DubWindowsDirectories -Context $context
 
-$windowsVersion = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-if (-not [Environment]::Is64BitOperatingSystem -or [int]$windowsVersion.CurrentBuildNumber -lt 19045) {
-    throw "Can Windows 10 22H2 x64 build 19045 tro len"
+Assert-DubWindowsPlatform
+$prerequisiteResult = $null
+if (-not $SkipPrerequisites -and
+    -not $prerequisitesInstalledByChild -and
+    -not (Test-DubPrerequisitesReady)) {
+    $prerequisiteResult = Install-DubPrerequisites
+    if ($prerequisiteResult.RestartRequired) {
+        throw "Prerequisite da cai xong nhung Windows can reboot. Khoi dong lai may roi chay lai dung lenh install.ps1; installer se tiep tuc idempotent"
+    }
 }
 
-foreach ($required in @("python.exe", "git.exe", "cmake.exe", "ninja.exe", "ffmpeg.exe", "ffprobe.exe", "nvidia-smi.exe", "nvcc.exe")) {
+Update-DubProcessPath
+$pythonExecutable = Get-DubPythonExecutable
+if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
+    throw "Can Python 3.11 hoac 3.12 x64; dung -SkipPrerequisites chi khi da cai san day du"
+}
+$env:DUB_WINDOWS_BASE_PYTHON = $pythonExecutable
+foreach ($required in @("git.exe", "cmake.exe", "ninja.exe", "ffmpeg.exe", "ffprobe.exe", "nvidia-smi.exe", "nvcc.exe")) {
     [void](Require-Command $required)
 }
 if ([string]::IsNullOrWhiteSpace($env:CUDACXX)) {
     $env:CUDACXX = Require-Command "nvcc.exe"
 }
 
-$pythonVersion = (& python.exe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+$pythonVersion = (& $pythonExecutable -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
 if ($pythonVersion -notin @("3.11", "3.12")) {
     throw "Can Python 3.11 hoac 3.12 x64; hien tai $pythonVersion"
 }
-$pythonBits = (& python.exe -c "import struct; print(struct.calcsize('P') * 8)").Trim()
+$pythonBits = (& $pythonExecutable -c "import struct; print(struct.calcsize('P') * 8)").Trim()
 if ($pythonBits -ne "64") {
     throw "Can Python x64; hien tai Python $pythonBits-bit"
 }
@@ -353,7 +420,7 @@ if ($entrypointHash -ne $vieneu.entrypoint_sha256) {
 Copy-Item -LiteralPath $entrypointSource -Destination $env:DUB_VIENEU_ENTRYPOINT -Force
 
 if (-not (Test-Path -LiteralPath $context.VenvPython -PathType Leaf)) {
-    Invoke-Checked "python.exe" "-m" "venv" $env:DUB_VENV_DIR
+    Invoke-Checked $pythonExecutable "-m" "venv" $env:DUB_VENV_DIR
 }
 $python = $context.VenvPython
 Invoke-Checked $python "-m" "pip" "install" "--disable-pip-version-check" "--upgrade" "pip"
@@ -380,4 +447,11 @@ if ($LASTEXITCODE -ne 0) {
 Write-Output "Cai Windows native hoan tat"
 Write-Output "GPU: $($gpu.Name), sm_$($gpu.Architecture), $($gpu.MemoryMiB) MiB"
 Write-Output "Profile: $selectedProfile"
-Write-Output "Khoi dong: .\windows\stack.ps1 start"
+if (-not $SkipStart) {
+    & (Join-Path $PSScriptRoot "stack.ps1") start
+    if ($OpenDashboard) {
+        Start-Process $env:DUB_API_URL
+    }
+} else {
+    Write-Output "Khoi dong: .\windows\stack.ps1 start"
+}

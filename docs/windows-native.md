@@ -9,22 +9,19 @@ Prowlarr và qBittorrent không được installer Windows cài hay quản lý.
 
 - Windows 10 22H2 x64, build 19045 trở lên.
 - NVIDIA RTX 20, 30, 40 hoặc 50 có ít nhất 6 GiB VRAM.
-- NVIDIA driver tối thiểu 560.76 với CUDA 12.6 hoặc 570.65 với CUDA 12.8.
-- CUDA Toolkit 12.6 hoặc 12.8; RTX 50 (`sm_120`) bắt buộc 12.8.
-- cuDNN 9 cho CUDA 12.x để chạy lớp convolution của Whisper/CTranslate2. Installer
-  ưu tiên DLL trong PyTorch `cu128` và sẽ từ chối hoàn tất nếu probe CUDA không đạt.
-- Python 3.11 hoặc 3.12 x64, có `python.exe` trong `PATH`.
-- Git for Windows, CMake, Ninja và FFmpeg (`ffmpeg.exe`, `ffprobe.exe`) trong `PATH`.
-- Visual Studio 2022 Build Tools với workload **Desktop development with C++**.
 - RAM tối thiểu 16 GiB và dung lượng trống tối thiểu 25/35/55 GiB tương ứng profile
   `minimal`/`balanced`/`maximum`, chưa tính phim và output.
 
-Nguồn cài chính thức: [CUDA Toolkit 12.8](https://developer.nvidia.com/cuda-12-8-0-download-archive),
-[Python for Windows](https://www.python.org/downloads/windows/),
-[Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/),
-[Git for Windows](https://git-scm.com/download/win),
-[CMake](https://cmake.org/download/) và [FFmpeg](https://ffmpeg.org/download.html).
-Ninja có thể cài bằng `winget install Ninja-build.Ninja` nếu máy có WinGet.
+Không cần cài prerequisite phần mềm trước. Bootstrap tự nâng quyền qua một hộp thoại
+UAC, cài hoặc repair WinGet theo quy trình Microsoft, rồi cài phần còn thiếu: Python
+3.12 x64, Git, CMake, Ninja, FFmpeg, Visual Studio 2022 C++ Build Tools, NVIDIA driver
+và CUDA Toolkit 12.8. CUDA 12.6/12.8 tương thích đang có được giữ lại. cuDNN 9 được
+lấy từ wheel PyTorch `cu128` và được kiểm tra bằng probe GPU trước khi hoàn tất.
+
+Nguồn tự động là [WinGet](https://learn.microsoft.com/windows/package-manager/winget/),
+bootstrapper [Visual Studio 2022 Build Tools](https://aka.ms/vs/17/release/vs_BuildTools.exe)
+và package `Nvidia.CUDA` 12.8. Các installer chạy silent nhưng Windows vẫn hiện UAC;
+đây là bước xác nhận quyền quản trị không thể và không nên bỏ qua.
 
 | Dòng GPU | CUDA target | Trạng thái Windows | Profile |
 |---|---|---|---|
@@ -38,23 +35,30 @@ RTX 50 luôn bị khóa ở `minimal` cho đến khi có báo cáo nghiệm thu 
 
 ## Cài đặt
 
-Clone repository và mở PowerShell trong thư mục vừa clone:
+Mở PowerShell thường và chạy một dòng. Lệnh tải bootstrap về file tạm rồi thực thi;
+không dùng `Invoke-Expression`:
 
 ```powershell
-git clone https://github.com/ngucungcode/thuyet-minh-offline-gpu.git
-cd thuyet-minh-offline-gpu
-Set-ExecutionPolicy -Scope Process Bypass
-.\windows\preflight.ps1
-.\windows\install.ps1 -Profile auto
+$p=Join-Path $env:TEMP "thuyetminh-bootstrap.ps1"; Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/main/windows/bootstrap.ps1" -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p
 ```
+
+Bootstrap tải source vào `%LOCALAPPDATA%\Programs\ThuyetMinhOfflineGPU\source`, yêu
+cầu UAC một lần, tự chọn profile theo VRAM, cài model, khởi động API + worker, chờ health
+check và mở `http://127.0.0.1:8080/`. Nếu đã clone repository thì chỉ cần chạy
+`.\windows\bootstrap.ps1` trong thư mục dự án.
 
 Installer thực hiện các bước fail-closed sau:
 
-1. Kiểm tra Windows build, toolchain, GPU, driver, VRAM và CUDA target thật.
-2. Build `llama.cpp` CUDA từ commit đã khóa riêng cho kiến trúc card hiện tại.
-3. Lấy TIGER và VieNeu đúng commit, rồi xác minh các file overlay bằng SHA-256.
-4. Tạo `.venv-windows`, cài PyTorch 2.8.0 `cu128` và dependency đã khóa.
-5. Chạy kernel FP16, CTranslate2, worker preflight và cài model đã chọn.
+1. Cài/repair prerequisite còn thiếu và làm mới `PATH` ngay trong tiến trình hiện tại.
+2. Kiểm tra Windows build, GPU, driver, VRAM và CUDA target thật.
+3. Build `llama.cpp` CUDA từ commit đã khóa riêng cho kiến trúc card hiện tại.
+4. Lấy TIGER và VieNeu đúng commit, rồi xác minh các file overlay bằng SHA-256.
+5. Tạo `.venv-windows`, cài PyTorch 2.8.0 `cu128` và dependency đã khóa.
+6. Chạy kernel FP16, CTranslate2, worker preflight, cài model và khởi động stack.
+
+Nếu Visual Studio hoặc NVIDIA yêu cầu reboot, installer dừng trước bước build. Khởi
+động lại Windows rồi chạy lại đúng lệnh trên; các bước đã xong được nhận diện và bỏ qua,
+không cài trùng.
 
 Không sao chép `.env.windows`, `.venv-windows` hoặc binary `llama.cpp` đã build sang
 máy khác. Installer pin UUID, compute capability và CUDA Toolkit của đúng GPU.
@@ -70,6 +74,12 @@ Các tùy chọn hữu ích:
 
 # Giới hạn số job compile song song
 .\windows\install.ps1 -Profile auto -BuildJobs 2
+
+# Không tự cài prerequisite và không tự khởi động (chế độ quản trị nâng cao)
+.\windows\install.ps1 -Profile auto -SkipPrerequisites -SkipStart
+
+# Dùng bootstrap nhưng không tự mở trình duyệt
+.\windows\bootstrap.ps1 -NoOpenDashboard
 ```
 
 Muốn đặt model, job và output ở ổ khác, bỏ dấu `#` và sửa `DUB_NATIVE_ROOT` trong
@@ -100,10 +110,12 @@ Có thể dùng CLI qua wrapper để khỏi activate virtual environment:
 
 ## Khắc phục sự cố
 
-- `preflight.ps1` báo thiếu lệnh: đóng và mở lại PowerShell sau khi cài công cụ, rồi
-  kiểm tra `Get-Command python, git, cmake, ninja, ffmpeg, nvcc, nvidia-smi`.
-- Không tìm thấy Visual Studio: mở Visual Studio Installer, Modify Build Tools 2022
-  và bật **Desktop development with C++** cùng MSVC x64/x86 build tools.
+- Installer yêu cầu reboot: khởi động lại Windows rồi chạy lại chính lệnh bootstrap;
+  cache và prerequisite đã cài sẽ được dùng lại.
+- WinGet lỗi: chạy `winget --info`; installer dùng quy trình
+  `Repair-WinGetPackageManager -Force -Latest` chính thức của Microsoft khi thiếu WinGet.
+- Không tìm thấy Visual Studio sau auto-install: xem log `dd_*` mới nhất trong `%TEMP%`;
+  workload bắt buộc là `Microsoft.VisualStudio.Workload.VCTools`.
 - RTX 50 báo thiếu `sm_120`: gỡ CUDA cũ khỏi đầu `PATH`, cài CUDA 12.8 rồi xác minh
   `nvcc --list-gpu-arch | Select-String compute_120`.
 - PyTorch báo `no kernel image`: chạy

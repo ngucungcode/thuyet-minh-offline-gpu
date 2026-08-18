@@ -45,14 +45,12 @@ Dự án không dùng suy luận đám mây, analytics hay telemetry.
 
 Windows 10 22H2 x64 được hỗ trợ bằng bộ PowerShell native cho chế độ MVP
 **upload file cục bộ**: dashboard, API và worker chạy trực tiếp trên Windows, không
-cần WSL2 hay Docker. Trình cài Windows yêu cầu Python 3.11/3.12 x64, Git, CMake,
-Ninja, FFmpeg, Visual Studio 2022 Build Tools (Desktop development with C++), NVIDIA
-driver và CUDA Toolkit 12.6 hoặc 12.8. RTX 50 (`sm_120`) bắt buộc CUDA 12.8 và hiện
-chỉ dùng profile `minimal`. Xem [hướng dẫn Windows native](docs/windows-native.md).
-
-Trình cài không thay NVIDIA driver, CUDA toolkit hoặc PyTorch của nhà cung cấp.
-Docker Compose dành cho host có Docker daemon và NVIDIA Container Toolkit là
-đường triển khai nâng cao.
+cần WSL2 hay Docker. Trình cài Windows tự cài/repair WinGet, Python 3.12 x64, Git,
+CMake, Ninja, FFmpeg, Visual Studio 2022 C++ Build Tools, NVIDIA driver và CUDA
+Toolkit 12.8 khi còn thiếu hoặc không tương thích. CUDA 12.6/12.8 tương thích đang có
+được giữ lại. RTX 50 (`sm_120`) bắt buộc CUDA 12.8 và hiện chỉ dùng profile `minimal`.
+Xem [hướng dẫn Windows native](docs/windows-native.md). Docker Compose dành cho host
+có Docker daemon và NVIDIA Container Toolkit là đường triển khai nâng cao.
 
 ### Ma trận GPU và kiến trúc CUDA
 
@@ -138,21 +136,19 @@ bản và cài `dub` tại `/usr/local/bin/dub`.
 
 ### Windows 10 native
 
-Sau khi cài các prerequisite trong
-[hướng dẫn Windows](docs/windows-native.md), clone repository rồi mở PowerShell tại
-thư mục dự án:
+Mở PowerShell thường và chạy một dòng; installer sẽ hiện UAC một lần, tự cài toàn bộ
+prerequisite, source, runtime, model, khởi động stack và mở dashboard:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\windows\preflight.ps1
-.\windows\install.ps1 -Profile auto
-.\windows\stack.ps1 start
+$p=Join-Path $env:TEMP "thuyetminh-bootstrap.ps1"; Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/ngucungcode/thuyet-minh-offline-gpu/main/windows/bootstrap.ps1" -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p
 ```
 
 Mở `http://127.0.0.1:8080/` để tải MP4/MKV và SRT từ máy. Cấu hình đã sinh nằm trong
 `.env.windows`, còn model, log, job và binary native mặc định nằm dưới
 `%LOCALAPPDATA%\ThuyetMinhOfflineGPU`. Bộ Windows MVP không tự cài hoặc quản lý
-Prowlarr/qBittorrent; luồng upload cục bộ hoạt động độc lập với hai dịch vụ này.
+Prowlarr/qBittorrent; luồng upload cục bộ hoạt động độc lập với hai dịch vụ này. Nếu
+driver hoặc Visual Studio yêu cầu reboot, khởi động lại Windows rồi chạy lại cùng lệnh;
+installer idempotent sẽ tiếp tục từ phần còn thiếu.
 
 Bootstrap mặc định dùng bộ smoke check production, tận dụng pip cache bên trong
 data root và tự dùng tối đa 16 luồng CPU khi build native. Để chạy thêm toàn bộ
