@@ -140,6 +140,24 @@ def _run_project_script(
             typer.echo("Lệnh này chỉ chạy trên máy chủ Linux native", err=True)
             raise typer.Exit(code=2)
         command = ["bash", str(script), *(arguments or [])]
+    elif script.suffix == ".ps1":
+        if platform.system() != "Windows":
+            typer.echo("Lệnh này chỉ chạy trên Windows native", err=True)
+            raise typer.Exit(code=2)
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if powershell is None:
+            typer.echo("Không tìm thấy PowerShell để chạy công cụ Windows", err=True)
+            raise typer.Exit(code=2)
+        command = [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            *(arguments or []),
+        ]
     else:
         command = [sys.executable, str(script), *(arguments or [])]
     try:
@@ -149,6 +167,22 @@ def _run_project_script(
         raise typer.Exit(code=1) from exc
     if result.returncode != 0:
         raise typer.Exit(code=result.returncode)
+
+
+def _run_native_admin_script(
+    linux_path: str,
+    windows_path: str,
+    arguments: list[str] | None = None,
+) -> None:
+    system = platform.system()
+    if system == "Linux":
+        selected = linux_path
+    elif system == "Windows":
+        selected = windows_path
+    else:
+        typer.echo(f"Nền tảng native chưa được hỗ trợ: {system}", err=True)
+        raise typer.Exit(code=2)
+    _run_project_script(selected, arguments)
 
 
 def _error_message(response: httpx.Response) -> str:
@@ -604,7 +638,7 @@ def doctor(
     strict: bool = typer.Option(
         False,
         "--strict",
-        help="Coi cảnh báo môi trường không phải Linux là lỗi.",
+        help="Coi cảnh báo nền tảng native không được hỗ trợ là lỗi.",
     ),
 ) -> None:
     """Kiểm tra source, dung lượng, runtime GPU và API mà không sửa hệ thống."""
@@ -643,8 +677,14 @@ def doctor(
             f"Còn trống {_human_bytes(free_bytes)}",
         )
 
-    if platform.system() == "Linux":
-        for command in ("ffmpeg", "ffprobe", "nvidia-smi", "sqlite3"):
+    native_system = platform.system()
+    if native_system in {"Linux", "Windows"}:
+        required_commands = ["ffmpeg", "ffprobe", "nvidia-smi"]
+        if native_system == "Linux":
+            required_commands.append("sqlite3")
+        else:
+            required_commands.extend(("nvcc", "powershell"))
+        for command in required_commands:
             found = shutil.which(command)
             add(command, "ok" if found else "error", found or "Không tìm thấy")
         nvidia_smi = shutil.which("nvidia-smi")
@@ -688,7 +728,7 @@ def doctor(
         add(
             "native-runtime",
             "error" if strict else "warning",
-            "Stack GPU native chỉ được hỗ trợ trên Ubuntu Linux",
+            "Stack GPU native chỉ hỗ trợ Ubuntu Linux và Windows 10/11 x64",
         )
 
     try:
@@ -957,7 +997,7 @@ def recommend_model_profile(
         reason = detection_warning or "Không đọc được VRAM; chọn cấu hình an toàn nhất"
     elif support_tier == GPU_SUPPORT_EXPERIMENTAL:
         profile = "minimal"
-        reason = "CMP 170HX chỉ được hỗ trợ thử nghiệm với profile minimal"
+        reason = "GPU thuộc tier thử nghiệm; chỉ dùng profile minimal"
     elif detected >= 22_528:
         profile = "maximum"
         reason = "Đủ VRAM cho Gemma 4 31B Q4"
@@ -1021,7 +1061,7 @@ def install_model_profile(
     required_vram_mib = _PROFILE_MINIMUM_VRAM_MIB[profile]
     if support_tier == GPU_SUPPORT_EXPERIMENTAL and profile != "minimal":
         typer.echo(
-            "CMP 170HX chỉ được hỗ trợ thử nghiệm với profile minimal",
+            "GPU thuộc tier thử nghiệm; chỉ được dùng profile minimal",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1661,30 +1701,38 @@ def fetch_artifact(
 
 @stack_app.command("start")
 def stack_start() -> None:
-    """Khởi động API, worker, Prowlarr và qBittorrent."""
+    """Khởi động stack native (Windows: API và worker local-upload)."""
 
-    _run_project_script("scripts/native-stack.sh", ["start"])
+    _run_native_admin_script(
+        "scripts/native-stack.sh", "windows/stack.ps1", ["start"]
+    )
 
 
 @stack_app.command("stop")
 def stack_stop() -> None:
-    """Dừng sạch stack native mà không dùng SIGKILL."""
+    """Dừng stack native và các tiến trình con được quản lý."""
 
-    _run_project_script("scripts/native-stack.sh", ["stop"])
+    _run_native_admin_script(
+        "scripts/native-stack.sh", "windows/stack.ps1", ["stop"]
+    )
 
 
 @stack_app.command("restart")
 def stack_restart() -> None:
     """Khởi động lại sạch toàn bộ stack native."""
 
-    _run_project_script("scripts/native-stack.sh", ["restart"])
+    _run_native_admin_script(
+        "scripts/native-stack.sh", "windows/stack.ps1", ["restart"]
+    )
 
 
 @stack_app.command("status")
 def stack_status() -> None:
-    """Hiển thị trạng thái bốn tiến trình native."""
+    """Hiển thị trạng thái các tiến trình native."""
 
-    _run_project_script("scripts/native-stack.sh", ["status"])
+    _run_native_admin_script(
+        "scripts/native-stack.sh", "windows/stack.ps1", ["status"]
+    )
 
 
 @stack_app.command("logs")
@@ -1693,21 +1741,35 @@ def stack_logs(
 ) -> None:
     """Hiển thị phần cuối log của toàn bộ dịch vụ."""
 
-    _run_project_script("scripts/native-stack.sh", ["logs", str(lines)])
+    if platform.system() == "Windows":
+        _run_project_script("windows/stack.ps1", ["logs", "-Lines", str(lines)])
+    else:
+        _run_native_admin_script(
+            "scripts/native-stack.sh",
+            "windows/stack.ps1",
+            ["logs", str(lines)],
+        )
 
 
 @stack_app.command("foreground")
 def stack_foreground() -> None:
-    """Chạy Supervisor foreground cho startup command của nhà cung cấp VM."""
+    """Chạy stack foreground cho terminal hoặc startup command."""
 
-    _run_project_script("scripts/native-stack.sh", ["foreground"])
+    _run_native_admin_script(
+        "scripts/native-stack.sh", "windows/stack.ps1", ["foreground"]
+    )
 
 
 @stack_app.command("preflight")
 def stack_preflight() -> None:
     """Chạy kiểm tra native đầy đủ bằng user dịch vụ."""
 
-    _run_project_script("scripts/native-preflight.sh")
+    if platform.system() == "Windows":
+        _run_project_script("windows/preflight.ps1", ["-RequireRuntime"])
+    else:
+        _run_native_admin_script(
+            "scripts/native-preflight.sh", "windows/preflight.ps1"
+        )
 
 
 @stack_app.command("init-services")
@@ -1716,6 +1778,13 @@ def stack_init_services(
     yes: bool = typer.Option(False, "--yes"),
 ) -> None:
     """Khóa WebUI về loopback và tạo/cập nhật secret dịch vụ."""
+
+    if platform.system() == "Windows":
+        typer.echo(
+            "Windows MVP chỉ hỗ trợ upload cục bộ; chưa tự quản lý Prowlarr/qBittorrent",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     if rotate_secrets and not yes:
         raise typer.BadParameter(
@@ -1735,6 +1804,16 @@ def stack_acceptance(
     ),
 ) -> None:
     """Chạy cổng nghiệm thu đã khóa cho runtime GPU."""
+
+    if platform.system() == "Windows":
+        if phase != "basic":
+            typer.echo(
+                "Windows MVP hiện chỉ có acceptance basic qua preflight",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _run_project_script("windows/preflight.ps1", ["-RequireRuntime"])
+        return
 
     scripts = {
         "basic": ["scripts/native-acceptance.sh"],

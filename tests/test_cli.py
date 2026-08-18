@@ -17,6 +17,50 @@ from dub_server.gpu import NvidiaGpu
 runner = CliRunner()
 
 
+def test_native_admin_dispatches_to_windows_powershell(monkeypatch) -> None:
+    calls: list[tuple[str, list[str] | None]] = []
+    monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        cli,
+        "_run_project_script",
+        lambda path, arguments=None: calls.append((path, arguments)),
+    )
+
+    cli._run_native_admin_script(
+        "scripts/native-stack.sh", "windows/stack.ps1", ["start"]
+    )
+
+    assert calls == [("windows/stack.ps1", ["start"])]
+
+
+def test_native_admin_rejects_unknown_platform(monkeypatch) -> None:
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+
+    result = runner.invoke(cli.app, ["stack", "status"])
+
+    assert result.exit_code == 2
+    assert "Nền tảng native chưa được hỗ trợ" in result.stderr
+
+
+def test_stack_preflight_keeps_platform_specific_arguments(monkeypatch) -> None:
+    calls: list[tuple[str, list[str] | None]] = []
+    monkeypatch.setattr(
+        cli,
+        "_run_project_script",
+        lambda path, arguments=None: calls.append((path, arguments)),
+    )
+
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
+    cli.stack_preflight()
+    monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
+    cli.stack_preflight()
+
+    assert calls == [
+        ("scripts/native-preflight.sh", None),
+        ("windows/preflight.ps1", ["-RequireRuntime"]),
+    ]
+
+
 def test_help_exposes_complete_command_tree() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
@@ -739,6 +783,23 @@ def test_cmp_170hx_is_never_recommended_above_minimal(monkeypatch) -> None:
     assert payload["support_tier"] == "experimental"
 
 
+def test_rtx_50_is_never_recommended_above_minimal(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "inspect_gpu",
+        lambda **_kwargs: _gpu_report(
+            _gpu("NVIDIA GeForce RTX 5080", vram_mib=16_384, capability="12.0")
+        ),
+    )
+
+    result = runner.invoke(cli.app, ["models", "recommend"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["profile"] == "minimal"
+    assert payload["support_tier"] == "experimental"
+
+
 def test_model_profile_install_rejects_vram_floor_before_download(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
@@ -772,7 +833,7 @@ def test_cmp_170hx_cannot_install_balanced_profile(monkeypatch) -> None:
     )
 
     assert result.exit_code == 1
-    assert "chỉ được hỗ trợ thử nghiệm với profile minimal" in result.stderr
+    assert "chỉ được dùng profile minimal" in result.stderr
 
 
 def test_structured_validation_error_is_human_readable() -> None:

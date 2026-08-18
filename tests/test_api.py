@@ -426,6 +426,7 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
         ("NVIDIA RTX 3090", "8.6", "supported"),
         ("Tesla V100-SXM2-32GB", "7.0", "maintenance-limited"),
         ("NVIDIA CMP 170HX", "8.0", "experimental"),
+        ("NVIDIA GeForce RTX 5080", "12.0", "experimental"),
     ],
 )
 def test_health_exposes_selected_gpu_support_tier(

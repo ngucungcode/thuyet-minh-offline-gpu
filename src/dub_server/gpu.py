@@ -10,7 +10,9 @@ import csv
 import importlib
 import json
 import os
+import platform
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -23,10 +25,15 @@ CUDA_TOOLKIT_MINIMUM_DRIVERS = {
     "12.6": (560, 28, 3),
     "12.8": MIN_DRIVER,
 }
+MIN_WINDOWS_DRIVER = (570, 65)
+CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS = {
+    "12.6": (560, 76),
+    "12.8": MIN_WINDOWS_DRIVER,
+}
 MIN_COMPUTE_CAPABILITY = (7, 0)
 MIN_VRAM_MIB = 6144
 SUPPORTED_CUDA_ARCHITECTURES = frozenset(
-    {(7, 0), (7, 5), (8, 0), (8, 6), (8, 9), (9, 0)}
+    {(7, 0), (7, 5), (8, 0), (8, 6), (8, 9), (9, 0), (12, 0)}
 )
 SUPPORTED_CT2_COMPUTE_TYPES = frozenset({"float16", "int8_float16"})
 GPU_SUPPORT_SUPPORTED = "supported"
@@ -95,6 +102,8 @@ def gpu_support_tier(gpu: NvidiaGpu) -> str:
     capability = _version_tuple(gpu.compute_capability)
     if capability == (7, 0):
         return GPU_SUPPORT_MAINTENANCE_LIMITED
+    if capability == (12, 0):
+        return GPU_SUPPORT_EXPERIMENTAL
     normalized_name = "".join(gpu.name.lower().split())
     if "cmp170hx" in normalized_name:
         return GPU_SUPPORT_EXPERIMENTAL
@@ -119,7 +128,28 @@ def _run_command(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
 def probe_nvcc_release() -> str:
     """Return the host toolkit feature release used by native artifacts."""
 
-    result = _run_command(("/usr/local/cuda/bin/nvcc", "--version"))
+    candidates: list[str] = []
+    configured_compiler = os.environ.get("CUDACXX", "").strip()
+    if configured_compiler:
+        candidates.append(configured_compiler)
+    configured_toolkit = os.environ.get("CUDA_PATH", "").strip()
+    if configured_toolkit:
+        candidates.append(
+            os.fspath(Path(configured_toolkit) / "bin" / "nvcc.exe")
+        )
+    if os.name != "nt":
+        candidates.append("/usr/local/cuda/bin/nvcc")
+    discovered = shutil.which("nvcc")
+    if discovered:
+        candidates.append(discovered)
+    nvcc = next(
+        (candidate for candidate in candidates if Path(candidate).is_file()),
+        None,
+    )
+    if nvcc is None:
+        raise RuntimeError("nvcc was not found in CUDACXX, CUDA_PATH, or PATH")
+
+    result = _run_command((nvcc, "--version"))
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exit code {result.returncode}"
         raise RuntimeError(f"nvcc failed: {detail}")
@@ -245,12 +275,20 @@ def inspect_gpu(
     failures: list[str] = []
     warnings: list[str] = []
     configured_toolkit = (expected_cuda_toolkit_version or "").strip()
+    driver_matrix = (
+        CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS
+        if platform.system() == "Windows"
+        else CUDA_TOOLKIT_MINIMUM_DRIVERS
+    )
+    default_minimum_driver = (
+        MIN_WINDOWS_DRIVER if platform.system() == "Windows" else MIN_DRIVER
+    )
     if minimum_driver is None:
-        minimum_driver = CUDA_TOOLKIT_MINIMUM_DRIVERS.get(
+        minimum_driver = driver_matrix.get(
             configured_toolkit,
-            MIN_DRIVER,
+            default_minimum_driver,
         )
-    if configured_toolkit and configured_toolkit not in CUDA_TOOLKIT_MINIMUM_DRIVERS:
+    if configured_toolkit and configured_toolkit not in driver_matrix:
         failures.append(
             "configured installed runtime CUDA toolkit version is invalid: "
             f"{configured_toolkit}"
@@ -377,6 +415,8 @@ def inspect_gpu(
                 f"compute capability {gpu.compute_capability} < "
                 f"{minimum_compute_capability[0]}.{minimum_compute_capability[1]}"
             )
+        if capability == (12, 0) and configured_toolkit == "12.6":
+            gpu_failures.append("compute capability 12.0 requires CUDA toolkit 12.8")
         if gpu.memory_total_mib < minimum_vram_mib:
             gpu_failures.append(f"VRAM {gpu.memory_total_mib} MiB < {minimum_vram_mib} MiB")
         if gpu_failures:
@@ -401,7 +441,9 @@ def inspect_gpu(
         if selected_tier == GPU_SUPPORT_MAINTENANCE_LIMITED:
             warnings.append("logical CUDA device 0 uses maintenance-limited Volta sm_70")
         if selected_tier == GPU_SUPPORT_EXPERIMENTAL:
-            warnings.append("logical CUDA device 0 uses experimental CMP 170HX support")
+            warnings.append(
+                "logical CUDA device 0 uses an experimental GPU support tier"
+            )
 
     ctranslate2_status = ctranslate2_probe()
     if not ctranslate2_status.available:
@@ -501,6 +543,7 @@ __all__ = [
     "GPU_SUPPORT_MAINTENANCE_LIMITED",
     "GPU_SUPPORT_SUPPORTED",
     "CUDA_TOOLKIT_MINIMUM_DRIVERS",
+    "CUDA_TOOLKIT_MINIMUM_WINDOWS_DRIVERS",
     "NvidiaGpu",
     "gpu_support_tier",
     "probe_nvcc_release",

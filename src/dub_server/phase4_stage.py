@@ -252,7 +252,8 @@ def build_narration_synthesizer(
         )
         selected_piper_binary: str | Path = piper_binary
         if os.fspath(piper_binary) == "piper":
-            venv_piper = Path(python_executable).absolute().parent / "piper"
+            executable_name = "piper.exe" if os.name == "nt" else "piper"
+            venv_piper = Path(python_executable).absolute().parent / executable_name
             if venv_piper.is_file():
                 selected_piper_binary = venv_piper
         return PiperNarrationSynthesizer(

@@ -32,7 +32,8 @@
         80,
         86,
         89,
-        90
+        90,
+        120
       ],
       "cuda_default_build_architecture": 86,
       "cmake_flags": [

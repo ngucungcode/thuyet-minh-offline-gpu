@@ -113,3 +113,48 @@ jobs:
         run: |
           npm run embed
           git diff --exit-code -- ../src/dub_server/web_static
+
+  windows-contract:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[test]"
+
+      - name: Parse PowerShell entrypoints
+        shell: powershell
+        run: |
+          $parseErrors = New-Object System.Collections.Generic.List[string]
+          Get-ChildItem windows -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            foreach ($parseError in $errors) {
+              $parseErrors.Add("$($_.Name): $($parseError.Message)")
+            }
+          }
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | Write-Error
+            exit 1
+          }
+
+      - name: Run Windows contracts
+        run: >-
+          python -m pytest -q
+          tests/test_windows_native_contract.py
+          tests/test_gpu.py
+          tests/test_release_contract.py
+          tests/test_cli.py

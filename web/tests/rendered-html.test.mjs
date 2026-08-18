@@ -81,7 +81,7 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.match(page, /health\?\.status === "ok" && gpuReady/);
   assert.match(page, /const gpuWarnings = \(health\?\.gpu\?\.warnings \?\? \[\]\)/);
   assert.match(page, /maintenance-limited Volta sm_70/);
-  assert.match(page, /experimental CMP 170HX support/);
+  assert.match(page, /experimental GPU support tier/);
   assert.match(page, /const gpuSupportTier = health\?\.gpu\?\.support_tier \?\? null/);
   assert.match(page, /"maintenance-limited": "Bảo trì giới hạn"/);
   assert.match(page, /experimental: "Thử nghiệm"/);
