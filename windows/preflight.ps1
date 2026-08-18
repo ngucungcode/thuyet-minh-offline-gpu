@@ -6,9 +6,11 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot "prerequisites.ps1")
 
 $context = Initialize-DubWindowsEnvironment
 $checks = New-Object System.Collections.Generic.List[object]
+Update-DubProcessPath
 
 function Add-Check {
     param([string]$Name, [string]$Status, [string]$Message)
@@ -32,19 +34,30 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     }
 }
 
-foreach ($commandName in @("python", "git", "cmake", "ninja", "ffmpeg", "ffprobe", "nvidia-smi", "nvcc")) {
+$pythonExecutable = Get-DubPythonExecutable
+if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
+    Add-Check "python" "error" "Khong tim thay Python 3.11/3.12 x64"
+} else {
+    Add-Check "python" "ok" $pythonExecutable
+}
+
+foreach ($commandName in @("git.exe", "cmake.exe", "ninja.exe", "ffmpeg.exe", "ffprobe.exe", "nvidia-smi.exe", "nvcc.exe")) {
     $command = Get-Command $commandName -ErrorAction SilentlyContinue
+    $checkName = $commandName.Replace(".exe", "")
     if ($null -eq $command) {
-        Add-Check $commandName "error" "Khong tim thay trong PATH"
+        Add-Check $checkName "error" "Khong tim thay trong PATH"
     } else {
-        Add-Check $commandName "ok" $command.Source
+        Add-Check $checkName "ok" $command.Source
     }
 }
 
 $gpuFields = $null
 $gpuArchitecture = $null
 try {
-    $pythonSummary = (& python -c "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')").Trim()
+    if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
+        throw "Can Python 3.11/3.12 x64"
+    }
+    $pythonSummary = (& $pythonExecutable -c "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')").Trim()
     $pythonFields = $pythonSummary -split ";"
     if ($pythonFields.Count -ne 2 -or $pythonFields[0] -notin @("3.11", "3.12") -or $pythonFields[1] -ne "64") {
         throw "Can Python 3.11/3.12 x64; hien tai $pythonSummary"
