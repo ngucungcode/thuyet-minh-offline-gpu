@@ -47,7 +47,11 @@ function Install-DubProjectSource {
     try {
         [void](New-Item -ItemType Directory -Force -Path $expanded)
         $archiveUrl = "https://github.com/ngucungcode/thuyet-minh-offline-gpu/archive/refs/heads/$SourceRef.zip"
-        Write-Output "Dang tai source $SourceRef tu GitHub..."
+        # Keep progress messages off the success stream. The caller captures this
+        # function's success output as the project path, so Write-Output here would
+        # turn $projectRoot into an array and make PowerShell try to execute this
+        # message instead of install.ps1.
+        Write-Host "Dang tai source $SourceRef tu GitHub..."
         Invoke-WebRequest -UseBasicParsing -Uri $archiveUrl -OutFile $archive
         Expand-Archive -LiteralPath $archive -DestinationPath $expanded
         $sourceRoot = Get-ChildItem -LiteralPath $expanded -Directory |
@@ -81,7 +85,11 @@ if ([string]::IsNullOrWhiteSpace($projectRoot)) {
     if (-not [IO.Path]::IsPathRooted($InstallRoot)) {
         throw "InstallRoot phai la duong dan Windows tuyet doi"
     }
-    $projectRoot = Install-DubProjectSource -Destination ([IO.Path]::GetFullPath($InstallRoot))
+    $resolvedProjectRoots = @(Install-DubProjectSource -Destination ([IO.Path]::GetFullPath($InstallRoot)))
+    if ($resolvedProjectRoots.Count -ne 1) {
+        throw "Bootstrap source resolver tra ve du lieu khong hop le"
+    }
+    $projectRoot = [string]$resolvedProjectRoots[0]
 }
 
 $installer = Join-Path $projectRoot "windows\install.ps1"

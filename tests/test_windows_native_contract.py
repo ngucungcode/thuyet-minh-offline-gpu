@@ -104,6 +104,9 @@ def test_windows_installer_automates_native_prerequisites_and_startup() -> None:
     assert "archive/refs/heads/$SourceRef.zip" in bootstrap
     assert "Invoke-WebRequest" in bootstrap
     assert "Expand-Archive" in bootstrap
+    assert 'Write-Host "Dang tai source $SourceRef tu GitHub..."' in bootstrap
+    assert 'Write-Output "Dang tai source $SourceRef tu GitHub..."' not in bootstrap
+    assert "$resolvedProjectRoots.Count -ne 1" in bootstrap
     assert 'Join-Path $projectRoot "windows\\install.ps1"' in bootstrap
     assert "OpenDashboard" in bootstrap
 
