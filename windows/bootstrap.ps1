@@ -2,6 +2,8 @@
 param(
     [ValidateSet("auto", "minimal", "balanced", "maximum")]
     [string]$Profile = "auto",
+    [ValidateSet("auto", "cpu", "gpu")]
+    [string]$ComputeMode = "auto",
     [switch]$SkipModels,
     [switch]$SkipStart,
     [switch]$NoOpenDashboard,
@@ -30,15 +32,35 @@ function Get-BundledProjectRoot {
     return $null
 }
 
+function Copy-DubDirectoryContents {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    [void](New-Item -ItemType Directory -Force -Path $Destination)
+    foreach ($item in (Get-ChildItem -LiteralPath $Source -Force)) {
+        $target = Join-Path $Destination $item.Name
+        if ($item.PSIsContainer) {
+            Copy-DubDirectoryContents -Source $item.FullName -Destination $target
+        } else {
+            Copy-Item -LiteralPath $item.FullName -Destination $target -Force
+        }
+    }
+}
+
 function Install-DubProjectSource {
     param([Parameter(Mandatory = $true)][string]$Destination)
 
-    if (Test-Path -LiteralPath $Destination) {
+    $destinationExists = Test-Path -LiteralPath $Destination
+    if ($destinationExists) {
         $existingInstaller = Join-Path $Destination "windows\install.ps1"
-        if (Test-Path -LiteralPath $existingInstaller -PathType Leaf) {
-            return [IO.Path]::GetFullPath($Destination)
+        $existingManifest = Join-Path $Destination "native\components.lock.json"
+        if (-not (Test-Path -LiteralPath $Destination -PathType Container) -or
+            -not (Test-Path -LiteralPath $existingInstaller -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $existingManifest -PathType Leaf)) {
+            throw "Thu muc cai dat da ton tai nhung khong phai source hop le: $Destination"
         }
-        throw "Thu muc cai dat da ton tai nhung khong phai source hop le: $Destination"
     }
 
     $temporaryRoot = Join-Path $env:TEMP ("thuyetminh-bootstrap-" + [Guid]::NewGuid().ToString("N"))
@@ -65,7 +87,12 @@ function Install-DubProjectSource {
         }
         $parent = Split-Path -Parent $Destination
         [void](New-Item -ItemType Directory -Force -Path $parent)
-        Move-Item -LiteralPath $sourceRoot.FullName -Destination $Destination
+        if ($destinationExists) {
+            Write-Host "Dang cap nhat source $SourceRef da tai truoc do..."
+            Copy-DubDirectoryContents -Source $sourceRoot.FullName -Destination $Destination
+        } else {
+            Move-Item -LiteralPath $sourceRoot.FullName -Destination $Destination
+        }
         return [IO.Path]::GetFullPath($Destination)
     } finally {
         if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {
@@ -95,6 +122,7 @@ if ([string]::IsNullOrWhiteSpace($projectRoot)) {
 $installer = Join-Path $projectRoot "windows\install.ps1"
 $installerArguments = @{
     Profile = $Profile
+    ComputeMode = $ComputeMode
     BuildJobs = $BuildJobs
 }
 if ($SkipModels) { $installerArguments.SkipModels = $true }

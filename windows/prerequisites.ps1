@@ -24,6 +24,7 @@ function Assert-DubWindowsPlatform {
 function Add-DubPathCandidate {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [System.Collections.Generic.List[string]]$Paths,
         [string]$Path
     )
@@ -103,6 +104,26 @@ function Get-DubCommandPath {
     return $command.Source
 }
 
+function Invoke-DubNativeProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    try {
+        $output = (& $FilePath @Arguments 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -ne 0) {
+            return $null
+        }
+        return $output
+    } catch {
+        # Windows PowerShell 5.1 turns native stderr into an ErrorRecord when
+        # ErrorActionPreference is Stop. A failed discovery probe is simply a
+        # missing candidate; prerequisite installation handles it later.
+        return $null
+    }
+}
+
 function Get-DubPythonExecutable {
     Update-DubProcessPath
     $candidates = New-Object System.Collections.Generic.List[string]
@@ -112,8 +133,10 @@ function Get-DubPythonExecutable {
     $launcher = Get-Command "py.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $launcher) {
         foreach ($selector in @("-3.12", "-3.11")) {
-            $resolved = (& $launcher.Source $selector -c "import sys; print(sys.executable)" 2>$null | Select-Object -Last 1)
-            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($resolved)) {
+            $resolved = Invoke-DubNativeProbe -FilePath $launcher.Source -Arguments @(
+                $selector, "-c", "import sys; print(sys.executable)"
+            )
+            if (-not [string]::IsNullOrWhiteSpace($resolved)) {
                 $candidates.Add($resolved.Trim())
             }
         }
@@ -142,13 +165,11 @@ function Get-DubPythonExecutable {
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             continue
         }
-        try {
-            $summary = (& $candidate -c "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')" 2>$null | Select-Object -Last 1)
-            if ($LASTEXITCODE -eq 0 -and $summary -match '^(3\.11|3\.12);64$') {
-                return [IO.Path]::GetFullPath($candidate)
-            }
-        } catch {
-            continue
+        $summary = Invoke-DubNativeProbe -FilePath $candidate -Arguments @(
+            "-c", "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')"
+        )
+        if ($summary -match '^(3\.11|3\.12);64$') {
+            return [IO.Path]::GetFullPath($candidate)
         }
     }
     return $null
@@ -321,7 +342,65 @@ function Install-DubCuda {
     return $compatible
 }
 
+function Get-DubEligibleGpu {
+    Update-DubProcessPath
+    $smi = Get-DubCommandPath -Name "nvidia-smi.exe"
+    if ([string]::IsNullOrWhiteSpace($smi)) {
+        return $null
+    }
+    try {
+        $line = (& $smi --query-gpu=uuid,name,driver_version,memory.total,compute_cap --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            return $null
+        }
+        $fields = $line -split '\s*,\s*'
+        if ($fields.Count -ne 5) {
+            return $null
+        }
+        $architecture = [int]$fields[4].Replace(".", "")
+        return [PSCustomObject]@{
+            Uuid = $fields[0]
+            Name = $fields[1]
+            Driver = $fields[2]
+            MemoryMiB = [int]$fields[3]
+            Capability = $fields[4]
+            Architecture = $architecture
+            Eligible = ($architecture -in @(70, 75, 80, 86, 89, 90, 120) -and [int]$fields[3] -ge 6144)
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Resolve-DubComputeMode {
+    param(
+        [ValidateSet("auto", "cpu", "gpu")]
+        [string]$Requested = "auto"
+    )
+    if ($Requested -eq "cpu") {
+        return "cpu"
+    }
+    $gpu = Get-DubEligibleGpu
+    if ($Requested -eq "gpu") {
+        if ($null -eq $gpu) {
+            throw "Khong tim thay NVIDIA GPU de chay GPU mode; dung -ComputeMode cpu"
+        }
+        if (-not $gpu.Eligible) {
+            throw "GPU $($gpu.Name) (sm_$($gpu.Architecture), $($gpu.MemoryMiB) MiB) khong nam trong ma tran release; dung -ComputeMode cpu"
+        }
+        return "gpu"
+    }
+    if ($null -ne $gpu -and $gpu.Eligible) {
+        return "gpu"
+    }
+    return "cpu"
+}
+
 function Test-DubPrerequisitesReady {
+    param(
+        [ValidateSet("cpu", "gpu")]
+        [string]$ComputeMode = "gpu"
+    )
     Update-DubProcessPath
     if ([string]::IsNullOrWhiteSpace((Get-DubPythonExecutable))) {
         return $false
@@ -334,10 +413,17 @@ function Test-DubPrerequisitesReady {
     if ([string]::IsNullOrWhiteSpace((Get-DubVisualStudioCppInstallation))) {
         return $false
     }
+    if ($ComputeMode -eq "cpu") {
+        return $true
+    }
     return $null -ne (Get-DubCudaCompatibility)
 }
 
 function Install-DubPrerequisites {
+    param(
+        [ValidateSet("cpu", "gpu")]
+        [string]$ComputeMode = "gpu"
+    )
     Assert-DubWindowsPlatform
     if (-not (Test-DubAdministrator)) {
         throw "Can quyen Administrator de tu dong cai prerequisite"
@@ -361,7 +447,12 @@ function Install-DubPrerequisites {
         throw "Gyan.FFmpeg da cai nhung khong tim thay ffprobe.exe"
     }
     Install-DubVisualStudioCpp
-    $cuda = Install-DubCuda
+    $cuda = $null
+    if ($ComputeMode -eq "gpu") {
+        $cuda = Install-DubCuda
+    } else {
+        Write-Host "CPU mode: bo qua NVIDIA driver va CUDA Toolkit."
+    }
     Update-DubProcessPath
 
     return [PSCustomObject]@{

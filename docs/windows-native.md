@@ -2,21 +2,26 @@
 
 Tài liệu này cài Thuyết Minh Offline GPU trực tiếp trên Windows 10, không dùng
 WSL2 hoặc Docker. Bản Windows hiện là MVP local-upload: dashboard, API, worker và
-toàn bộ pipeline GPU chạy native; người dùng tải MP4/MKV và SRT từ trình duyệt.
+toàn bộ pipeline chạy native trên GPU được hỗ trợ hoặc CPU compatibility mode; người
+dùng tải MP4/MKV và SRT từ trình duyệt.
 Prowlarr và qBittorrent không được installer Windows cài hay quản lý.
 
 ## Yêu cầu
 
 - Windows 10 22H2 x64, build 19045 trở lên.
-- NVIDIA RTX 20, 30, 40 hoặc 50 có ít nhất 6 GiB VRAM.
+- GPU mode: NVIDIA RTX 20, 30, 40 hoặc 50 có ít nhất 6 GiB VRAM.
+- CPU mode: không cần CUDA; dùng được với GPU cũ/không hỗ trợ như MX250, nhưng ASR,
+  dịch và đặc biệt TIGER-DnR sẽ rất chậm.
 - RAM tối thiểu 16 GiB và dung lượng trống tối thiểu 25/35/55 GiB tương ứng profile
   `minimal`/`balanced`/`maximum`, chưa tính phim và output.
 
 Không cần cài prerequisite phần mềm trước. Bootstrap tự nâng quyền qua một hộp thoại
 UAC, cài hoặc repair WinGet theo quy trình Microsoft, rồi cài phần còn thiếu: Python
-3.12 x64, Git, CMake, Ninja, FFmpeg, Visual Studio 2022 C++ Build Tools, NVIDIA driver
-và CUDA Toolkit 12.8. CUDA 12.6/12.8 tương thích đang có được giữ lại. cuDNN 9 được
-lấy từ wheel PyTorch `cu128` và được kiểm tra bằng probe GPU trước khi hoàn tất.
+3.12 x64, Git, CMake, Ninja, FFmpeg và Visual Studio 2022 C++ Build Tools. Chỉ GPU
+mode mới cài NVIDIA CUDA Toolkit 12.8; CPU mode bỏ qua hoàn toàn package
+`Nvidia.CUDA` và dùng wheel PyTorch CPU. CUDA 12.6/12.8 tương thích đang có được giữ
+lại. Trong GPU mode, cuDNN 9 lấy từ wheel PyTorch `cu128` và được kiểm tra bằng probe
+GPU trước khi hoàn tất.
 
 Nguồn tự động là [WinGet](https://learn.microsoft.com/windows/package-manager/winget/),
 bootstrapper [Visual Studio 2022 Build Tools](https://aka.ms/vs/17/release/vs_BuildTools.exe)
@@ -30,7 +35,9 @@ và package `Nvidia.CUDA` 12.8. Các installer chạy silent nhưng Windows vẫ
 | RTX 40 | `sm_89` | Hỗ trợ | Theo VRAM |
 | RTX 50 | `sm_120` | Thử nghiệm, cần CUDA 12.8 | Chỉ `minimal` |
 
-`auto` chọn `minimal` từ 6 GiB, `balanced` từ 8 GiB và `maximum` từ 22 GiB.
+`-ComputeMode auto` chọn GPU khi card nằm trong ma trận và có ít nhất 6 GiB VRAM;
+nếu không, installer tự chuyển sang CPU. GPU mode chọn `minimal` từ 6 GiB,
+`balanced` từ 8 GiB và `maximum` từ 22 GiB. CPU mode chỉ dùng profile `minimal`.
 RTX 50 luôn bị khóa ở `minimal` cho đến khi có báo cáo nghiệm thu phần cứng đầy đủ.
 
 ## Cài đặt
@@ -43,18 +50,18 @@ $p=Join-Path $env:TEMP "thuyetminh-bootstrap.ps1"; Invoke-WebRequest -UseBasicPa
 ```
 
 Bootstrap tải source vào `%LOCALAPPDATA%\Programs\ThuyetMinhOfflineGPU\source`, yêu
-cầu UAC một lần, tự chọn profile theo VRAM, cài model, khởi động API + worker, chờ health
-check và mở `http://127.0.0.1:8080/`. Nếu đã clone repository thì chỉ cần chạy
+cầu UAC một lần, tự chọn CPU/GPU và profile, cài model, khởi động API + worker, chờ
+health check và mở `http://127.0.0.1:8080/`. Nếu đã clone repository thì chỉ cần chạy
 `.\windows\bootstrap.ps1` trong thư mục dự án.
 
 Installer thực hiện các bước fail-closed sau:
 
 1. Cài/repair prerequisite còn thiếu và làm mới `PATH` ngay trong tiến trình hiện tại.
-2. Kiểm tra Windows build, GPU, driver, VRAM và CUDA target thật.
-3. Build `llama.cpp` CUDA từ commit đã khóa riêng cho kiến trúc card hiện tại.
+2. Chọn compute mode; chỉ GPU mode mới kiểm tra driver, VRAM và CUDA target.
+3. Build `llama.cpp` từ commit đã khóa với backend CPU hoặc đúng CUDA architecture.
 4. Lấy TIGER và VieNeu đúng commit, rồi xác minh các file overlay bằng SHA-256.
-5. Tạo `.venv-windows`, cài PyTorch 2.8.0 `cu128` và dependency đã khóa.
-6. Chạy kernel FP16, CTranslate2, worker preflight, cài model và khởi động stack.
+5. Tạo `.venv-windows`, cài PyTorch 2.8.0 CPU hoặc `cu128` và dependency đã khóa.
+6. Chạy phép nhân tensor, CTranslate2, worker preflight, cài model và khởi động stack.
 
 Nếu Visual Studio hoặc NVIDIA yêu cầu reboot, installer dừng trước bước build. Khởi
 động lại Windows rồi chạy lại đúng lệnh trên; các bước đã xong được nhận diện và bỏ qua,
@@ -66,6 +73,9 @@ máy khác. Installer pin UUID, compute capability và CUDA Toolkit của đúng
 Các tùy chọn hữu ích:
 
 ```powershell
+# Ép CPU mode; phù hợp MX250 hoặc máy chưa có GPU hỗ trợ
+.\windows\install.ps1 -ComputeMode cpu -Profile minimal
+
 # Chỉ dựng runtime, chưa tải model lớn
 .\windows\install.ps1 -Profile minimal -SkipModels
 
@@ -81,6 +91,24 @@ Các tùy chọn hữu ích:
 # Dùng bootstrap nhưng không tự mở trình duyệt
 .\windows\bootstrap.ps1 -NoOpenDashboard
 ```
+
+CPU mode đặt faster-whisper ở `int8`, llama.cpp ở `--n-gpu-layers 0` và chạy
+TIGER-DnR bằng PyTorch CPU với chunk nhỏ hơn. Đây là đường tương thích để chạy được,
+không phải cấu hình hiệu năng; nên thử video ngắn trước.
+
+## Nâng cấp từ CPU lên RTX
+
+Sau khi lắp RTX được hỗ trợ và cài/reboot driver nếu Windows yêu cầu, chạy lại
+bootstrap với GPU mode. Installer giữ model/data, tạo binary llama.cpp CUDA riêng và
+tự thay wheel PyTorch CPU bằng `cu128`:
+
+```powershell
+.\windows\bootstrap.ps1 -ComputeMode gpu -Profile auto
+```
+
+Không cần xóa `.venv-windows`, `.env.windows` hoặc thư mục model. Nếu card mới vẫn
+không đạt ma trận release, lệnh dừng trước khi cài CUDA và hướng dẫn quay lại
+`-ComputeMode cpu`.
 
 Muốn đặt model, job và output ở ổ khác, bỏ dấu `#` và sửa `DUB_NATIVE_ROOT` trong
 `.env.windows` trước khi chạy installer lần đầu.
@@ -112,6 +140,8 @@ Có thể dùng CLI qua wrapper để khỏi activate virtual environment:
 
 - Installer yêu cầu reboot: khởi động lại Windows rồi chạy lại chính lệnh bootstrap;
   cache và prerequisite đã cài sẽ được dùng lại.
+- MX250 hoặc GPU dưới 6 GiB: dùng `-ComputeMode cpu`; không cố cài CUDA 12.8 cho card
+  đó. Chạy video ngắn để ước lượng thời gian trước khi xử lý phim dài.
 - WinGet lỗi: chạy `winget --info`; installer dùng quy trình
   `Repair-WinGetPackageManager -Force -Latest` chính thức của Microsoft khi thiếu WinGet.
 - Không tìm thấy Visual Studio sau auto-install: xem log `dd_*` mới nhất trong `%TEMP%`;

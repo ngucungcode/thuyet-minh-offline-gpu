@@ -33,7 +33,7 @@ _LANGUAGE_ALIASES = {
     "zho": "zh",
 }
 _AUTO_LANGUAGES = {"", "auto", "und", "unknown", "mul", "zxx"}
-_COMPUTE_TYPES = {"float16", "int8_float16", "bfloat16"}
+_COMPUTE_TYPES = {"float16", "int8_float16", "bfloat16", "int8"}
 
 
 class TranscriptionError(RuntimeError):
@@ -81,11 +81,15 @@ class FasterWhisperRecognizer:
         *,
         model_factory: ModelFactory | None = None,
         language_confidence_threshold: float = 0.5,
+        device: str = "cuda",
     ) -> None:
         if not 0.0 <= language_confidence_threshold <= 1.0:
             raise ValueError("Ngưỡng nhận diện ngôn ngữ không hợp lệ")
         self._model_factory = model_factory
         self._language_threshold = language_confidence_threshold
+        if device not in {"cuda", "cpu"}:
+            raise ValueError("Thiết bị ASR phải là cuda hoặc cpu")
+        self._device = device
 
     def transcribe(
         self,
@@ -131,7 +135,7 @@ class FasterWhisperRecognizer:
         try:
             model = factory(
                 str(local_model),
-                device="cuda",
+                device=self._device,
                 compute_type=compute_type,
                 local_files_only=True,
             )
@@ -184,7 +188,7 @@ class FasterWhisperRecognizer:
         except (OSError, RuntimeError, ValueError) as error:
             raise TranscriptionError(
                 "asr_failed",
-                "Nhận dạng lời nói bằng GPU thất bại",
+                "Nhận dạng lời nói cục bộ thất bại",
                 retryable=True,
             ) from error
         finally:

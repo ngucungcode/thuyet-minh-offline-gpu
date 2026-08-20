@@ -10,7 +10,7 @@ import json
 import stat
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     )
     gpu_report_path: Path = Path("/state/gpu-health.json")
     gpu_report_max_age_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
+    compute_mode: Literal["gpu", "cpu"] = "gpu"
     selected_gpu_uuid: str | None = None
     selected_cuda_architecture: str | None = None
     selected_cuda_toolkit_version: str | None = None
@@ -70,6 +71,7 @@ class Settings(BaseSettings):
     llama_max_output_tokens: int = Field(default=512, ge=32, le=2048)
     llama_startup_timeout_seconds: float = Field(default=300.0, ge=10.0, le=900.0)
     llama_request_timeout_seconds: float = Field(default=180.0, ge=5.0, le=900.0)
+    llama_gpu_layers: int = Field(default=-1, ge=-1, le=999)
     timing_rewrite_max_attempts: int = Field(default=3, ge=0, le=3)
     tiger_source_dir: Path = Path("/opt/tiger")
     vieneu_entrypoint: Path = Path("/opt/vieneu/vieneu-offline.py")

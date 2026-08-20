@@ -191,6 +191,7 @@ def build_audio_separator(
     chunk_seconds: float = 120.0,
     context_seconds: float = 4.0,
     batch_size: int = 1,
+    device: str = "cuda",
 ) -> CinematicAudioSeparator:
     """Build production TIGER-DnR from a verified local model directory."""
 
@@ -210,6 +211,7 @@ def build_audio_separator(
             chunk_seconds=chunk_seconds,
             context_seconds=context_seconds,
             batch_size=batch_size,
+            device=device,
         )
     )
 
@@ -273,6 +275,7 @@ def build_timing_text_rewriter(
     max_output_tokens: int,
     startup_timeout_seconds: float,
     request_timeout_seconds: float,
+    gpu_layers: int = -1,
 ) -> TimingTextRewriter:
     """Build the local duration-aware rewriter used by natural timing."""
 
@@ -285,6 +288,7 @@ def build_timing_text_rewriter(
         max_output_tokens=max_output_tokens,
         startup_timeout_seconds=startup_timeout_seconds,
         request_timeout_seconds=request_timeout_seconds,
+        gpu_layers=gpu_layers,
     )
 
 
@@ -358,6 +362,7 @@ class Phase4Stage:
         separation_chunk_seconds: float = 120.0,
         separation_context_seconds: float = 4.0,
         separation_batch_size: int = 1,
+        separation_device: str = "cuda",
         separator_factory: SeparatorFactory | None = None,
         synthesizer_factory: SynthesizerFactory | None = None,
         timing_rewriter_factory: TimingRewriterFactory | None = None,
@@ -400,6 +405,7 @@ class Phase4Stage:
         self._separation_chunk_seconds = separation_chunk_seconds
         self._separation_context_seconds = separation_context_seconds
         self._separation_batch_size = separation_batch_size
+        self._separation_device = separation_device
 
         self._separator_factory = separator_factory or self._build_separator
         self._synthesizer_factory = synthesizer_factory or self._build_synthesizer
@@ -3366,6 +3372,7 @@ class Phase4Stage:
             chunk_seconds=self._separation_chunk_seconds,
             context_seconds=self._separation_context_seconds,
             batch_size=self._separation_batch_size,
+            device=self._separation_device,
         )
 
     def _build_synthesizer(
@@ -3529,6 +3536,7 @@ def build_phase4_stage(
             max_output_tokens=settings.llama_max_output_tokens,
             startup_timeout_seconds=settings.llama_startup_timeout_seconds,
             request_timeout_seconds=settings.llama_request_timeout_seconds,
+            gpu_layers=settings.llama_gpu_layers,
         )
 
     return Phase4Stage(
@@ -3550,6 +3558,7 @@ def build_phase4_stage(
         separation_chunk_seconds=settings.separation_chunk_seconds,
         separation_context_seconds=settings.separation_context_seconds,
         separation_batch_size=settings.separation_batch_size,
+        separation_device=settings.compute_mode,
         timing_rewriter_factory=timing_rewriter_factory,
         timing_rewrite_max_attempts=settings.timing_rewrite_max_attempts,
         narration_target_lufs=settings.narration_target_lufs,

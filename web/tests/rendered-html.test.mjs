@@ -48,7 +48,7 @@ test("server-renders the Vietnamese GPU dashboard", async () => {
   const html = await response.text();
   assert.match(html, /<html lang="vi">/i);
   assert.match(html, /<title>Lồng Tiếng GPU Studio<\/title>/i);
-  assert.match(html, /THUYẾT MINH NGOẠI TUYẾN · NVIDIA CUDA/);
+  assert.match(html, /THUYẾT MINH NGOẠI TUYẾN · CPU \/ NVIDIA CUDA/);
   assert.doesNotMatch(html, /THUYẾT MINH NGOẠI TUYẾN · RTX/);
   assert.match(html, /Biến một bản phim thành bản thuyết minh Việt/);
   assert.match(html, /Chỉ nội dung bạn có quyền sử dụng/);
@@ -75,11 +75,13 @@ test("keeps the dashboard API contract local-first", async () => {
 
   assert.match(page, /api<Health>\("\/health"\)/);
   assert.match(page, /gpus\?: GpuDevice\[\]/);
+  assert.match(page, /compute_mode\?: "cpu" \| "gpu"/);
+  assert.match(page, /const cpuMode = health\?\.compute_mode === "cpu"/);
   assert.match(page, /support_tier\?: GpuSupportTier \| null/);
   assert.match(page, /const gpuDevices = health\?\.gpu\?\.gpus \?\? \[\]/);
   assert.match(page, /const gpuReady = health\?\.gpu\?\.ready === true/);
   assert.match(page, /health\?\.status === "ok" && gpuReady/);
-  assert.match(page, /const gpuWarnings = \(health\?\.gpu\?\.warnings \?\? \[\]\)/);
+  assert.match(page, /const gpuWarnings = \(cpuMode \? \[\] : health\?\.gpu\?\.warnings \?\? \[\]\)/);
   assert.match(page, /maintenance-limited Volta sm_70/);
   assert.match(page, /experimental GPU support tier/);
   assert.match(page, /const gpuSupportTier = health\?\.gpu\?\.support_tier \?\? null/);
@@ -93,6 +95,7 @@ test("keeps the dashboard API contract local-first", async () => {
   assert.match(page, /formatGpuMemory\(gpu\.memory_total_mib\)/);
   assert.match(page, /!gpuReady \|\|/);
   assert.match(page, /GPU chưa sẵn sàng/);
+  assert.match(page, /CPU compatibility mode/);
   assert.doesNotMatch(page, /THUYẾT MINH NGOẠI TUYẾN · RTX/);
   assert.match(styles, /\.health-pill\.degraded \.pulse/);
   assert.match(styles, /\.gpu-device-list/);

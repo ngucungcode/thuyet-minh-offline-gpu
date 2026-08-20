@@ -2,6 +2,8 @@
 param(
     [ValidateSet("auto", "minimal", "balanced", "maximum")]
     [string]$Profile = "auto",
+    [ValidateSet("auto", "cpu", "gpu")]
+    [string]$ComputeMode = "auto",
     [switch]$SkipModels,
     [switch]$SkipPrerequisites,
     [switch]$SkipStart,
@@ -17,6 +19,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 . (Join-Path $PSScriptRoot "prerequisites.ps1")
+$selectedComputeMode = Resolve-DubComputeMode -Requested $ComputeMode
 
 function Invoke-DubElevatedPrerequisites {
     $windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -27,7 +30,8 @@ function Invoke-DubElevatedPrerequisites {
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
         ('"{0}"' -f $PSCommandPath),
         "-PrerequisitesOnly",
-        "-Elevated"
+        "-Elevated",
+        "-ComputeMode", $selectedComputeMode
     )
 
     Write-Output "Dang yeu cau quyen Administrator qua UAC de cai prerequisite..."
@@ -49,14 +53,14 @@ if ($PrerequisitesOnly) {
     if (-not $Elevated -or -not (Test-DubAdministrator)) {
         throw "PrerequisitesOnly chi duoc goi boi tien trinh UAC cua installer"
     }
-    $result = Install-DubPrerequisites
+    $result = Install-DubPrerequisites -ComputeMode $selectedComputeMode
     if ($result.RestartRequired) {
         exit 3010
     }
     exit 0
 }
 if (-not $SkipPrerequisites -and -not (Test-DubAdministrator)) {
-    if (Test-DubPrerequisitesReady) {
+    if (Test-DubPrerequisitesReady -ComputeMode $selectedComputeMode) {
         $prerequisitesInstalledByChild = $true
     } else {
         if ($Elevated) {
@@ -231,54 +235,87 @@ function Set-ProfileDefaults {
 }
 
 function Install-LlamaCpp {
-    param($Context, $Manifest, $Gpu, [int]$Jobs)
+    param(
+        $Context,
+        $Manifest,
+        $Gpu,
+        [ValidateSet("cpu", "gpu")][string]$ComputeMode,
+        [string]$EnvFile,
+        [int]$Jobs
+    )
     Import-VisualStudioEnvironment
     $llama = $Manifest.components.llama_cpp
-    $supportedVersions = @($llama.cuda_supported_versions)
-    $nvccOutput = (& nvcc.exe --version) -join "`n"
-    $match = [Regex]::Match($nvccOutput, '\brelease\s+([0-9]+\.[0-9]+)\b')
-    if (-not $match.Success) {
-        throw "nvcc khong bao CUDA release"
-    }
-    $cudaVersion = $match.Groups[1].Value
-    if ($supportedVersions -notcontains $cudaVersion) {
-        throw "CUDA $cudaVersion khong nam trong ma tran $($supportedVersions -join ', ')"
-    }
-    $supportedArchitectures = @($llama.cuda_supported_architectures | ForEach-Object { [int]$_ })
-    if ($supportedArchitectures -notcontains $Gpu.Architecture) {
-        throw "GPU $($Gpu.Name) sm_$($Gpu.Architecture) chua duoc release nay ho tro"
-    }
-    $nvccArchitectures = (& nvcc.exe --list-gpu-arch) -join "`n"
-    if ($nvccArchitectures -notmatch ("(?m)^compute_" + $Gpu.Architecture + "$")) {
-        throw "CUDA toolkit khong build duoc sm_$($Gpu.Architecture)"
+    $cudaVersion = $null
+    if ($ComputeMode -eq "gpu") {
+        $supportedVersions = @($llama.cuda_supported_versions)
+        $nvccOutput = (& nvcc.exe --version) -join "`n"
+        $match = [Regex]::Match($nvccOutput, '\brelease\s+([0-9]+\.[0-9]+)\b')
+        if (-not $match.Success) {
+            throw "nvcc khong bao CUDA release"
+        }
+        $cudaVersion = $match.Groups[1].Value
+        if ($supportedVersions -notcontains $cudaVersion) {
+            throw "CUDA $cudaVersion khong nam trong ma tran $($supportedVersions -join ', ')"
+        }
+        $supportedArchitectures = @($llama.cuda_supported_architectures | ForEach-Object { [int]$_ })
+        if ($supportedArchitectures -notcontains $Gpu.Architecture) {
+            throw "GPU $($Gpu.Name) sm_$($Gpu.Architecture) chua duoc release nay ho tro"
+        }
+        $nvccArchitectures = (& nvcc.exe --list-gpu-arch) -join "`n"
+        if ($nvccArchitectures -notmatch ("(?m)^compute_" + $Gpu.Architecture + "$")) {
+            throw "CUDA toolkit khong build duoc sm_$($Gpu.Architecture)"
+        }
     }
 
     $source = Join-Path $Context.NativeRoot ("cache\llama.cpp-" + $llama.commit)
     Sync-LockedRepository -Repository $llama.repository -Commit $llama.commit -Destination $source
-    $build = Join-Path $source ("build-windows-cuda" + $cudaVersion.Replace(".", "") + "-sm" + $Gpu.Architecture)
-    $target = Join-Path $Context.NativeRoot "opt\llama.cpp"
+    $shortCommit = $llama.commit.Substring(0, 7)
+    if ($ComputeMode -eq "gpu") {
+        $runtimeTag = "cuda" + $cudaVersion.Replace(".", "") + "-sm" + $Gpu.Architecture
+    } else {
+        $runtimeTag = "cpu"
+    }
+    $build = Join-Path $source ("build-windows-" + $runtimeTag)
+    $target = Join-Path $Context.NativeRoot ("opt\llama.cpp-" + $shortCommit + "-" + $runtimeTag)
     $server = Join-Path $target "llama-server.exe"
     $receipt = Join-Path $target "build-receipt.json"
     if ((Test-Path -LiteralPath $server -PathType Leaf) -and (Test-Path -LiteralPath $receipt -PathType Leaf)) {
         $saved = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
         if ($saved.commit -eq $llama.commit -and
-            $saved.cuda_version -eq $cudaVersion -and
-            [int]$saved.cuda_architecture -eq $Gpu.Architecture) {
+            $saved.compute_mode -eq $ComputeMode -and
+            ($ComputeMode -eq "cpu" -or
+                ($saved.cuda_version -eq $cudaVersion -and
+                 [int]$saved.cuda_architecture -eq $Gpu.Architecture))) {
+            Set-DubEnvValue -Path $EnvFile -Name "DUB_LLAMA_SERVER_BINARY" -Value $server
             return
         }
-        throw "llama.cpp target da ton tai nhung receipt khong khop; xoa $target roi cai lai"
+        throw "llama.cpp target da ton tai nhung receipt khong khop: $target"
     }
 
-    Invoke-Checked "cmake.exe" "-S" $source "-B" $build "-G" "Ninja" `
-        "-DCMAKE_BUILD_TYPE=Release" `
-        ("-DCMAKE_CUDA_COMPILER=" + $env:CUDACXX) `
-        ("-DCMAKE_CUDA_ARCHITECTURES=" + $Gpu.Architecture) `
-        "-DGGML_CUDA=ON" `
-        "-DLLAMA_CURL=OFF" `
-        "-DLLAMA_BUILD_UI=OFF" `
-        "-DLLAMA_USE_PREBUILT_UI=OFF" `
-        "-DLLAMA_BUILD_TESTS=OFF" `
+    $configureArguments = @(
+        "-S"
+        $source
+        "-B"
+        $build
+        "-G"
+        "Ninja"
+        "-DCMAKE_BUILD_TYPE=Release"
+        "-DLLAMA_CURL=OFF"
+        "-DLLAMA_BUILD_UI=OFF"
+        "-DLLAMA_USE_PREBUILT_UI=OFF"
+        "-DLLAMA_BUILD_TESTS=OFF"
         "-DLLAMA_BUILD_EXAMPLES=ON"
+    )
+    if ($ComputeMode -eq "gpu") {
+        $configureArguments += @(
+            ("-DCMAKE_CUDA_COMPILER=" + $env:CUDACXX),
+            ("-DCMAKE_CUDA_ARCHITECTURES=" + $Gpu.Architecture),
+            "-DGGML_CUDA=ON"
+        )
+    } else {
+        $configureArguments += "-DGGML_CUDA=OFF"
+    }
+    Invoke-Checked "cmake.exe" @configureArguments
     Invoke-Checked "cmake.exe" "--build" $build "--target" "llama-server" "llama-cli" "--parallel" $Jobs
     [void](New-Item -ItemType Directory -Force -Path $target)
     Copy-Item -Path (Join-Path $build "bin\*") -Destination $target -Recurse -Force
@@ -289,14 +326,19 @@ function Install-LlamaCpp {
     if ($versionOutput -notmatch $llama.commit.Substring(0, 7)) {
         throw "llama-server.exe khong khop commit lock"
     }
-    [PSCustomObject]@{
+    $receiptPayload = [ordered]@{
         schema_version = 1
         release = $llama.release
         commit = $llama.commit
-        cuda_version = $cudaVersion
-        cuda_architecture = $Gpu.Architecture
+        compute_mode = $ComputeMode
         llama_server_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $server).Hash.ToLowerInvariant()
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receipt -Encoding UTF8
+    }
+    if ($ComputeMode -eq "gpu") {
+        $receiptPayload["cuda_version"] = $cudaVersion
+        $receiptPayload["cuda_architecture"] = $Gpu.Architecture
+    }
+    [PSCustomObject]$receiptPayload | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $receipt -Encoding UTF8
+    Set-DubEnvValue -Path $EnvFile -Name "DUB_LLAMA_SERVER_BINARY" -Value $server
 }
 
 $projectRoot = Get-DubProjectRoot
@@ -312,8 +354,8 @@ Assert-DubWindowsPlatform
 $prerequisiteResult = $null
 if (-not $SkipPrerequisites -and
     -not $prerequisitesInstalledByChild -and
-    -not (Test-DubPrerequisitesReady)) {
-    $prerequisiteResult = Install-DubPrerequisites
+    -not (Test-DubPrerequisitesReady -ComputeMode $selectedComputeMode)) {
+    $prerequisiteResult = Install-DubPrerequisites -ComputeMode $selectedComputeMode
     if ($prerequisiteResult.RestartRequired) {
         throw "Prerequisite da cai xong nhung Windows can reboot. Khoi dong lai may roi chay lai dung lenh install.ps1; installer se tiep tuc idempotent"
     }
@@ -325,11 +367,14 @@ if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
     throw "Can Python 3.11 hoac 3.12 x64; dung -SkipPrerequisites chi khi da cai san day du"
 }
 $env:DUB_WINDOWS_BASE_PYTHON = $pythonExecutable
-foreach ($required in @("git.exe", "cmake.exe", "ninja.exe", "ffmpeg.exe", "ffprobe.exe", "nvidia-smi.exe", "nvcc.exe")) {
+foreach ($required in @("git.exe", "cmake.exe", "ninja.exe", "ffmpeg.exe", "ffprobe.exe")) {
     [void](Require-Command $required)
 }
-if ([string]::IsNullOrWhiteSpace($env:CUDACXX)) {
-    $env:CUDACXX = Require-Command "nvcc.exe"
+if ($selectedComputeMode -eq "gpu") {
+    [void](Require-Command "nvidia-smi.exe")
+    if ([string]::IsNullOrWhiteSpace($env:CUDACXX)) {
+        $env:CUDACXX = Require-Command "nvcc.exe"
+    }
 }
 
 $pythonVersion = (& $pythonExecutable -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
@@ -349,37 +394,46 @@ $manifest = Get-Content -LiteralPath (Join-Path $projectRoot "native\components.
 if ($manifest.schema_version -ne 1) {
     throw "native/components.lock.json khong hop le"
 }
-$gpu = Get-GpuBinding
-if ($gpu.MemoryMiB -lt 6144) {
-    throw "GPU $($gpu.Name) chi co $($gpu.MemoryMiB) MiB; can it nhat 6144 MiB"
-}
-$supportedArchitectures = @($manifest.components.llama_cpp.cuda_supported_architectures | ForEach-Object { [int]$_ })
-if ($supportedArchitectures -notcontains $gpu.Architecture) {
-    throw "GPU $($gpu.Name) sm_$($gpu.Architecture) khong nam trong ma tran release"
-}
-$nvccText = (& nvcc.exe --version) -join "`n"
-$nvccMatch = [Regex]::Match($nvccText, '\brelease\s+([0-9]+\.[0-9]+)\b')
-if (-not $nvccMatch.Success) {
-    throw "nvcc khong bao CUDA release"
-}
-$cudaRelease = $nvccMatch.Groups[1].Value
-$windowsDriverFloors = @{ "12.6" = "560.76"; "12.8" = "570.65" }
-if (-not $windowsDriverFloors.ContainsKey($cudaRelease)) {
-    throw "CUDA $cudaRelease khong nam trong ma tran Windows 12.6/12.8"
-}
-if (([version]$gpu.Driver) -lt ([version]$windowsDriverFloors[$cudaRelease])) {
-    throw "Driver $($gpu.Driver) thap hon $($windowsDriverFloors[$cudaRelease]) cho CUDA $cudaRelease tren Windows"
-}
-if ($gpu.Capability -eq "12.0" -and $cudaRelease -ne "12.8") {
-    throw "RTX 50 sm_120 can CUDA 12.8"
-}
-$selectedProfile = Select-ModelProfile -Gpu $gpu -Requested $Profile
-$profileFloors = @{ minimal = 6144; balanced = 8192; maximum = 22528 }
-if ($gpu.Capability -eq "12.0" -and $selectedProfile -ne "minimal") {
-    throw "RTX 50 sm_120 dang o tier thu nghiem; chi ho tro profile minimal"
-}
-if ($gpu.MemoryMiB -lt $profileFloors[$selectedProfile]) {
-    throw "Profile $selectedProfile can $($profileFloors[$selectedProfile]) MiB; GPU chi co $($gpu.MemoryMiB) MiB"
+$gpu = $null
+$cudaRelease = $null
+if ($selectedComputeMode -eq "gpu") {
+    $gpu = Get-GpuBinding
+    if ($gpu.MemoryMiB -lt 6144) {
+        throw "GPU $($gpu.Name) chi co $($gpu.MemoryMiB) MiB; can it nhat 6144 MiB"
+    }
+    $supportedArchitectures = @($manifest.components.llama_cpp.cuda_supported_architectures | ForEach-Object { [int]$_ })
+    if ($supportedArchitectures -notcontains $gpu.Architecture) {
+        throw "GPU $($gpu.Name) sm_$($gpu.Architecture) khong nam trong ma tran release"
+    }
+    $nvccText = (& nvcc.exe --version) -join "`n"
+    $nvccMatch = [Regex]::Match($nvccText, '\brelease\s+([0-9]+\.[0-9]+)\b')
+    if (-not $nvccMatch.Success) {
+        throw "nvcc khong bao CUDA release"
+    }
+    $cudaRelease = $nvccMatch.Groups[1].Value
+    $windowsDriverFloors = @{ "12.6" = "560.76"; "12.8" = "570.65" }
+    if (-not $windowsDriverFloors.ContainsKey($cudaRelease)) {
+        throw "CUDA $cudaRelease khong nam trong ma tran Windows 12.6/12.8"
+    }
+    if (([version]$gpu.Driver) -lt ([version]$windowsDriverFloors[$cudaRelease])) {
+        throw "Driver $($gpu.Driver) thap hon $($windowsDriverFloors[$cudaRelease]) cho CUDA $cudaRelease tren Windows"
+    }
+    if ($gpu.Capability -eq "12.0" -and $cudaRelease -ne "12.8") {
+        throw "RTX 50 sm_120 can CUDA 12.8"
+    }
+    $selectedProfile = Select-ModelProfile -Gpu $gpu -Requested $Profile
+    $profileFloors = @{ minimal = 6144; balanced = 8192; maximum = 22528 }
+    if ($gpu.Capability -eq "12.0" -and $selectedProfile -ne "minimal") {
+        throw "RTX 50 sm_120 dang o tier thu nghiem; chi ho tro profile minimal"
+    }
+    if ($gpu.MemoryMiB -lt $profileFloors[$selectedProfile]) {
+        throw "Profile $selectedProfile can $($profileFloors[$selectedProfile]) MiB; GPU chi co $($gpu.MemoryMiB) MiB"
+    }
+} else {
+    if ($Profile -notin @("auto", "minimal")) {
+        throw "CPU mode chi ho tro profile minimal"
+    }
+    $selectedProfile = "minimal"
 }
 $profileDiskGiB = @{ minimal = 25; balanced = 35; maximum = 55 }
 $dataDrive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($context.NativeRoot))
@@ -388,14 +442,29 @@ if ($dataDrive.AvailableFreeSpace -lt $requiredDiskBytes) {
     throw "Profile $selectedProfile can it nhat $($profileDiskGiB[$selectedProfile]) GiB trong tren $($dataDrive.Name)"
 }
 
-Set-DubEnvValue -Path $envFile -Name "CUDA_VISIBLE_DEVICES" -Value $gpu.Uuid
-Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_GPU_UUID" -Value $gpu.Uuid
-Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_CUDA_ARCHITECTURE" -Value ("sm_" + $gpu.Architecture)
-Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_CUDA_TOOLKIT_VERSION" -Value $cudaRelease
+Set-DubEnvValue -Path $envFile -Name "DUB_COMPUTE_MODE" -Value $selectedComputeMode
+if ($selectedComputeMode -eq "gpu") {
+    Set-DubEnvValue -Path $envFile -Name "CUDA_VISIBLE_DEVICES" -Value $gpu.Uuid
+    Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_GPU_UUID" -Value $gpu.Uuid
+    Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_CUDA_ARCHITECTURE" -Value ("sm_" + $gpu.Architecture)
+    Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_CUDA_TOOLKIT_VERSION" -Value $cudaRelease
+    Set-DubEnvValue -Path $envFile -Name "DUB_ASR_COMPUTE_TYPE" -Value "float16"
+    Set-DubEnvValue -Path $envFile -Name "DUB_LLAMA_GPU_LAYERS" -Value "-1"
+    Set-DubEnvValue -Path $envFile -Name "DUB_SEPARATION_CHUNK_SECONDS" -Value "120"
+} else {
+    Set-DubEnvValue -Path $envFile -Name "CUDA_VISIBLE_DEVICES" -Value ""
+    Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_GPU_UUID" -Value ""
+    Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_CUDA_ARCHITECTURE" -Value ""
+    Set-DubEnvValue -Path $envFile -Name "DUB_SELECTED_CUDA_TOOLKIT_VERSION" -Value ""
+    Set-DubEnvValue -Path $envFile -Name "DUB_ASR_COMPUTE_TYPE" -Value "int8"
+    Set-DubEnvValue -Path $envFile -Name "DUB_LLAMA_GPU_LAYERS" -Value "0"
+    Set-DubEnvValue -Path $envFile -Name "DUB_SEPARATION_CHUNK_SECONDS" -Value "30"
+}
 Set-ProfileDefaults -SelectedProfile $selectedProfile -EnvFile $envFile
 
 $context = Initialize-DubWindowsEnvironment
-Install-LlamaCpp -Context $context -Manifest $manifest -Gpu $gpu -Jobs $BuildJobs
+Install-LlamaCpp -Context $context -Manifest $manifest -Gpu $gpu -ComputeMode $selectedComputeMode -EnvFile $envFile -Jobs $BuildJobs
+$context = Initialize-DubWindowsEnvironment
 
 $tiger = $manifest.components.tiger
 $tigerTarget = Join-Path $context.NativeRoot "opt\tiger"
@@ -424,11 +493,26 @@ if (-not (Test-Path -LiteralPath $context.VenvPython -PathType Leaf)) {
 }
 $python = $context.VenvPython
 Invoke-Checked $python "-m" "pip" "install" "--disable-pip-version-check" "--upgrade" "pip"
-Invoke-Checked $python "-m" "pip" "install" "--disable-pip-version-check" "torch==2.8.0" "--index-url" "https://download.pytorch.org/whl/cu128"
+$installedTorchRuntime = Invoke-DubNativeProbe -FilePath $python -Arguments @(
+    "-c", "import torch; print(('gpu' if torch.version.cuda else 'cpu') + ';' + torch.__version__.split('+')[0])"
+)
+if ($installedTorchRuntime -ne ($selectedComputeMode + ";2.8.0")) {
+    Invoke-Checked $python "-m" "pip" "uninstall" "-y" "torch"
+    if ($selectedComputeMode -eq "gpu") {
+        $torchIndex = "https://download.pytorch.org/whl/cu128"
+    } else {
+        $torchIndex = "https://download.pytorch.org/whl/cpu"
+    }
+    Invoke-Checked $python "-m" "pip" "install" "--disable-pip-version-check" "torch==2.8.0" "--index-url" $torchIndex
+}
 Invoke-Checked $python "-m" "pip" "install" "--disable-pip-version-check" "-e" ("${projectRoot}[managed-gpu]")
 Invoke-Checked $python "-m" "pip" "check"
 Invoke-Checked $python "-m" "compileall" "-q" (Join-Path $projectRoot "src")
-Invoke-Checked $python "-c" "import torch; import ctranslate2, faster_whisper, onnxruntime, transformers; assert torch.cuda.is_available(); cap=torch.cuda.get_device_capability(0); arch=f'sm_{cap[0]}{cap[1]}'; assert arch in torch.cuda.get_arch_list(), (arch, torch.cuda.get_arch_list()); x=torch.ones((32,32), device='cuda', dtype=torch.float16); assert float((x@x)[0,0].cpu()) == 32.0"
+if ($selectedComputeMode -eq "gpu") {
+    Invoke-Checked $python "-c" "import torch; import ctranslate2, faster_whisper, onnxruntime, transformers; assert torch.cuda.is_available(); cap=torch.cuda.get_device_capability(0); arch=f'sm_{cap[0]}{cap[1]}'; assert arch in torch.cuda.get_arch_list(), (arch, torch.cuda.get_arch_list()); x=torch.ones((32,32), device='cuda', dtype=torch.float16); assert float((x@x)[0,0].cpu()) == 32.0"
+} else {
+    Invoke-Checked $python "-c" "import torch; import ctranslate2, faster_whisper, onnxruntime, transformers; assert not torch.cuda.is_available(); x=torch.ones((32,32), dtype=torch.float32); assert float((x@x)[0,0]) == 32.0; assert 'int8' in ctranslate2.get_supported_compute_types('cpu')"
+}
 Invoke-Checked $python "-m" "dub_server.worker" "--once"
 
 if ($FullTest) {
@@ -439,13 +523,17 @@ if (-not $SkipModels) {
     Invoke-Checked $python "-m" "dub_server.cli" "models" "install-profile" $selectedProfile "--yes"
 }
 
-& (Join-Path $PSScriptRoot "preflight.ps1") -RequireRuntime
+& (Join-Path $PSScriptRoot "preflight.ps1") -RequireRuntime -ComputeMode $selectedComputeMode
 if ($LASTEXITCODE -ne 0) {
     throw "Windows native preflight that bai"
 }
 
 Write-Output "Cai Windows native hoan tat"
-Write-Output "GPU: $($gpu.Name), sm_$($gpu.Architecture), $($gpu.MemoryMiB) MiB"
+if ($selectedComputeMode -eq "gpu") {
+    Write-Output "GPU: $($gpu.Name), sm_$($gpu.Architecture), $($gpu.MemoryMiB) MiB"
+} else {
+    Write-Output "Compute: CPU compatibility mode (rat cham)"
+}
 Write-Output "Profile: $selectedProfile"
 if (-not $SkipStart) {
     & (Join-Path $PSScriptRoot "stack.ps1") start

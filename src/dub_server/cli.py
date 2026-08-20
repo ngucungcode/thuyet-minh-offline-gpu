@@ -1041,37 +1041,46 @@ def install_model_profile(
     settings = Settings()
     selected_lock = lock_path or settings.models_lock_path
     selected_dir = models_dir or settings.models_dir
-    try:
-        gpu_report = inspect_gpu(
-            require_gpu=True,
-            expected_gpu_uuid=settings.selected_gpu_uuid,
-            expected_cuda_architecture=settings.selected_cuda_architecture,
-            expected_cuda_toolkit_version=settings.selected_cuda_toolkit_version,
-        )
-        selected_gpu = gpu_report.gpus[0]
-    except (GpuPreflightError, IndexError) as exc:
-        message = (
-            "; ".join(exc.report.errors)
-            if isinstance(exc, GpuPreflightError) and exc.report.errors
-            else "không xác định được GPU logical 0"
-        )
-        typer.echo(f"Không thể xác minh GPU trước khi cài profile: {message}", err=True)
-        raise typer.Exit(code=1) from exc
-    support_tier = gpu_support_tier(selected_gpu)
-    required_vram_mib = _PROFILE_MINIMUM_VRAM_MIB[profile]
-    if support_tier == GPU_SUPPORT_EXPERIMENTAL and profile != "minimal":
-        typer.echo(
-            "GPU thuộc tier thử nghiệm; chỉ được dùng profile minimal",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    if selected_gpu.memory_total_mib < required_vram_mib:
-        typer.echo(
-            f"Profile {profile} cần ít nhất {required_vram_mib} MiB VRAM; "
-            f"GPU logical 0 chỉ có {selected_gpu.memory_total_mib} MiB",
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    if settings.compute_mode == "cpu":
+        if profile != "minimal":
+            raise typer.BadParameter("CPU mode chỉ hỗ trợ profile minimal")
+    else:
+        try:
+            gpu_report = inspect_gpu(
+                require_gpu=True,
+                expected_gpu_uuid=settings.selected_gpu_uuid,
+                expected_cuda_architecture=settings.selected_cuda_architecture,
+                expected_cuda_toolkit_version=(
+                    settings.selected_cuda_toolkit_version
+                ),
+            )
+            selected_gpu = gpu_report.gpus[0]
+        except (GpuPreflightError, IndexError) as exc:
+            message = (
+                "; ".join(exc.report.errors)
+                if isinstance(exc, GpuPreflightError) and exc.report.errors
+                else "không xác định được GPU logical 0"
+            )
+            typer.echo(
+                f"Không thể xác minh GPU trước khi cài profile: {message}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+        support_tier = gpu_support_tier(selected_gpu)
+        required_vram_mib = _PROFILE_MINIMUM_VRAM_MIB[profile]
+        if support_tier == GPU_SUPPORT_EXPERIMENTAL and profile != "minimal":
+            typer.echo(
+                "GPU thuộc tier thử nghiệm; chỉ được dùng profile minimal",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if selected_gpu.memory_total_mib < required_vram_mib:
+            typer.echo(
+                f"Profile {profile} cần ít nhất {required_vram_mib} MiB VRAM; "
+                f"GPU logical 0 chỉ có {selected_gpu.memory_total_mib} MiB",
+                err=True,
+            )
+            raise typer.Exit(code=1)
     installed: list[dict[str, Any]] = []
     for model_id in _MODEL_PROFILES[profile]:
         typer.echo(f"Đang cài {model_id}...", err=True)

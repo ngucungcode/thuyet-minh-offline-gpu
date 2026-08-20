@@ -166,6 +166,16 @@ def test_start_uses_shell_free_loopback_gpu_maximum_command(tmp_path: Path) -> N
     assert process.terminated
 
 
+def test_cpu_mode_disables_llama_gpu_layers(tmp_path: Path) -> None:
+    translator, _, _ = _translator(
+        tmp_path,
+        FakeTransport([]),
+        gpu_layers=0,
+    )
+
+    assert translator.command[translator.command.index("--n-gpu-layers") + 1] == "0"
+
+
 def test_local_absolute_binary_and_gguf_are_required(tmp_path: Path) -> None:
     binary, model = _files(tmp_path)
     with pytest.raises(ValueError, match="tuy.t"):

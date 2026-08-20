@@ -359,6 +359,7 @@ class TigerDnrSubprocessRunner:
         poll_interval_seconds: float = 0.1,
         stop_grace_seconds: float = 3.0,
         cuda_device: int = 0,
+        device: str = "cuda",
         source_dir: Path | None = None,
         chunk_seconds: float = 120.0,
         context_seconds: float = 4.0,
@@ -380,7 +381,9 @@ class TigerDnrSubprocessRunner:
             raise ValueError("Thời gian giới hạn phải lớn hơn 0")
         if poll_interval_seconds <= 0 or stop_grace_seconds < 0:
             raise ValueError("Cấu hình theo dõi tiến trình TIGER-DnR không hợp lệ")
-        if cuda_device != 0:
+        if device not in {"cuda", "cpu"}:
+            raise ValueError("Thiết bị TIGER-DnR phải là cuda hoặc cpu")
+        if device == "cuda" and cuda_device != 0:
             raise ValueError(
                 "TIGER-DnR chỉ chấp nhận GPU logical 0; "
                 "hãy chọn GPU vật lý ở installer/container runtime"
@@ -408,6 +411,7 @@ class TigerDnrSubprocessRunner:
         self._poll_interval_seconds = poll_interval_seconds
         self._stop_grace_seconds = stop_grace_seconds
         self._cuda_device = cuda_device
+        self._device = device
         self._source_dir = local_source_dir
         self._chunk_seconds = chunk_seconds
         self._context_seconds = context_seconds
@@ -438,6 +442,8 @@ class TigerDnrSubprocessRunner:
             os.fspath(output),
             "--model-path",
             os.fspath(self._model_path),
+            "--device",
+            self._device,
             "--chunk-seconds",
             f"{self._chunk_seconds:.6f}",
             "--context-seconds",
@@ -454,7 +460,8 @@ class TigerDnrSubprocessRunner:
         # container runtime exposes the selected physical GPU as logical 0.
         # Replacing an inherited UUID with "0" here would select host GPU 0
         # when this short-lived subprocess starts outside a container.
-        environment.setdefault("CUDA_VISIBLE_DEVICES", str(self._cuda_device))
+        if self._device == "cuda":
+            environment.setdefault("CUDA_VISIBLE_DEVICES", str(self._cuda_device))
         environment["TIGER_DNR_MODEL_PATH"] = os.fspath(self._model_path)
         if self._source_dir is not None:
             existing_python_path = environment.get("PYTHONPATH", "")
@@ -530,8 +537,10 @@ class TigerDnrSubprocessRunner:
                 model_id=self._model_id,
                 model_tree_sha256=self._model_tree_sha256,
                 metrics={
-                    "device": "cuda",
-                    "cuda_device": self._cuda_device,
+                    "device": self._device,
+                    "cuda_device": (
+                        self._cuda_device if self._device == "cuda" else None
+                    ),
                     "runtime_elapsed_ms": max(
                         0, round((time.monotonic() - started) * 1000)
                     ),
@@ -770,6 +779,7 @@ def _runtime_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--model-path", required=True, type=Path)
+    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--chunk-seconds", type=float, default=120.0)
     parser.add_argument("--context-seconds", type=float, default=4.0)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -852,7 +862,7 @@ def _run_tiger_runtime(arguments: Sequence[str]) -> int:
         from look2hear.models import TIGERDNR
 
         torch_runtime = torch
-        device = torch.device("cuda")
+        device = torch.device(parsed.device)
         model = TIGERDNR.from_pretrained(
             os.fspath(model_path),
             cache_dir=os.fspath(model_path),

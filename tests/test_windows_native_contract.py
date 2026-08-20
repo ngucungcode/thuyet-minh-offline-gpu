@@ -92,6 +92,8 @@ def test_windows_installer_automates_native_prerequisites_and_startup() -> None:
     assert "Microsoft.VisualStudio.Workload.VCTools" in prerequisites
     assert "Get-DubCudaCompatibility" in prerequisites
     assert "DubPrerequisiteRestartRequired" in prerequisites
+    assert "Invoke-DubNativeProbe" in prerequisites
+    assert "$launcher.Source" in prerequisites
 
     assert "Invoke-DubElevatedPrerequisites" in installer
     assert "-Verb RunAs" in installer
@@ -107,8 +109,21 @@ def test_windows_installer_automates_native_prerequisites_and_startup() -> None:
     assert 'Write-Host "Dang tai source $SourceRef tu GitHub..."' in bootstrap
     assert 'Write-Output "Dang tai source $SourceRef tu GitHub..."' not in bootstrap
     assert "$resolvedProjectRoots.Count -ne 1" in bootstrap
+    assert "Copy-DubDirectoryContents" in bootstrap
+    assert 'Write-Host "Dang cap nhat source $SourceRef da tai truoc do..."' in bootstrap
     assert 'Join-Path $projectRoot "windows\\install.ps1"' in bootstrap
     assert "OpenDashboard" in bootstrap
+    assert "[AllowEmptyCollection()]" in prerequisites
+
+    assert 'ValidateSet("auto", "cpu", "gpu")' in bootstrap
+    assert 'Resolve-DubComputeMode -Requested $ComputeMode' in installer
+    assert 'Install-DubPrerequisites -ComputeMode $selectedComputeMode' in installer
+    assert 'if ($ComputeMode -eq "cpu")' in prerequisites
+    assert 'CPU mode: bo qua NVIDIA driver va CUDA Toolkit.' in prerequisites
+    assert '"-DGGML_CUDA=OFF"' in installer
+    assert '"https://download.pytorch.org/whl/cpu"' in installer
+    assert 'Set-DubEnvValue -Path $envFile -Name "DUB_ASR_COMPUTE_TYPE" -Value "int8"' in installer
+    assert 'Set-DubEnvValue -Path $envFile -Name "DUB_LLAMA_GPU_LAYERS" -Value "0"' in installer
 
 
 def test_windows_stack_validates_process_identity_and_stays_on_loopback() -> None:

@@ -1766,6 +1766,7 @@ def create_app(
         payload = {
             "status": "error" if not healthy else ("degraded" if degraded else "ok"),
             "api_version": "v1",
+            "compute_mode": configured_settings.compute_mode,
             "database": {
                 "status": database_status,
                 "journal_mode": journal_mode,

@@ -151,6 +151,27 @@ jobs:
             exit 1
           }
 
+      - name: Exercise PowerShell prerequisite initialization
+        shell: powershell
+        run: |
+          . "$PWD\windows\prerequisites.ps1"
+          Update-DubProcessPath
+          if ([string]::IsNullOrWhiteSpace($env:Path)) {
+            throw "Update-DubProcessPath returned an empty PATH"
+          }
+          $failedProbe = Invoke-DubNativeProbe -FilePath $env:ComSpec -Arguments @(
+            "/d", "/c", "echo expected-probe-error 1>&2 & exit /b 1"
+          )
+          if ($null -ne $failedProbe) {
+            throw "A failed native probe returned output"
+          }
+          $successfulProbe = Invoke-DubNativeProbe -FilePath $env:ComSpec -Arguments @(
+            "/d", "/c", "echo probe-ok"
+          )
+          if ($successfulProbe.Trim() -ne "probe-ok") {
+            throw "A successful native probe did not return its output"
+          }
+
       - name: Run Windows contracts
         run: >-
           python -m pytest -q
