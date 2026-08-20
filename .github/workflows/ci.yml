@@ -183,6 +183,7 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_windows_native_contract.py
+          tests/test_offline.py
           tests/test_gpu.py
           tests/test_release_contract.py
           tests/test_cli.py

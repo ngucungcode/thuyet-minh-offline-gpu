@@ -178,6 +178,9 @@ def test_windows_defaults_and_documentation_match_local_upload_scope() -> None:
 def test_windows_runtime_uses_executable_suffixes() -> None:
     gpu = _read("src/dub_server/gpu.py")
     phase4 = _read("src/dub_server/phase4_stage.py")
+    worker = _read("src/dub_server/worker.py")
 
     assert '"bin" / "nvcc.exe"' in gpu
     assert '"piper.exe" if os.name == "nt" else "piper"' in phase4
+    assert "runner = asyncio.Runner()" in worker
+    assert worker.index("runner.get_loop()") < worker.index("install_offline_network_guard(")

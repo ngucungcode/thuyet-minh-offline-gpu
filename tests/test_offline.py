@@ -55,3 +55,32 @@ print("offline-guard-ok")
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "offline-guard-ok"
+
+
+def test_offline_guard_allows_a_preinitialized_asyncio_runner() -> None:
+    script = r'''
+import asyncio
+from dub_server.offline import install_offline_network_guard
+
+runner = asyncio.Runner()
+try:
+    runner.get_loop()
+    install_offline_network_guard(allowed_loopback_ports={18081})
+    runner.run(asyncio.sleep(0))
+finally:
+    runner.close()
+print("offline-asyncio-ok")
+'''
+    environment = dict(os.environ)
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = source_root + os.pathsep + environment.get("PYTHONPATH", "")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "offline-asyncio-ok"

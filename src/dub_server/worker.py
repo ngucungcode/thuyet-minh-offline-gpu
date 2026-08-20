@@ -544,12 +544,6 @@ def main() -> None:
     if args.once:
         return
 
-    # No model provisioning, telemetry, API client, or acquisition adapter is
-    # imported after this point. Docker adds network_mode:none; native mode is
-    # additionally fail-closed for Python DNS/TCP through this audit hook.
-    install_offline_network_guard(
-        allowed_loopback_ports={settings.llama_server_port}
-    )
     shutdown = threading.Event()
     _install_signal_handlers(shutdown)
     poll_seconds = (
@@ -557,8 +551,17 @@ def main() -> None:
         if args.poll_seconds is not None
         else settings.offline_worker_poll_seconds
     )
+    # Windows' ProactorEventLoop creates a private loopback socketpair during
+    # initialization. Build that OS-internal wake-up channel before installing
+    # the fail-closed network audit hook; every subsequent Python DNS/TCP call
+    # remains blocked except the locked local llama-server port.
+    runner = asyncio.Runner()
     try:
-        asyncio.run(
+        runner.get_loop()
+        install_offline_network_guard(
+            allowed_loopback_ports={settings.llama_server_port}
+        )
+        runner.run(
             _worker_loop(
                 settings,
                 report,
@@ -569,6 +572,8 @@ def main() -> None:
         )
     except GpuPreflightError as error:
         raise SystemExit(2) from error
+    finally:
+        runner.close()
 
 
 if __name__ == "__main__":
