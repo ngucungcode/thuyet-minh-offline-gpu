@@ -124,6 +124,10 @@ def test_windows_installer_automates_native_prerequisites_and_startup() -> None:
     assert '"https://download.pytorch.org/whl/cpu"' in installer
     assert 'Set-DubEnvValue -Path $envFile -Name "DUB_ASR_COMPUTE_TYPE" -Value "int8"' in installer
     assert 'Set-DubEnvValue -Path $envFile -Name "DUB_LLAMA_GPU_LAYERS" -Value "0"' in installer
+    assert "Get-DubInstalledMemoryBytes" in _read("windows/common.ps1")
+    assert "Get-CimInstance Win32_PhysicalMemory" in _read("windows/common.ps1")
+    assert "$ramBytes = Get-DubInstalledMemoryBytes" in installer
+    assert "$ramBytes = Get-DubInstalledMemoryBytes" in _read("windows/preflight.ps1")
 
 
 def test_windows_stack_validates_process_identity_and_stays_on_loopback() -> None:

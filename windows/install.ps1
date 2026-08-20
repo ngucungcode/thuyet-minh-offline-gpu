@@ -385,9 +385,9 @@ $pythonBits = (& $pythonExecutable -c "import struct; print(struct.calcsize('P')
 if ($pythonBits -ne "64") {
     throw "Can Python x64; hien tai Python $pythonBits-bit"
 }
-$ramBytes = [long](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+$ramBytes = Get-DubInstalledMemoryBytes
 if ($ramBytes -lt 16GB) {
-    throw "Can it nhat 16 GiB RAM"
+    throw "Can it nhat 16 GiB RAM vat ly; hien tai $([Math]::Round($ramBytes / 1GB, 1)) GiB"
 }
 
 $manifest = Get-Content -LiteralPath (Join-Path $projectRoot "native\components.lock.json") -Raw | ConvertFrom-Json

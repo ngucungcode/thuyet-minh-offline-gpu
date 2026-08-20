@@ -5,6 +5,21 @@ function Get-DubProjectRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 
+function Get-DubInstalledMemoryBytes {
+    try {
+        $memoryModules = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)
+        $installedBytes = [long](($memoryModules | Measure-Object -Property Capacity -Sum).Sum)
+        if ($installedBytes -gt 0) {
+            return $installedBytes
+        }
+    } catch {
+        # Some managed Windows environments block Win32_PhysicalMemory. Fall back
+        # to the OS-visible total so preflight can still report a useful result.
+    }
+
+    return [long](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+}
+
 function Set-DubProcessEnvironmentDefault {
     param(
         [Parameter(Mandatory = $true)][string]$Name,

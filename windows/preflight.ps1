@@ -82,9 +82,9 @@ try {
 }
 
 try {
-    $ramBytes = [long](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+    $ramBytes = Get-DubInstalledMemoryBytes
     if ($ramBytes -lt 16GB) {
-        throw "Can it nhat 16 GiB RAM; hien tai $([Math]::Round($ramBytes / 1GB, 1)) GiB"
+        throw "Can it nhat 16 GiB RAM vat ly; hien tai $([Math]::Round($ramBytes / 1GB, 1)) GiB"
     }
     Add-Check "ram" "ok" "$([Math]::Round($ramBytes / 1GB, 1)) GiB"
 } catch {
