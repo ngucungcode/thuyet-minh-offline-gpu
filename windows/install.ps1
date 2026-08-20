@@ -291,6 +291,10 @@ function Install-LlamaCpp {
         }
         throw "llama.cpp target da ton tai nhung receipt khong khop: $target"
     }
+    if (Test-Path -LiteralPath $target) {
+        Write-Output "Dang khoi phuc llama.cpp target chua hoan tat: $target"
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
 
     $configureArguments = @(
         "-S"
@@ -322,8 +326,9 @@ function Install-LlamaCpp {
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
         throw "Build llama.cpp khong tao llama-server.exe"
     }
-    $versionOutput = (& $server --version 2>&1) -join "`n"
-    if ($versionOutput -notmatch $llama.commit.Substring(0, 7)) {
+    $versionOutput = Invoke-DubNativeProbe -FilePath $server -Arguments @("--version") -IncludeStandardError
+    if ([string]::IsNullOrWhiteSpace($versionOutput) -or
+        $versionOutput -notmatch $llama.commit.Substring(0, 7)) {
         throw "llama-server.exe khong khop commit lock"
     }
     $receiptPayload = [ordered]@{

@@ -107,10 +107,28 @@ function Get-DubCommandPath {
 function Invoke-DubNativeProbe {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [switch]$IncludeStandardError
     )
 
     try {
+        if ($IncludeStandardError) {
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+                # Windows PowerShell 5.1 wraps native stderr as ErrorRecord
+                # objects. Capture those records without turning an exit-code
+                # zero version probe into a terminating NativeCommandError.
+                $ErrorActionPreference = "Continue"
+                $output = @(& $FilePath @Arguments 2>&1)
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            if ($exitCode -ne 0) {
+                return $null
+            }
+            return (($output | ForEach-Object { $_.ToString() }) -join "`n")
+        }
         $output = (& $FilePath @Arguments 2>$null | Select-Object -Last 1)
         if ($LASTEXITCODE -ne 0) {
             return $null

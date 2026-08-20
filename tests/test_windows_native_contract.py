@@ -94,6 +94,7 @@ def test_windows_installer_automates_native_prerequisites_and_startup() -> None:
     assert "DubPrerequisiteRestartRequired" in prerequisites
     assert "Invoke-DubNativeProbe" in prerequisites
     assert "$launcher.Source" in prerequisites
+    assert "[switch]$IncludeStandardError" in prerequisites
 
     assert "Invoke-DubElevatedPrerequisites" in installer
     assert "-Verb RunAs" in installer
@@ -124,6 +125,8 @@ def test_windows_installer_automates_native_prerequisites_and_startup() -> None:
     assert '"https://download.pytorch.org/whl/cpu"' in installer
     assert 'Set-DubEnvValue -Path $envFile -Name "DUB_ASR_COMPUTE_TYPE" -Value "int8"' in installer
     assert 'Set-DubEnvValue -Path $envFile -Name "DUB_LLAMA_GPU_LAYERS" -Value "0"' in installer
+    assert '-Arguments @("--version") -IncludeStandardError' in installer
+    assert "Dang khoi phuc llama.cpp target chua hoan tat" in installer
     assert "Get-DubInstalledMemoryBytes" in _read("windows/common.ps1")
     assert "Get-CimInstance Win32_PhysicalMemory" in _read("windows/common.ps1")
     assert "$ramBytes = Get-DubInstalledMemoryBytes" in installer

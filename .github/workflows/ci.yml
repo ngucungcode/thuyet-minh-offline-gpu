@@ -171,6 +171,13 @@ jobs:
           if ($successfulProbe.Trim() -ne "probe-ok") {
             throw "A successful native probe did not return its output"
           }
+          $successfulStderrProbe = Invoke-DubNativeProbe `
+            -FilePath $env:ComSpec `
+            -Arguments @("/d", "/c", "echo probe-stderr-ok 1>&2 & exit /b 0") `
+            -IncludeStandardError
+          if ($successfulStderrProbe -notmatch "probe-stderr-ok") {
+            throw "A successful native stderr probe did not return its output"
+          }
 
       - name: Run Windows contracts
         run: >-
