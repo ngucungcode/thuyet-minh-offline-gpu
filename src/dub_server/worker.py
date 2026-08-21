@@ -9,6 +9,7 @@ import signal
 import threading
 import time
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any
 
 from .asr import FasterWhisperRecognizer
@@ -45,14 +46,34 @@ _PHASE4_QUEUE = (
 
 
 def _inspect_configured_gpu(settings: Settings) -> GpuPreflightReport:
-    """Inspect logical CUDA 0 and bind it to the native runtime when configured."""
+    """Inspect CUDA strictly for GPU mode and diagnostically for CPU mode."""
 
-    return inspect_gpu(
-        require_gpu=True,
-        expected_gpu_uuid=settings.selected_gpu_uuid,
-        expected_cuda_architecture=settings.selected_cuda_architecture,
-        expected_cuda_toolkit_version=settings.selected_cuda_toolkit_version,
+    report = inspect_gpu(
+        require_gpu=settings.compute_mode == "gpu",
+        expected_gpu_uuid=(
+            settings.selected_gpu_uuid if settings.compute_mode == "gpu" else None
+        ),
+        expected_cuda_architecture=(
+            settings.selected_cuda_architecture
+            if settings.compute_mode == "gpu"
+            else None
+        ),
+        expected_cuda_toolkit_version=(
+            settings.selected_cuda_toolkit_version
+            if settings.compute_mode == "gpu"
+            else None
+        ),
     )
+    if settings.compute_mode == "cpu":
+        return replace(
+            report,
+            ready=True,
+            enforced=False,
+            selected_gpu_uuid=None,
+            gpus=(),
+            errors=(),
+        )
+    return report
 
 
 def _selected_model_id(
@@ -77,7 +98,13 @@ def _ensure_selected_models_fit_vram(
 ) -> bool:
     """Fail one queued job before model load when its locked VRAM floor cannot fit."""
 
-    if not stages or settings is None or report is None or not report.gpus:
+    if (
+        not stages
+        or settings is None
+        or settings.compute_mode == "cpu"
+        or report is None
+        or not report.gpus
+    ):
         return True
     available_vram_mib = report.gpus[0].memory_total_mib
     try:
@@ -191,7 +218,8 @@ def build_transcription_stage(
         recognizer_factory=lambda: FasterWhisperRecognizer(
             language_confidence_threshold=(
                 settings.asr_language_confidence_threshold
-            )
+            ),
+            device=settings.compute_mode,
         ),
         shutdown_requested=shutdown.is_set,
     )
@@ -216,6 +244,7 @@ def build_translation_stage(
         llama_max_output_tokens=settings.llama_max_output_tokens,
         llama_startup_timeout_seconds=settings.llama_startup_timeout_seconds,
         llama_request_timeout_seconds=settings.llama_request_timeout_seconds,
+        llama_gpu_layers=settings.llama_gpu_layers,
         shutdown_requested=shutdown.is_set,
     )
 
@@ -447,7 +476,7 @@ async def _worker_loop(
                 )
             if shutdown.is_set():
                 break
-            if time.monotonic() >= next_gpu_check:
+            if settings.compute_mode == "gpu" and time.monotonic() >= next_gpu_check:
                 try:
                     report = await asyncio.to_thread(_inspect_configured_gpu, settings)
                 except GpuPreflightError as error:
@@ -492,7 +521,7 @@ def main() -> None:
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Run only the GPU startup check and exit",
+        help="Run only the configured compute startup check and exit",
     )
     parser.add_argument("--poll-seconds", type=float, default=None)
     parser.add_argument("--gpu-recheck-seconds", type=float, default=30.0)
@@ -507,16 +536,14 @@ def main() -> None:
         _print_event("gpu.failed", report=report.model_dump(mode="json"))
         raise SystemExit(2) from error
     write_gpu_report(settings.gpu_report_path, report)
-    _print_event("gpu.ready", report=report.model_dump(mode="json"))
+    _print_event(
+        "compute.ready",
+        compute_mode=settings.compute_mode,
+        report=report.model_dump(mode="json"),
+    )
     if args.once:
         return
 
-    # No model provisioning, telemetry, API client, or acquisition adapter is
-    # imported after this point. Docker adds network_mode:none; native mode is
-    # additionally fail-closed for Python DNS/TCP through this audit hook.
-    install_offline_network_guard(
-        allowed_loopback_ports={settings.llama_server_port}
-    )
     shutdown = threading.Event()
     _install_signal_handlers(shutdown)
     poll_seconds = (
@@ -524,8 +551,17 @@ def main() -> None:
         if args.poll_seconds is not None
         else settings.offline_worker_poll_seconds
     )
+    # Windows' ProactorEventLoop creates a private loopback socketpair during
+    # initialization. Build that OS-internal wake-up channel before installing
+    # the fail-closed network audit hook; every subsequent Python DNS/TCP call
+    # remains blocked except the locked local llama-server port.
+    runner = asyncio.Runner()
     try:
-        asyncio.run(
+        runner.get_loop()
+        install_offline_network_guard(
+            allowed_loopback_ports={settings.llama_server_port}
+        )
+        runner.run(
             _worker_loop(
                 settings,
                 report,
@@ -536,6 +572,8 @@ def main() -> None:
         )
     except GpuPreflightError as error:
         raise SystemExit(2) from error
+    finally:
+        runner.close()
 
 
 if __name__ == "__main__":

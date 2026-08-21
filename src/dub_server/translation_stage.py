@@ -66,6 +66,7 @@ class TranslationStage:
         llama_server_port: int = 18081,
         llama_context_size: int = 2048,
         llama_max_output_tokens: int = 512,
+        llama_gpu_layers: int = -1,
         llama_startup_timeout_seconds: float = 180.0,
         llama_request_timeout_seconds: float = 120.0,
         translator_factory: TranslatorFactory | None = None,
@@ -97,6 +98,7 @@ class TranslationStage:
                     port=llama_server_port,
                     context_size=llama_context_size,
                     max_output_tokens=llama_max_output_tokens,
+                    gpu_layers=llama_gpu_layers,
                     startup_timeout_seconds=llama_startup_timeout_seconds,
                     request_timeout_seconds=llama_request_timeout_seconds,
                 )

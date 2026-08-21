@@ -1,14 +1,26 @@
 [CmdletBinding()]
 param(
-    [switch]$RequireRuntime
+    [switch]$RequireRuntime,
+    [ValidateSet("auto", "cpu", "gpu")]
+    [string]$ComputeMode = "auto"
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot "prerequisites.ps1")
 
 $context = Initialize-DubWindowsEnvironment
+$selectedComputeMode = $ComputeMode
+if ($selectedComputeMode -eq "auto") {
+    if ($env:DUB_COMPUTE_MODE -in @("cpu", "gpu")) {
+        $selectedComputeMode = $env:DUB_COMPUTE_MODE
+    } else {
+        $selectedComputeMode = Resolve-DubComputeMode -Requested "auto"
+    }
+}
 $checks = New-Object System.Collections.Generic.List[object]
+Update-DubProcessPath
 
 function Add-Check {
     param([string]$Name, [string]$Status, [string]$Message)
@@ -32,19 +44,34 @@ if (-not [Environment]::Is64BitOperatingSystem) {
     }
 }
 
-foreach ($commandName in @("python", "git", "cmake", "ninja", "ffmpeg", "ffprobe", "nvidia-smi", "nvcc")) {
+$pythonExecutable = Get-DubPythonExecutable
+if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
+    Add-Check "python" "error" "Khong tim thay Python 3.11/3.12 x64"
+} else {
+    Add-Check "python" "ok" $pythonExecutable
+}
+
+$requiredCommands = @("git.exe", "cmake.exe", "ninja.exe", "ffmpeg.exe", "ffprobe.exe")
+if ($selectedComputeMode -eq "gpu") {
+    $requiredCommands += @("nvidia-smi.exe", "nvcc.exe")
+}
+foreach ($commandName in $requiredCommands) {
     $command = Get-Command $commandName -ErrorAction SilentlyContinue
+    $checkName = $commandName.Replace(".exe", "")
     if ($null -eq $command) {
-        Add-Check $commandName "error" "Khong tim thay trong PATH"
+        Add-Check $checkName "error" "Khong tim thay trong PATH"
     } else {
-        Add-Check $commandName "ok" $command.Source
+        Add-Check $checkName "ok" $command.Source
     }
 }
 
 $gpuFields = $null
 $gpuArchitecture = $null
 try {
-    $pythonSummary = (& python -c "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')").Trim()
+    if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
+        throw "Can Python 3.11/3.12 x64"
+    }
+    $pythonSummary = (& $pythonExecutable -c "import struct,sys; print(f'{sys.version_info.major}.{sys.version_info.minor};{struct.calcsize(chr(80))*8}')").Trim()
     $pythonFields = $pythonSummary -split ";"
     if ($pythonFields.Count -ne 2 -or $pythonFields[0] -notin @("3.11", "3.12") -or $pythonFields[1] -ne "64") {
         throw "Can Python 3.11/3.12 x64; hien tai $pythonSummary"
@@ -55,9 +82,9 @@ try {
 }
 
 try {
-    $ramBytes = [long](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+    $ramBytes = Get-DubInstalledMemoryBytes
     if ($ramBytes -lt 16GB) {
-        throw "Can it nhat 16 GiB RAM; hien tai $([Math]::Round($ramBytes / 1GB, 1)) GiB"
+        throw "Can it nhat 16 GiB RAM vat ly; hien tai $([Math]::Round($ramBytes / 1GB, 1)) GiB"
     }
     Add-Check "ram" "ok" "$([Math]::Round($ramBytes / 1GB, 1)) GiB"
 } catch {
@@ -76,6 +103,7 @@ if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
     }
 }
 
+if ($selectedComputeMode -eq "gpu") {
 try {
     $gpuLine = (& nvidia-smi --query-gpu=uuid,name,driver_version,memory.total,compute_cap --format=csv,noheader,nounits | Select-Object -First 1)
     if ([string]::IsNullOrWhiteSpace($gpuLine)) {
@@ -131,18 +159,28 @@ if ($null -ne $gpuFields -and $null -ne $gpuArchitecture) {
         Add-Check "cuda-compat" "error" $_.Exception.Message
     }
 }
+} else {
+    Add-Check "compute" "ok" "CPU compatibility mode; CUDA khong bat buoc"
+}
 
 if ($RequireRuntime) {
     if (Test-Path -LiteralPath $context.VenvPython -PathType Leaf) {
         Add-Check "venv" "ok" $context.VenvPython
         try {
-            $probe = & $context.VenvPython -c "from dub_server.gpu import inspect_gpu; r=inspect_gpu(require_gpu=True); print(r.gpus[0].name)" 2>&1
+            if ($selectedComputeMode -eq "gpu") {
+                $probeScript = "from dub_server.gpu import inspect_gpu; r=inspect_gpu(require_gpu=True); print(r.gpus[0].name)"
+                $probeName = "python-gpu"
+            } else {
+                $probeScript = "import torch,ctranslate2; assert not torch.cuda.is_available() and 'int8' in ctranslate2.get_supported_compute_types('cpu'); print('CPU int8')"
+                $probeName = "python-cpu"
+            }
+            $probe = & $context.VenvPython -c $probeScript 2>&1
             if ($LASTEXITCODE -ne 0) {
                 throw ($probe -join [Environment]::NewLine)
             }
-            Add-Check "python-gpu" "ok" ($probe | Select-Object -Last 1)
+            Add-Check $probeName "ok" ($probe | Select-Object -Last 1)
         } catch {
-            Add-Check "python-gpu" "error" $_.Exception.Message
+            Add-Check "python-runtime" "error" $_.Exception.Message
         }
     } else {
         Add-Check "venv" "error" "Chua chay windows\install.ps1"

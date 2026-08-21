@@ -404,6 +404,47 @@ def test_tiger_subprocess_preserves_parent_gpu_visibility_contract(
     assert subprocess_environments[0]["CUDA_VISIBLE_DEVICES"] == expected_visibility
 
 
+def test_tiger_cpu_mode_does_not_force_cuda_visibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    model = tmp_path / "model"
+    model.mkdir()
+    source = tmp_path / "source.wav"
+    _write_wav(source)
+    work = tmp_path / "work"
+    work.mkdir()
+    captured: dict[str, object] = {}
+
+    async def process_factory(*command: str, **kwargs: object):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return CompletingProcess(Path(command[command.index("--output") + 1]))
+
+    runner = TigerDnrSubprocessRunner(
+        model_path=model,
+        model_id="tiger",
+        model_tree_sha256=MODEL_HASH,
+        device="cpu",
+        process_factory=process_factory,
+    )
+    result = asyncio.run(
+        runner.run(
+            SeparationBackendRequest(source, work, work / "accompaniment.wav")
+        )
+    )
+
+    command = captured["command"]
+    environment = captured["environment"]
+    assert isinstance(command, tuple)
+    assert command[command.index("--device") + 1] == "cpu"
+    assert isinstance(environment, dict)
+    assert "CUDA_VISIBLE_DEVICES" not in environment
+    assert result.metrics["device"] == "cpu"
+    assert result.metrics["cuda_device"] is None
+
+
 def test_tiger_runner_reports_bounded_chunk_progress(tmp_path: Path) -> None:
     model = tmp_path / "model"
     model.mkdir()

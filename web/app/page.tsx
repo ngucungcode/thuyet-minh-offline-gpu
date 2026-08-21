@@ -17,6 +17,7 @@ type GpuSupportTier = "supported" | "maintenance-limited" | "experimental";
 type Health = {
   status: "ok" | "degraded" | "error";
   api_version?: string;
+  compute_mode?: "cpu" | "gpu";
   database?: { status?: string; journal_mode?: string };
   model_catalog?: { count?: number; status?: string };
   acquisition_configured?: boolean;
@@ -1436,8 +1437,9 @@ export default function Home() {
     }
   }
 
+  const cpuMode = health?.compute_mode === "cpu";
   const gpuDevices = health?.gpu?.gpus ?? [];
-  const gpuWarnings = (health?.gpu?.warnings ?? [])
+  const gpuWarnings = (cpuMode ? [] : health?.gpu?.warnings ?? [])
     .filter((warning): warning is string => typeof warning === "string" && warning.trim().length > 0)
     .map(gpuWarningMessage);
   const gpuSupportTier = health?.gpu?.support_tier ?? null;
@@ -1446,8 +1448,8 @@ export default function Home() {
     "maintenance-limited": "Bảo trì giới hạn",
     experimental: "Thử nghiệm",
   };
-  const gpuSupportHasRestrictions =
-    gpuSupportTier === "maintenance-limited" || gpuSupportTier === "experimental";
+  const gpuSupportHasRestrictions = !cpuMode &&
+    (gpuSupportTier === "maintenance-limited" || gpuSupportTier === "experimental");
   const apiConnected = health !== null;
   const gpuReady = health?.gpu?.ready === true;
   const gpuHasWarnings = gpuWarnings.length > 0;
@@ -1463,8 +1465,10 @@ export default function Home() {
         ? "Máy xử lý có cảnh báo"
       : gpuReady
         ? "Máy xử lý cần cấu hình"
-        : "GPU chưa sẵn sàng";
-  const gpuHeading = gpuDevices.length === 1
+        : cpuMode ? "CPU chưa sẵn sàng" : "GPU chưa sẵn sàng";
+  const gpuHeading = cpuMode
+    ? "CPU compatibility mode"
+    : gpuDevices.length === 1
     ? gpuDevices[0].name || "GPU NVIDIA CUDA"
     : gpuDevices.length > 1
       ? `${gpuDevices.length} GPU NVIDIA CUDA`
@@ -1508,7 +1512,7 @@ export default function Home() {
 
       <section className="hero" id="top">
         <div className="hero-copy">
-          <p className="eyebrow">THUYẾT MINH NGOẠI TUYẾN · NVIDIA CUDA</p>
+          <p className="eyebrow">THUYẾT MINH NGOẠI TUYẾN · CPU / NVIDIA CUDA</p>
           <h1>Biến một bản phim thành bản thuyết minh Việt.</h1>
           <p className="lead">
             Tách lời diễn viên, giữ nhạc và hiệu ứng, dịch cục bộ rồi dựng lại một track
@@ -1519,7 +1523,7 @@ export default function Home() {
           <span className="machine-label">MÁY XỬ LÝ</span>
           <strong>{gpuHeading}</strong>
           <div className="machine-meta">
-            <span>{gpuDevices.length ? `${gpuDevices.length} GPU được phát hiện` : "Đang kiểm tra GPU"}</span>
+            <span>{cpuMode ? "CUDA đã tắt · chế độ rất chậm" : gpuDevices.length ? `${gpuDevices.length} GPU được phát hiện` : "Đang kiểm tra GPU"}</span>
             <span>{validModelCount}/{catalog.models.length} model sẵn sàng</span>
           </div>
           {gpuDevices.length > 0 && (
@@ -1541,8 +1545,8 @@ export default function Home() {
             </div>
           )}
           <div className="machine-flags">
-            <span className={gpuReady ? "ok" : "warn"}>GPU {gpuReady ? "sẵn sàng" : "chưa sẵn sàng"}</span>
-            {gpuReady && (
+            <span className={gpuReady ? "ok" : "warn"}>{cpuMode ? "CPU" : "GPU"} {gpuReady ? "sẵn sàng" : "chưa sẵn sàng"}</span>
+            {gpuReady && !cpuMode && (
               <span className={gpuSupportTier === "supported" ? "ok" : "warn"}>
                 Mức hỗ trợ: {gpuSupportTier ? gpuSupportTierLabel[gpuSupportTier] : "Không xác định"}
               </span>
@@ -1966,9 +1970,9 @@ export default function Home() {
                     ? uploadPhaseLabels[uploadProgress.phase]
                     : "Đang tạo job…"
                   : activeJob
-                    ? "GPU đang bận"
+                    ? "Máy xử lý đang bận"
                     : !gpuReady
-                      ? apiConnected ? "GPU chưa sẵn sàng" : "Đang kiểm tra GPU"
+                      ? apiConnected ? `${cpuMode ? "CPU" : "GPU"} chưa sẵn sàng` : "Đang kiểm tra máy xử lý"
                     : sourceMode === "upload" && subtitleFile && sourceLanguage === "auto"
                       ? "Hãy chọn ngôn ngữ của SRT"
                       : "Bắt đầu thuyết minh"

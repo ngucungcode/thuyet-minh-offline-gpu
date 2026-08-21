@@ -5,6 +5,21 @@ function Get-DubProjectRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 
+function Get-DubInstalledMemoryBytes {
+    try {
+        $memoryModules = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)
+        $installedBytes = [long](($memoryModules | Measure-Object -Property Capacity -Sum).Sum)
+        if ($installedBytes -gt 0) {
+            return $installedBytes
+        }
+    } catch {
+        # Some managed Windows environments block Win32_PhysicalMemory. Fall back
+        # to the OS-visible total so preflight can still report a useful result.
+    }
+
+    return [long](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory
+}
+
 function Set-DubProcessEnvironmentDefault {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -79,6 +94,7 @@ function Initialize-DubWindowsEnvironment {
     Set-DubProcessEnvironmentDefault -Name "DUB_JOBS_DIR" -Value (Join-Path $nativeRoot "data\jobs")
     Set-DubProcessEnvironmentDefault -Name "DUB_OUTPUT_DIR" -Value (Join-Path $nativeRoot "data\output")
     Set-DubProcessEnvironmentDefault -Name "DUB_GPU_REPORT_PATH" -Value (Join-Path $nativeRoot "state\gpu-health.json")
+    Set-DubProcessEnvironmentDefault -Name "DUB_COMPUTE_MODE" -Value "gpu"
     Set-DubProcessEnvironmentDefault -Name "DUB_PROWLARR_API_KEY_FILE" -Value (Join-Path $nativeRoot "secrets\prowlarr_api_key")
     Set-DubProcessEnvironmentDefault -Name "DUB_QBITTORRENT_PASSWORD_FILE" -Value (Join-Path $nativeRoot "secrets\qbittorrent_password")
     Set-DubProcessEnvironmentDefault -Name "DUB_OPENSUBTITLES_API_KEY_FILE" -Value (Join-Path $nativeRoot "secrets\opensubtitles_api_key")
@@ -103,6 +119,7 @@ function Initialize-DubWindowsEnvironment {
     Set-DubProcessEnvironmentDefault -Name "VIENEU_CODEC_PATH" -Value (Join-Path $nativeRoot "models\tts\support\neucodec-onnx-int8")
     Set-DubProcessEnvironmentDefault -Name "DUB_LLAMA_SERVER_BINARY" -Value (Join-Path $nativeRoot "opt\llama.cpp\llama-server.exe")
     Set-DubProcessEnvironmentDefault -Name "DUB_LLAMA_SERVER_PORT" -Value "18081"
+    Set-DubProcessEnvironmentDefault -Name "DUB_LLAMA_GPU_LAYERS" -Value "-1"
 
     if ($env:DUB_API_HOST -ne "127.0.0.1") {
         throw "Windows MVP chi cho phep DUB_API_HOST=127.0.0.1"

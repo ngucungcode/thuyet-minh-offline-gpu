@@ -76,6 +76,67 @@ def test_worker_forwards_installed_cuda_toolkit_to_preflight(
     assert captured["expected_cuda_toolkit_version"] == "12.6"
 
 
+def test_worker_cpu_mode_turns_gpu_failures_into_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    unavailable = ComponentStatus(available=False, detail="CUDA unavailable")
+    report = GpuPreflightReport(
+        ready=False,
+        enforced=False,
+        checked_at="2026-08-19T00:00:00Z",
+        minimum_driver="570.26",
+        minimum_compute_capability="7.0",
+        supported_cuda_architectures=("sm_75",),
+        minimum_vram_mib=6144,
+        selected_gpu_uuid="GPU-mx250",
+        gpus=(
+            NvidiaGpu(
+                uuid="GPU-mx250",
+                name="NVIDIA GeForce MX250",
+                driver_version="511.69",
+                memory_total_mib=2048,
+                compute_capability="6.1",
+            ),
+        ),
+        torch=unavailable,
+        ctranslate2=unavailable,
+        errors=(),
+        warnings=("unsupported GPU",),
+    )
+
+    def fake_inspect_gpu(**kwargs):
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(worker_module, "inspect_gpu", fake_inspect_gpu)
+    result = worker_module._inspect_configured_gpu(Settings(compute_mode="cpu"))
+
+    assert captured["require_gpu"] is False
+    assert result.ready is True
+    assert result.enforced is False
+    assert result.gpus == ()
+    assert result.warnings == ("unsupported GPU",)
+
+
+def test_worker_cpu_mode_skips_vram_model_guard(tmp_path) -> None:
+    store = StateStore(tmp_path / "jobs.sqlite3")
+    job_id = _ready_offline(store)
+    settings = Settings(
+        compute_mode="cpu",
+        models_lock_path=tmp_path / "missing-models.lock.json",
+        models_dir=tmp_path / "models",
+    )
+
+    assert worker_module._ensure_selected_models_fit_vram(
+        store,
+        store.get_job(job_id),
+        settings=settings,
+        report=_ready_gpu_report(vram_mib=2048),
+        stages=("asr",),
+    )
+
+
 @pytest.mark.asyncio
 async def test_worker_dispatches_one_ready_transcript_job(tmp_path) -> None:
     store = StateStore(tmp_path / "jobs.sqlite3")

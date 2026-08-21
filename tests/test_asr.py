@@ -99,6 +99,31 @@ def test_recognizer_uses_verified_local_path_and_cuda(tmp_path: Path) -> None:
     assert progress == [(1_250_000, 1), (2_000_000, 2)]
 
 
+def test_recognizer_supports_cpu_int8(tmp_path: Path) -> None:
+    media, model_path = _paths(tmp_path)
+    fake = FakeModel(
+        [SimpleNamespace(start=0.0, end=1.0, text="hello")],
+        SimpleNamespace(language="en", language_probability=1.0),
+    )
+    calls: list[dict[str, object]] = []
+
+    def factory(*_args: object, **kwargs: object) -> FakeModel:
+        calls.append(kwargs)
+        return fake
+
+    FasterWhisperRecognizer(model_factory=factory, device="cpu").transcribe(
+        media,
+        model_path=model_path,
+        model_id="asr-small",
+        compute_type="int8",
+        language="en",
+        duration_us=1_000_000,
+    )
+
+    assert calls[0]["device"] == "cpu"
+    assert calls[0]["compute_type"] == "int8"
+
+
 def test_auto_language_below_threshold_requires_user_selection(tmp_path: Path) -> None:
     media, model_path = _paths(tmp_path)
     fake = FakeModel(

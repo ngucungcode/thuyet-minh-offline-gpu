@@ -403,6 +403,7 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
 
     assert health.status_code == 200
     assert health.json()["status"] == "degraded"
+    assert health.json()["compute_mode"] == "gpu"
     assert health.json()["database"]["journal_mode"] == "wal"
     assert health.json()["gpu"]["support_tier"] is None
     assert capabilities.json()["offline_inference"] is True
@@ -418,6 +419,18 @@ def test_health_capabilities_and_models_are_local(tmp_path: Path, monkeypatch) -
     }
     assert models.json()["models"][0]["id"] == "asr-small"
     assert models.json()["models"][0]["valid"] is False
+
+
+def test_health_exposes_cpu_compatibility_mode(tmp_path: Path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    settings = settings.model_copy(update={"compute_mode": "cpu"})
+    client, _, _ = _client(tmp_path, monkeypatch, settings=settings)
+
+    with client:
+        response = client.get("/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["compute_mode"] == "cpu"
 
 
 @pytest.mark.parametrize(

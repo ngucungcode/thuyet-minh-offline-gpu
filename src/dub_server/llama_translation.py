@@ -190,6 +190,7 @@ class LlamaServerTranslator:
         port: int = 18081,
         context_size: int = 2048,
         max_output_tokens: int = 512,
+        gpu_layers: int = -1,
         startup_timeout_seconds: float = 120.0,
         request_timeout_seconds: float = 120.0,
         shutdown_timeout_seconds: float = 5.0,
@@ -228,6 +229,12 @@ class LlamaServerTranslator:
             or max_output_tokens + 128 >= context_size
         ):
             raise ValueError("Gi\u1edbi h\u1ea1n token \u0111\u1ea7u ra kh\u00f4ng h\u1ee3p l\u1ec7")
+        if (
+            isinstance(gpu_layers, bool)
+            or not isinstance(gpu_layers, int)
+            or not -1 <= gpu_layers <= 999
+        ):
+            raise ValueError("Số layer GPU llama-server không hợp lệ")
         _require_positive_finite(startup_timeout_seconds, "startup_timeout_seconds")
         _require_positive_finite(request_timeout_seconds, "request_timeout_seconds")
         _require_positive_finite(shutdown_timeout_seconds, "shutdown_timeout_seconds")
@@ -253,6 +260,7 @@ class LlamaServerTranslator:
         self._port = port
         self._context_size = context_size
         self._max_output_tokens = max_output_tokens
+        self._gpu_layers = gpu_layers
         self._startup_timeout = float(startup_timeout_seconds)
         self._request_timeout = float(request_timeout_seconds)
         self._shutdown_timeout = float(shutdown_timeout_seconds)
@@ -289,7 +297,7 @@ class LlamaServerTranslator:
             "--ctx-size",
             str(self._context_size),
             "--n-gpu-layers",
-            "all",
+            "all" if self._gpu_layers == -1 else str(self._gpu_layers),
             "--parallel",
             "1",
             "--no-webui",
